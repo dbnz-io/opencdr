@@ -1,0 +1,84 @@
+name: Tag and Release
+
+# Runs on the PUBLIC dbnz-io/opencdr repo -- promoted there alongside
+# ci.yml by opencdr-internal's promote-to-public.yml (see that workflow
+# and docs/promoting-to-public.md in opencdr-internal for the full
+# picture). This is the second half of a promotion: the internal workflow
+# only opens a release/vX.Y.Z -> main PR, never pushes to main or creates
+# a tag/release directly. This job finishes the job, but only once a human
+# actually merges that PR -- same trust model as any other change to this
+# repo. Uses the default GITHUB_TOKEN; no cross-repo secret needed since
+# this runs natively on the repo being tagged.
+
+on:
+  pull_request:
+    types: [closed]
+    branches: [main]
+
+permissions:
+  contents: write
+  pull-requests: read
+
+jobs:
+  tag-release:
+    if: >
+      github.event.pull_request.merged == true &&
+      startsWith(github.event.pull_request.head.ref, 'release/')
+    name: Tag and create release
+    runs-on: ubuntu-latest
+    steps:
+      # persist-credentials: false -- this job holds contents: write, and
+      # checkout's default behavior would otherwise embed that token in
+      # .git/config for the rest of the job, readable by any later step.
+      # Not needed: every git/gh operation below authenticates explicitly
+      # instead (gh auth setup-git ahead of the one plain `git push`, and
+      # GH_TOKEN for the gh commands).
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Derive version from branch name
+        env:
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+        run: |
+          VERSION="${HEAD_REF#release/}"
+          if [[ ! "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "ERROR: branch name '${HEAD_REF}' didn't yield a valid SemVer version (got '${VERSION}')"
+            exit 1
+          fi
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+
+      - name: Refuse to overwrite an existing tag
+        run: |
+          if git rev-parse "$VERSION" >/dev/null 2>&1; then
+            echo "ERROR: tag ${VERSION} already exists -- refusing to move it."
+            exit 1
+          fi
+
+      - name: Tag the merge commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          gh auth setup-git
+          git tag -a "$VERSION" -m "$VERSION"
+          git push origin "$VERSION"
+
+      # The PR body carries the release notes the internal workflow wrote
+      # (see promote-to-public.yml's own header on why that's passed via a
+      # file, not a spliced ${{ }} expression, to avoid re-triggering the
+      # exact quoting bug that motivated this in the first place). Pulled
+      # via `gh pr view` rather than the webhook payload's body field so
+      # this also works correctly if the PR was edited after opening.
+      - name: Create release from the PR body
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          gh pr view "$PR_NUMBER" --json body -q .body > /tmp/release-notes.md
+          gh release create "$VERSION" \
+            --title "$VERSION" \
+            --notes-file /tmp/release-notes.md
