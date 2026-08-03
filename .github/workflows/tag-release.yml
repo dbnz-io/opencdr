@@ -27,10 +27,17 @@ jobs:
     name: Tag and create release
     runs-on: ubuntu-latest
     steps:
+      # persist-credentials: false -- this job holds contents: write, and
+      # checkout's default behavior would otherwise embed that token in
+      # .git/config for the rest of the job, readable by any later step.
+      # Not needed: every git/gh operation below authenticates explicitly
+      # instead (gh auth setup-git ahead of the one plain `git push`, and
+      # GH_TOKEN for the gh commands).
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           ref: main
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Derive version from branch name
         env:
@@ -51,9 +58,12 @@ jobs:
           fi
 
       - name: Tag the merge commit
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
+          gh auth setup-git
           git tag -a "$VERSION" -m "$VERSION"
           git push origin "$VERSION"
 
