@@ -67,6 +67,19 @@ jobs:
           git tag -a "$VERSION" -m "$VERSION"
           git push origin "$VERSION"
 
+      # Generated here, not in ci.yml on every push -- a rolling, 90-day
+      # artifact from a `main` push isn't tied to anything a consumer
+      # would actually reference. This one is: it reflects exactly the
+      # dependency state of the commit just tagged, and lives permanently
+      # as a release asset. (GitHub's own Insights -> Dependency graph ->
+      # Export SBOM button already covers "what does main look like right
+      # now" with zero extra maintenance -- no need to duplicate that
+      # here.)
+      - name: Generate SBOM
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh api "/repos/${{ github.repository }}/dependency-graph/sbom" > "sbom-${VERSION}.json"
+
       # The PR body carries the release notes the internal workflow wrote
       # (see promote-to-public.yml's own header on why that's passed via a
       # file, not a spliced ${{ }} expression, to avoid re-triggering the
@@ -79,6 +92,6 @@ jobs:
           PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
           gh pr view "$PR_NUMBER" --json body -q .body > /tmp/release-notes.md
-          gh release create "$VERSION" \
+          gh release create "$VERSION" "sbom-${VERSION}.json" \
             --title "$VERSION" \
             --notes-file /tmp/release-notes.md
