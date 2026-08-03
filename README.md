@@ -1,10 +1,10 @@
-# OpenCDR.
+# OpenCDR
 
 [![CI](https://github.com/dbnz-io/opencdr/actions/workflows/ci.yml/badge.svg)](https://github.com/dbnz-io/opencdr/actions/workflows/ci.yml)
 ![Coverage](coverage-badge.svg)
 [![License: MPL 2.0](https://img.shields.io/badge/License-MPL_2.0-brightgreen.svg)](https://opensource.org/licenses/MPL-2.0)
 
-Open-source Cloud Detection & Response for AWS. OpenCDR ingests CloudTrail and GuardDuty events, runs them through a configurable detection and correlation engine, and delivers alerts to Slack, Discord, Email, AWS Security Hub, Jira, or any custom HTTPS webhook — with optional automated incident response.
+Open-source event-driven Cloud Detection & Response for AWS. OpenCDR ingests CloudTrail and GuardDuty events, evaluates them against configurable detection rules, correlates related activity, and delivers alerts to Slack, Discord, Email, AWS Security Hub, Jira, or any HTTPS webhook—with optional automated incident response.
 
 📚 This README is the fast-start overview and copy-paste command reference. For the deep-reference documentation — architecture, security model, and a "find what you need" index — see **[`docs/`](docs/README.md)**.
 
