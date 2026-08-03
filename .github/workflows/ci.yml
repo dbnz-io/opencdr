@@ -199,7 +199,7 @@ jobs:
         run: npm ci
 
       - name: Configure AWS credentials (OIDC, no long-lived keys)
-        uses: aws-actions/configure-aws-credentials@v4
+        uses: aws-actions/configure-aws-credentials@v6
         with:
           role-to-assume: ${{ vars.OPENCDR_CI_DEPLOY_ROLE_ARN }}
           role-session-name: opencdr-ci-deploy
@@ -256,7 +256,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Configure AWS credentials (OIDC, no long-lived keys)
-        uses: aws-actions/configure-aws-credentials@v4
+        uses: aws-actions/configure-aws-credentials@v6
         with:
           role-to-assume: ${{ vars.OPENCDR_CI_DEPLOY_ROLE_ARN }}
           role-session-name: opencdr-ci-post-deploy-check
