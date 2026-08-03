@@ -131,7 +131,7 @@ jobs:
     runs-on: ubuntu-latest
     needs: [validate-rules]
     permissions:
-      contents: write
+      contents: read
 
     strategy:
       fail-fast: false
@@ -151,18 +151,22 @@ jobs:
       - name: Run tests
         run: pytest tests/ -v --cov=src --cov-report=xml
 
+      # Generated as a downloadable artifact, not committed to main --
+      # main is branch-protected (PR review required), and a direct
+      # `git push` from this job would fail every time against that
+      # protection. Grab the artifact from a completed run and commit it
+      # by hand (or via a PR) if you want the badge to actually update in
+      # the README.
       - name: Generate coverage badge
         if: matrix.python-version == '3.12' && github.ref == 'refs/heads/main'
         run: |
           pip install genbadge[coverage]
           genbadge coverage -i coverage.xml -o coverage-badge.svg
 
-      - name: Commit coverage badge
+      - name: Upload coverage badge artifact
         if: matrix.python-version == '3.12' && github.ref == 'refs/heads/main'
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add coverage-badge.svg
-          git diff --staged --quiet || git commit -m "chore: update coverage badge [skip ci]"
-          git pull --rebase
-          git push
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-badge
+          path: coverage-badge.svg
+          retention-days: 90
