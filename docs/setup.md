@@ -130,7 +130,6 @@ Fires sample events at the deployed stack and confirms signals are produced. Als
 
 ## What this guide doesn't cover
 
-- **Publishing a release of OpenCDR itself** (as opposed to setting up *your own deployment* of it) is a separate, maintainer-facing process — see [`promoting-to-public.md`](promoting-to-public.md). Not something a new deployment needs to think about.
 - **Writing your own detection rules** beyond the bundled 23 — see [Detection Rules](detection-rules.md) and [Writing Detection Rules](../README.md#writing-detection-rules).
 
 ## Related pages

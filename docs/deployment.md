@@ -70,9 +70,6 @@ And enables CloudFormation stack termination protection automatically as the las
 4. **If you need cross-account IR**, onboard each additional account — see [Incident Response](incident-response.md). Single-account deployments need nothing here.
 5. **If your account operates in more than one region**, onboard each additional region: `./scripts/setup_region_forwarding.sh --stage dev --regions <region1>,<region2>`. Without this, activity outside the deployment region never generates a signal. See [Cross-Region Event Forwarding](region-forwarding.md).
 
-## Promoting to the public repo
-
-This repo (`opencdr-internal`) is where development happens. Released versions are published to the public `dbnz-io/opencdr` repo via a separate, manual, on-demand workflow — clean-slate (no private git history crosses over) and independently versioned from this repo's own. See [`docs/promoting-to-public.md`](promoting-to-public.md).
 
 ## Related pages
 
@@ -81,5 +78,4 @@ This repo (`opencdr-internal`) is where development happens. Released versions a
 - [Observability](observability.md) — the dashboard/metrics/traces/alarms every deploy includes
 - [`ci-bootstrap/README.md`](../ci-bootstrap/README.md) — OIDC role setup in full
 - [`docs/stack-protection.md`](stack-protection.md) — termination protection and drift detection
-- [`docs/promoting-to-public.md`](promoting-to-public.md) — publishing a release to the public repo
 - [Cross-Region Event Forwarding](region-forwarding.md) — onboarding additional regions

@@ -10,7 +10,7 @@
 
 **Do not open a public GitHub issue for security vulnerabilities.**
 
-Please report them privately via [GitHub Security Advisories](https://github.com/dbnz-io/opencdr-internal/security/advisories/new).
+Please report them privately via [GitHub Security Advisories](https://github.com/dbnz-io/opencdr/security/advisories/new).
 
 Include as much detail as possible:
 - Description of the vulnerability

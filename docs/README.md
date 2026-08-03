@@ -19,7 +19,6 @@ This is the deep-reference documentation set. For a fast-start overview and copy
 - [Glossary](glossary.md) — terms used throughout these pages, defined the way this codebase actually uses them
 - [`ir-role.md`](ir-role.md) — full IAM walkthrough for onboarding additional AWS accounts for cross-account incident response
 - [`stack-protection.md`](stack-protection.md) — CloudFormation termination protection and drift detection
-- [`promoting-to-public.md`](promoting-to-public.md) — publishing a release from this repo to the public `dbnz-io/opencdr` repo
 - [`region-forwarding.md`](region-forwarding.md) — why OpenCDR is blind outside its deployment region by default, and how to fix it
 
 ## Find what you need
@@ -56,7 +55,6 @@ This is the deep-reference documentation set. For a fast-start overview and copy
 | How do I know what OpenCDR itself costs to run? | [Observability](observability.md#the-monthly-cost-budget-reuses-this-same-path) |
 | How is CI/CD wired, and what happens on a push to `main`? | [Deployment](deployment.md#cicd-github-actions-oidc) |
 | How do I protect the stack from accidental deletion? | [`stack-protection.md`](stack-protection.md#termination-protection) |
-| How do I publish a release to the public repo? | [`promoting-to-public.md`](promoting-to-public.md) |
 | How do I forward alerts to Datadog, Splunk, or another SIEM? | [SIEM Integrations](siem-integrations.md) |
 | What DynamoDB tables and SQS queues exist, and who reads/writes them? | [Architecture](architecture.md#dynamodb-tables) |
 | What does "outbox pattern" mean here specifically? | [Glossary](glossary.md#outbox-pattern) |

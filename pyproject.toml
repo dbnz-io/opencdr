@@ -15,8 +15,8 @@ dependencies = [
 ]
 
 [project.urls]
-Repository = "https://github.com/dbnz-io/opencdr-internal"
-Issues = "https://github.com/dbnz-io/opencdr-internal/issues"
+Repository = "https://github.com/dbnz-io/opencdr"
+Issues = "https://github.com/dbnz-io/opencdr/issues"
 
 [tool.ruff]
 target-version = "py312"

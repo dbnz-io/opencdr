@@ -1,6 +1,6 @@
 # OpenCDR.
 
-[![CI](https://github.com/dbnz-io/opencdr-internal/actions/workflows/ci.yml/badge.svg)](https://github.com/dbnz-io/opencdr-internal/actions/workflows/ci.yml)
+[![CI](https://github.com/dbnz-io/opencdr/actions/workflows/ci.yml/badge.svg)](https://github.com/dbnz-io/opencdr/actions/workflows/ci.yml)
 ![Coverage](coverage-badge.svg)
 [![License: MPL 2.0](https://img.shields.io/badge/License-MPL_2.0-brightgreen.svg)](https://opensource.org/licenses/MPL-2.0)
 
@@ -26,7 +26,6 @@ Open-source Cloud Detection & Response for AWS. OpenCDR ingests CloudTrail and G
   - [Multi-region coverage](#multi-region-coverage)
   - [Environment variables](#environment-variables)
   - [CI/CD deployment (OIDC, no long-lived keys)](#cicd-deployment-oidc-no-long-lived-keys)
-  - [Promoting a release to the public repo](#promoting-a-release-to-the-public-repo)
 - [OpenCDR CLI](#opencdr-cli)
   - [Quick start](#quick-start)
   - [Commands](#commands)
@@ -308,13 +307,6 @@ rather than pulling it into a local file by hand — that's exactly how a
 real key ended up committed to this repo once already (see `.opencdr.json`
 in git history, since removed).
 
-### Promoting a release to the public repo
-
-This repo (`opencdr-internal`) is where development happens; released
-versions are published to the public `dbnz-io/opencdr` repo via a
-manual, on-demand workflow — see
-[`docs/promoting-to-public.md`](docs/promoting-to-public.md) for the
-one-time setup and how to run it.
 
 ---
 
