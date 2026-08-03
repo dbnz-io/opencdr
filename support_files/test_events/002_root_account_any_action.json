@@ -1,0 +1,22 @@
+{
+  "detail-type": "AWS API Call via CloudTrail",
+  "source": "aws.s3",
+  "account": "123456789012",
+  "region": "us-east-1",
+  "detail": {
+    "eventTime": "2026-01-01T12:00:00Z",
+    "eventSource": "s3.amazonaws.com",
+    "eventName": "ListBuckets",
+    "awsRegion": "us-east-1",
+    "sourceIPAddress": "203.0.113.1",
+    "userAgent": "aws-cli/2.x",
+    "eventID": "test-evt-002",
+    "recipientAccountId": "123456789012",
+    "userIdentity": {
+      "type": "Root",
+      "principalId": "123456789012",
+      "arn": "arn:aws:iam::123456789012:root",
+      "accountId": "123456789012"
+    }
+  }
+}

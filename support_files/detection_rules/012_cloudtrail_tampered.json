@@ -1,0 +1,16 @@
+{
+  "rule_id": "012_cloudtrail_tampered",
+  "rule_kind": "signal",
+  "created_by": "opencdr",
+  "description": "CloudTrail logging stopped, deleted, or updated. Attackers disable CloudTrail as a first step to hide their activity.",
+  "enabled": true,
+  "severity": "CRITICAL",
+  "notify": true,
+  "response_module": "",
+  "playbook": "Re-enable CloudTrail logging immediately. Treat this as an active incident — an attacker attempting to blind your detection capability. Review all IAM activity in the window between the stop and re-enable. Check if other logging services (Config, GuardDuty) were also tampered with.",
+  "version": 1,
+  "conditions": [
+    { "field": "activity_name", "op": "in", "value": ["StopLogging", "DeleteTrail", "UpdateTrail"] },
+    { "field": "api.service", "op": "equals", "value": "cloudtrail.amazonaws.com" }
+  ]
+}

@@ -1,0 +1,16 @@
+{
+  "rule_id": "004_root_access_key_created",
+  "rule_kind": "signal",
+  "created_by": "opencdr",
+  "description": "Access key created for the root account. Root access keys are a critical security risk and should never exist.",
+  "enabled": true,
+  "severity": "CRITICAL",
+  "notify": true,
+  "response_module": "disable_access_key",
+  "playbook": "Immediately disable and delete the newly created root access key. Root access keys must not exist per AWS security best practices. Treat this as a compromise event — review who performed the action and audit all recent root activity.",
+  "version": 1,
+  "conditions": [
+    { "field": "actor.type", "op": "equals", "value": "Root" },
+    { "field": "activity_name", "op": "equals", "value": "CreateAccessKey" }
+  ]
+}

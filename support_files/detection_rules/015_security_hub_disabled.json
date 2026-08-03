@@ -1,0 +1,16 @@
+{
+  "rule_id": "015_security_hub_disabled",
+  "rule_kind": "signal",
+  "created_by": "opencdr",
+  "description": "AWS Security Hub disabled. Removes aggregated security findings visibility.",
+  "enabled": true,
+  "severity": "HIGH",
+  "notify": true,
+  "response_module": "",
+  "playbook": "Re-enable Security Hub and review the principal that disabled it. Check if GuardDuty or Config were also disabled (look for correlated signals). This action combined with other defense evasion signals is a strong indicator of an active intrusion.",
+  "version": 1,
+  "conditions": [
+    { "field": "activity_name", "op": "equals", "value": "DisableSecurityHub" },
+    { "field": "api.service", "op": "equals", "value": "securityhub.amazonaws.com" }
+  ]
+}

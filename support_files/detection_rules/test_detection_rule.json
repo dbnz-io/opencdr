@@ -1,0 +1,16 @@
+{
+  "rule_id": "002_identity_console_login_no_mfa_success",
+  "rule_kind": "signal",
+  "created_by": "opencdr",
+  "updated_by": "opencdr",
+  "description": "Detect successful console login where MFA was not used.",
+  "enabled": true,
+  "severity": "HIGH",
+  "notify": true,
+  "response_module": "",
+  "playbook": "Verify user and source IP. If suspicious, revoke sessions, rotate keys where applicable, enforce MFA, and review CloudTrail around the login for privilege changes and persistence.",
+  "version": 1,
+  "conditions": [
+    { "field": "activity_name", "op": "equals", "value": "ConsoleLogin" }
+  ]
+}

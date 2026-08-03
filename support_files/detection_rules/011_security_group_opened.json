@@ -1,0 +1,16 @@
+{
+  "rule_id": "011_security_group_opened",
+  "rule_kind": "signal",
+  "created_by": "opencdr",
+  "description": "Security group ingress rule added. Overly permissive rules (e.g. 0.0.0.0/0) expose resources to the internet.",
+  "enabled": true,
+  "severity": "MEDIUM",
+  "notify": true,
+  "response_module": "",
+  "playbook": "Review the security group rule in the EC2 console. Check if the source CIDR is 0.0.0.0/0 or ::/0 and whether the port is sensitive (22, 3389, 5432, 3306, etc). If not authorised, revoke the rule immediately.",
+  "version": 1,
+  "conditions": [
+    { "field": "activity_name", "op": "in", "value": ["AuthorizeSecurityGroupIngress", "AuthorizeSecurityGroupEgress"] },
+    { "field": "api.service", "op": "equals", "value": "ec2.amazonaws.com" }
+  ]
+}

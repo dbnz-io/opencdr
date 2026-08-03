@@ -1,0 +1,16 @@
+{
+  "rule_id": "009_admin_policy_attached",
+  "rule_kind": "signal",
+  "created_by": "opencdr",
+  "description": "AWS AdministratorAccess policy attached to a user, role, or group — grants unrestricted access to all AWS services.",
+  "enabled": true,
+  "severity": "CRITICAL",
+  "notify": true,
+  "response_module": "disable_user",
+  "playbook": "Immediately verify if this was an authorised change. AdministratorAccess should almost never be attached outside of a break-glass procedure. If unexpected: detach the policy, disable the principal, and review all actions taken by that principal since the attachment.",
+  "version": 1,
+  "conditions": [
+    { "field": "activity_name", "op": "in", "value": ["AttachUserPolicy", "AttachRolePolicy", "AttachGroupPolicy"] },
+    { "field": "raw_event.detail.requestParameters.policyArn", "op": "contains", "value": "AdministratorAccess" }
+  ]
+}

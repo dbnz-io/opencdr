@@ -1,0 +1,17 @@
+{
+  "rule_id": "020_correlation_console_login_bruteforce",
+  "rule_kind": "correlation",
+  "created_by": "opencdr",
+  "description": "Multiple MFA-less console logins from the same user within 15 minutes — indicates brute force or credential stuffing.",
+  "enabled": true,
+  "severity": "CRITICAL",
+  "notify": true,
+  "response_module": "disable_user",
+  "playbook": "Disable the user account immediately. The volume of MFA-less logins suggests automated credential attack. Reset the password, enforce MFA, review source IPs for threat intelligence hits, and check for any successful login in the window.",
+  "group_by": "actor.user_name",
+  "time_window_seconds": 900,
+  "threshold": 5,
+  "signal_conditions": [
+    { "field": "rule_id", "op": "equals", "value": "001_console_login_no_mfa" }
+  ]
+}

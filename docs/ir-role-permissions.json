@@ -1,0 +1,71 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "IamAccessKeys",
+      "Effect": "Allow",
+      "Action": [
+        "iam:ListAccessKeys",
+        "iam:UpdateAccessKey",
+        "iam:DeleteAccessKey"
+      ],
+      "Resource": "arn:aws:iam::*:user/*"
+    },
+    {
+      "Sid": "IamUsers",
+      "Effect": "Allow",
+      "Action": [
+        "iam:ListGroupsForUser",
+        "iam:RemoveUserFromGroup",
+        "iam:DeleteLoginProfile",
+        "iam:ListAttachedUserPolicies",
+        "iam:DetachUserPolicy",
+        "iam:ListUserPolicies",
+        "iam:DeleteUserPolicy",
+        "iam:DeleteUser"
+      ],
+      "Resource": "arn:aws:iam::*:user/*"
+    },
+    {
+      "Sid": "IamRoles",
+      "Effect": "Allow",
+      "Action": [
+        "iam:ListAttachedRolePolicies",
+        "iam:DetachRolePolicy",
+        "iam:ListRolePolicies",
+        "iam:DeleteRolePolicy",
+        "iam:UpdateAssumeRolePolicy"
+      ],
+      "Resource": "arn:aws:iam::*:role/*"
+    },
+    {
+      "Sid": "S3AccountPublicAccessBlock",
+      "Effect": "Allow",
+      "Action": "s3control:PutPublicAccessBlock",
+      "Resource": "*"
+    },
+    {
+      "Sid": "S3BucketAndObjectContainment",
+      "Effect": "Allow",
+      "Action": [
+        "s3:PutBucketPublicAccessBlock",
+        "s3:PutBucketAcl",
+        "s3:DeleteBucketPolicy",
+        "s3:PutObjectAcl"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "Ec2Isolation",
+      "Effect": "Allow",
+      "Action": [
+        "ec2:DescribeInstances",
+        "ec2:DescribeSecurityGroups",
+        "ec2:CreateSecurityGroup",
+        "ec2:RevokeSecurityGroupEgress",
+        "ec2:ModifyInstanceAttribute"
+      ],
+      "Resource": "*"
+    }
+  ]
+}

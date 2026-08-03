@@ -1,0 +1,29 @@
+{
+  "detail-type": "AWS API Call via CloudTrail",
+  "source": "aws.iam",
+  "account": "123456789012",
+  "region": "us-east-1",
+  "detail": {
+    "eventTime": "2026-01-01T12:00:00Z",
+    "eventSource": "iam.amazonaws.com",
+    "eventName": "CreateAccessKey",
+    "awsRegion": "us-east-1",
+    "sourceIPAddress": "203.0.113.1",
+    "userAgent": "aws-cli/2.x",
+    "eventID": "test-evt-004",
+    "recipientAccountId": "123456789012",
+    "userIdentity": {
+      "type": "Root",
+      "principalId": "123456789012",
+      "arn": "arn:aws:iam::123456789012:root",
+      "accountId": "123456789012"
+    },
+    "requestParameters": null,
+    "responseElements": {
+      "accessKey": {
+        "accessKeyId": "AKIAROOTTEST0001",
+        "status": "Active"
+      }
+    }
+  }
+}

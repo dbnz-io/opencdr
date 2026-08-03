@@ -1,0 +1,16 @@
+{
+  "rule_id": "006_access_key_created",
+  "rule_kind": "signal",
+  "created_by": "opencdr",
+  "description": "New IAM access key created. Attackers create access keys for persistence after gaining console access.",
+  "enabled": true,
+  "severity": "MEDIUM",
+  "notify": true,
+  "response_module": "",
+  "playbook": "Confirm the key was created by the legitimate key owner for a known purpose. Check if the creating principal is the same as the key owner — if not, this may indicate privilege abuse. Verify there is no unusual activity immediately following key creation.",
+  "version": 1,
+  "conditions": [
+    { "field": "activity_name", "op": "equals", "value": "CreateAccessKey" },
+    { "field": "api.service", "op": "equals", "value": "iam.amazonaws.com" }
+  ]
+}

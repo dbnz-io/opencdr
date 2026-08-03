@@ -1,0 +1,1537 @@
+service: opencdr
+frameworkVersion: "3"
+
+params:
+  default:
+    alarmEmail: ""
+    alertEmail: ""  # email for security detection alerts; can match alarmEmail
+    monthlyBudgetUsd: "50"  # threshold for the AWS Budgets cost alert -- override with --param="monthlyBudgetUsd=<amount>"
+
+package:
+  patterns:
+    - src/openapi/swagger.json
+
+provider:
+  name: aws
+  runtime: python3.12
+  region: ${opt:region, 'us-east-1'}
+  stage: ${opt:stage, 'dev'}
+  logRetentionInDays: 90
+
+  # Cost-allocation tags -- stackTags tags the CloudFormation stack itself
+  # (visible in the CFN console); tags applies to every Lambda function
+  # this service creates. Every other taggable resource (DynamoDB tables,
+  # SQS queues, SNS topics) is tagged explicitly on its own Properties
+  # below, since CloudFormation does not cascade stack-level tags down to
+  # child resources on its own. These tag keys/values must still be
+  # activated as cost allocation tags once in Billing preferences (a
+  # console/API step outside CloudFormation) before Cost Explorer can
+  # filter by them -- see scripts/cost_report.sh.
+  stackTags:
+    Project: opencdr
+    Stage: ${self:provider.stage}
+  tags:
+    Project: opencdr
+    Stage: ${self:provider.stage}
+
+  # AWS-native tracing (replaces the Phase 6 OTel/Sentry attempt, which hit
+  # a real bug in a third-party instrumentor's API Gateway event handling --
+  # AwsLambdaInstrumentor's attribute-extraction ran outside any exception
+  # handling and threw on this repo's actual event shape, causing api.py to
+  # 502 on every request). No app code, no third-party instrumentation
+  # library, no bug surface to inherit -- this sets TracingConfig: Active
+  # on every function and turns on X-Ray tracing on the API Gateway stage.
+  # The IAM permission this needs is added explicitly per function below
+  # rather than relied on to merge automatically, since this repo builds a
+  # separate role per function (serverless-iam-roles-per-function) instead
+  # of using the framework's single default role that this setting
+  # normally grants the permission to.
+  tracing:
+    lambda: true
+    apiGateway: true
+
+  apiGateway:
+    apiKeys:
+      - opencdrPlan:
+          - ${self:service}-${self:provider.stage}-api-key
+    usagePlan:
+      - opencdrPlan:
+          quota:
+            limit: 10000
+            period: MONTH
+          throttle:
+            burstLimit: 200
+            rateLimit: 100
+
+  environment:
+    STAGE: "${self:provider.stage}"
+
+    # Tables
+    SIGNALS_TABLE_NAME: "${self:service}-${self:provider.stage}-signals-table"
+    ALERTS_TABLE_NAME: "${self:service}-${self:provider.stage}-alerts-table"
+    SETTINGS_TABLE_NAME: "${self:service}-${self:provider.stage}-settings-table"
+    LOGS_TABLE_NAME: "${self:service}-${self:provider.stage}-logs-table"
+    DETECTION_RULES_TABLE_NAME: "${self:service}-${self:provider.stage}-detection-rules-table"
+    OUTBOX_TABLE_NAME: "${self:service}-${self:provider.stage}-outbox-table"
+    IR_ACCOUNT_ROLES_TABLE_NAME: "${self:service}-${self:provider.stage}-ir-account-roles-table"
+
+    # Queues
+    NOTIFICATIONS_QUEUE_URL:
+      Ref: NotificationsQueue
+    RESPONSES_QUEUE_URL:
+      Ref: ResponsesQueue
+
+    # Correlation tuning (optional)
+    CORRELATION_QUERY_LIMIT: ${env:CORRELATION_QUERY_LIMIT, '300'}
+
+
+functions:
+
+  # -------------------------
+  # Processor → parses + detects → writes signals
+  # -------------------------
+  processor:
+    handler: src.handlers.processor.lambda_handler
+    environment:
+      SERVICE_NAME: "OPENCDR-PROCESSOR"
+      LAMBDA_NAME: "${self:service}-${self:provider.stage}-processor"
+      SIGNALS_TABLE_NAME: "${self:service}-${self:provider.stage}-signals-table"
+      ALERTS_TABLE_NAME: "${self:service}-${self:provider.stage}-alerts-table"
+      OUTBOX_TABLE_NAME: "${self:service}-${self:provider.stage}-outbox-table"
+      DETECTION_RULES_TABLE_NAME: "${self:service}-${self:provider.stage}-detection-rules-table"
+      LOGS_TABLE_NAME: "${self:service}-${self:provider.stage}-logs-table"
+    iamRoleStatements:
+      - Effect: Allow
+        Action:
+          - dynamodb:PutItem
+          - dynamodb:GetItem
+          - dynamodb:Query
+        Resource:
+          - arn:aws:dynamodb:${self:provider.region}:*:table/${self:service}-${self:provider.stage}-signals-table
+          - arn:aws:dynamodb:${self:provider.region}:*:table/${self:service}-${self:provider.stage}-signals-table/index/*
+          - arn:aws:dynamodb:${self:provider.region}:*:table/${self:service}-${self:provider.stage}-detection-rules-table
+          - arn:aws:dynamodb:${self:provider.region}:*:table/${self:service}-${self:provider.stage}-logs-table
+      - Effect: Allow
+        Action:
+          - dynamodb:PutItem
+        Resource:
+          - arn:aws:dynamodb:${self:provider.region}:*:table/${self:service}-${self:provider.stage}-alerts-table
+          - arn:aws:dynamodb:${self:provider.region}:*:table/${self:service}-${self:provider.stage}-outbox-table
+      # X-Ray write actions don't support resource-level scoping.
+      - Effect: Allow
+        Action:
+          - xray:PutTraceSegments
+          - xray:PutTelemetryRecords
+        Resource: "*"
+    events:
+
+      # ── GuardDuty findings ─────────────────────────────────────────────
+      # Catches all GuardDuty threat intelligence findings
+      - eventBridge:
+          pattern:
+            source:
+              - "aws.guardduty"
+            detail-type:
+              - "GuardDuty Finding"
+
+      # ── CloudTrail — important API calls ──────────────────────────────
+      # Covers all services with active detection rules.
+      # aws.signin  → console login (rules 001–003)
+      # aws.iam     → users, roles, keys, policies (rules 004–010)
+      # aws.sts     → AssumeRole, federation
+      # aws.lambda  → function creation with privileged roles (rule 008)
+      # aws.ec2     → security group changes (rule 011)
+      # aws.cloudtrail  → trail tampering (rule 012)
+      # aws.config      → Config recorder disabled (rule 014)
+      # aws.securityhub → SecurityHub disabled (rule 015)
+      # aws.secretsmanager → secrets access (rule 016)
+      # aws.ssm         → SSM parameter access (rule 017)
+      # aws.s3          → bucket ACL/policy changes (rule 018)
+      # aws.rds         → snapshot made public (rule 019)
+      - eventBridge:
+          pattern:
+            source:
+              - "aws.signin"
+              - "aws.iam"
+              - "aws.sts"
+              - "aws.lambda"
+              - "aws.ec2"
+              - "aws.cloudtrail"
+              - "aws.config"
+              - "aws.securityhub"
+              - "aws.secretsmanager"
+              - "aws.ssm"
+              - "aws.s3"
+              - "aws.rds"
+            detail-type:
+              - "AWS API Call via CloudTrail"
+              - "AWS Console Sign In via CloudTrail"
+
+  # -------------------------
+  # Alerter ← signals stream → runs correlation → writes alerts + outbox
+  # -------------------------
+  alerter:
+    handler: src.handlers.alerter.lambda_handler
+    timeout: 30
+    memorySize: 256
+    environment:
+      SERVICE_NAME: "OPENCDR-ALERTER"
+      LAMBDA_NAME: "${self:service}-${self:provider.stage}-alerter"
+      SIGNALS_TABLE_NAME: "${self:service}-${self:provider.stage}-signals-table"
+      ALERTS_TABLE_NAME: "${self:service}-${self:provider.stage}-alerts-table"
+      DETECTION_RULES_TABLE_NAME: "${self:service}-${self:provider.stage}-detection-rules-table"
+      OUTBOX_TABLE_NAME: "${self:service}-${self:provider.stage}-outbox-table"
+      LOGS_TABLE_NAME: "${self:service}-${self:provider.stage}-logs-table"
+      CORRELATION_QUERY_LIMIT: ${env:CORRELATION_QUERY_LIMIT, '300'}
+    iamRoleStatements:
+      - Effect: Allow
+        Action:
+          - dynamodb:PutItem
+          - dynamodb:GetItem
+          - dynamodb:Query
+          - dynamodb:UpdateItem
+          - dynamodb:Scan
+        Resource:
+          - arn:aws:dynamodb:${self:provider.region}:*:table/${self:service}-${self:provider.stage}-signals-table
+          - arn:aws:dynamodb:${self:provider.region}:*:table/${self:service}-${self:provider.stage}-signals-table/index/*
+          - arn:aws:dynamodb:${self:provider.region}:*:table/${self:service}-${self:provider.stage}-alerts-table
+          - arn:aws:dynamodb:${self:provider.region}:*:table/${self:service}-${self:provider.stage}-detection-rules-table
+          - arn:aws:dynamodb:${self:provider.region}:*:table/${self:service}-${self:provider.stage}-outbox-table
+          - arn:aws:dynamodb:${self:provider.region}:*:table/${self:service}-${self:provider.stage}-logs-table
+      - Effect: Allow
+        Action:
+          - dynamodb:DescribeStream
+          - dynamodb:GetRecords
+          - dynamodb:GetShardIterator
+          - dynamodb:ListStreams
+        Resource:
+          - Fn::GetAtt: [detection, StreamArn]
+      - Effect: Allow
+        Action:
+          - sqs:SendMessage
+        Resource:
+          - Fn::GetAtt: [StreamFailureQueue, Arn]
+      # X-Ray write actions don't support resource-level scoping.
+      - Effect: Allow
+        Action:
+          - xray:PutTraceSegments
+          - xray:PutTelemetryRecords
+        Resource: "*"
+    events:
+      - stream:
+          type: dynamodb
+          arn:
+            Fn::GetAtt: [detection, StreamArn]
+          batchSize: 50
+          startingPosition: LATEST
+          bisectBatchOnFunctionError: true
+          maximumRetryAttempts: 3
+          destinations:
+            onFailure:
+              arn:
+                Fn::GetAtt: [StreamFailureQueue, Arn]
+              type: sqs
+
+  # -------------------------
+  # Publisher ← outbox stream → sends to SQS and marks outbox
+  # -------------------------
+  publisher:
+    handler: src.handlers.publisher.lambda_handler
+    timeout: 30
+    memorySize: 256
+    environment:
+      SERVICE_NAME: "OPENCDR-PUBLISHER"
+      LAMBDA_NAME: "${self:service}-${self:provider.stage}-publisher"
+      OUTBOX_TABLE_NAME: "${self:service}-${self:provider.stage}-outbox-table"
+      LOGS_TABLE_NAME: "${self:service}-${self:provider.stage}-logs-table"
+      NOTIFICATIONS_QUEUE_URL:
+        Ref: NotificationsQueue
+      RESPONSES_QUEUE_URL:
+        Ref: ResponsesQueue
+    iamRoleStatements:
+      - Effect: Allow
+        Action:
+          - dynamodb:GetItem
+          - dynamodb:UpdateItem
+          - dynamodb:PutItem
+        Resource:
+          - arn:aws:dynamodb:${self:provider.region}:*:table/${self:service}-${self:provider.stage}-outbox-table
+          - arn:aws:dynamodb:${self:provider.region}:*:table/${self:service}-${self:provider.stage}-logs-table
+      - Effect: Allow
+        Action:
+          - dynamodb:DescribeStream
+          - dynamodb:GetRecords
+          - dynamodb:GetShardIterator
+          - dynamodb:ListStreams
+        Resource:
+          - Fn::GetAtt: [OutboxTable, StreamArn]
+      - Effect: Allow
+        Action:
+          - sqs:SendMessage
+        Resource:
+          - Fn::GetAtt: [NotificationsQueue, Arn]
+          - Fn::GetAtt: [ResponsesQueue, Arn]
+      - Effect: Allow
+        Action:
+          - sqs:SendMessage
+        Resource:
+          - Fn::GetAtt: [StreamFailureQueue, Arn]
+      # X-Ray write actions don't support resource-level scoping.
+      - Effect: Allow
+        Action:
+          - xray:PutTraceSegments
+          - xray:PutTelemetryRecords
+        Resource: "*"
+    events:
+      - stream:
+          type: dynamodb
+          arn:
+            Fn::GetAtt: [OutboxTable, StreamArn]
+          batchSize: 50
+          startingPosition: LATEST
+          bisectBatchOnFunctionError: true
+          maximumRetryAttempts: 3
+          destinations:
+            onFailure:
+              arn:
+                Fn::GetAtt: [StreamFailureQueue, Arn]
+              type: sqs
+
+  # -------------------------
+  # Notifier → webhook delivery (Slack / Discord / Email)
+  # -------------------------
+  notifier:
+    handler: src.handlers.notifier.lambda_handler
+    environment:
+      SERVICE_NAME: "OPENCDR-NOTIFIER"
+      LAMBDA_NAME: "${self:service}-${self:provider.stage}-notifier"
+      LOGS_TABLE_NAME: "${self:service}-${self:provider.stage}-logs-table"
+      ALERTS_SNS_TOPIC_ARN: !Ref AlertsSnsTopic
+    iamRoleStatements:
+      - Effect: Allow
+        Action:
+          - dynamodb:GetItem
+          - dynamodb:Query
+        Resource:
+          - arn:aws:dynamodb:${self:provider.region}:*:table/${self:service}-${self:provider.stage}-settings-table
+      - Effect: Allow
+        Action:
+          - dynamodb:PutItem
+        Resource:
+          - arn:aws:dynamodb:${self:provider.region}:*:table/${self:service}-${self:provider.stage}-logs-table
+      # Resolves settings secrets (Slack/Discord/Jira, webhook headers)
+      # stored as `ssm:` references -- see src/domain/settings_secrets.py
+      - Effect: Allow
+        Action:
+          - ssm:GetParameter
+        Resource:
+          - arn:aws:ssm:${self:provider.region}:*:parameter/opencdr-${self:provider.stage}/settings/*
+      - Effect: Allow
+        Action:
+          - kms:Decrypt
+        Resource: "*"
+      - Effect: Allow
+        Action:
+          - sqs:ReceiveMessage
+          - sqs:DeleteMessage
+          - sqs:GetQueueAttributes
+        Resource:
+          - Fn::GetAtt: [NotificationsQueue, Arn]
+      - Effect: Allow
+        Action:
+          - sns:Publish
+        Resource:
+          - !Ref AlertsSnsTopic
+      - Effect: Allow
+        Action:
+          - securityhub:BatchImportFindings
+        Resource: "*"
+      # X-Ray write actions don't support resource-level scoping.
+      - Effect: Allow
+        Action:
+          - xray:PutTraceSegments
+          - xray:PutTelemetryRecords
+        Resource: "*"
+    events:
+      - sqs:
+          arn:
+            Fn::GetAtt: [NotificationsQueue, Arn]
+          batchSize: 10
+
+  # -------------------------
+  # Responder → automated incident response
+  # -------------------------
+  responder:
+    handler: src.handlers.responder.lambda_handler
+    timeout: 30
+    memorySize: 512
+    environment:
+      SERVICE_NAME: "OPENCDR-RESPONDER"
+      LAMBDA_NAME: "${self:service}-${self:provider.stage}-incident-response"
+      LOGS_TABLE_NAME: "${self:service}-${self:provider.stage}-logs-table"
+      OPENCDR_IR_ROLE_ARN:
+        Fn::If:
+          - HasIrRoleArnOverride
+          - ${env:OPENCDR_IR_ROLE_ARN, ''}
+          - Fn::GetAtt: [OpencdrIrRole, Arn]
+      DREDGE_DRY_RUN: ${env:DREDGE_DRY_RUN, 'false'}
+      RESPONDER_RATE_LIMIT_WINDOW_MINUTES: ${env:RESPONDER_RATE_LIMIT_WINDOW_MINUTES, '5'}
+      RESPONDER_RATE_LIMIT_MAX_ACTIONS: ${env:RESPONDER_RATE_LIMIT_MAX_ACTIONS, '20'}
+    iamRoleStatements:
+      # Responder holds no destructive IAM/EC2/S3 permissions of its own --
+      # every response module (see dredge.aws_ir.response, a pinned
+      # dependency -- requirements.txt) acts
+      # through an assumed role instead, resolved per detection's AWS
+      # account (src/handlers/responder.py _resolve_role_arn): a row in
+      # irAccountRolesTable if the account is onboarded, else
+      # OPENCDR_IR_ROLE_ARN (the auto-created OpencdrIrRole below, unless
+      # overridden). Every such role -- home account and additional
+      # accounts alike -- must be named "${self:service}-${self:provider.stage}-ir-role"
+      # (see docs/ir-role.md); that naming convention, not an exact ARN, is
+      # what scopes this grant.
+      - Effect: Allow
+        Action:
+          - sts:AssumeRole
+        Resource:
+          - arn:aws:iam::*:role/${self:service}-${self:provider.stage}-ir-role
+      - Effect: Allow
+        Action:
+          - dynamodb:GetItem
+        Resource:
+          - arn:aws:dynamodb:${self:provider.region}:*:table/${self:service}-${self:provider.stage}-ir-account-roles-table
+      - Effect: Allow
+        Action:
+          - dynamodb:PutItem
+          - dynamodb:Query
+        Resource:
+          - arn:aws:dynamodb:${self:provider.region}:*:table/${self:service}-${self:provider.stage}-logs-table
+      - Effect: Allow
+        Action:
+          - dynamodb:PutItem
+        Resource:
+          - arn:aws:dynamodb:${self:provider.region}:*:table/${self:service}-${self:provider.stage}-outbox-table
+      - Effect: Allow
+        Action:
+          - sqs:ReceiveMessage
+          - sqs:DeleteMessage
+          - sqs:GetQueueAttributes
+        Resource:
+          - Fn::GetAtt: [ResponsesQueue, Arn]
+      # X-Ray write actions don't support resource-level scoping.
+      - Effect: Allow
+        Action:
+          - xray:PutTraceSegments
+          - xray:PutTelemetryRecords
+        Resource: "*"
+    events:
+      - sqs:
+          arn:
+            Fn::GetAtt: [ResponsesQueue, Arn]
+          batchSize: 10
+
+  # -------------------------
+  # API
+  # -------------------------
+  api:
+    handler: src.handlers.api.lambda_handler
+    environment:
+      SERVICE_NAME: "OPENCDR-API"
+      LAMBDA_NAME: "${self:service}-${self:provider.stage}-api"
+    iamRoleStatements:
+      - Effect: Allow
+        Action:
+          - dynamodb:PutItem
+          - dynamodb:GetItem
+          - dynamodb:Query
+          - dynamodb:Scan
+          - dynamodb:DeleteItem
+          - dynamodb:UpdateItem
+        Resource:
+          - arn:aws:dynamodb:${self:provider.region}:*:table/${self:service}-${self:provider.stage}-signals-table
+          - arn:aws:dynamodb:${self:provider.region}:*:table/${self:service}-${self:provider.stage}-signals-table/index/*
+          - arn:aws:dynamodb:${self:provider.region}:*:table/${self:service}-${self:provider.stage}-alerts-table
+          - arn:aws:dynamodb:${self:provider.region}:*:table/${self:service}-${self:provider.stage}-logs-table
+          - arn:aws:dynamodb:${self:provider.region}:*:table/${self:service}-${self:provider.stage}-logs-table/index/*
+          - arn:aws:dynamodb:${self:provider.region}:*:table/${self:service}-${self:provider.stage}-detection-rules-table
+          - arn:aws:dynamodb:${self:provider.region}:*:table/${self:service}-${self:provider.stage}-settings-table
+          - arn:aws:dynamodb:${self:provider.region}:*:table/${self:service}-${self:provider.stage}-ir-account-roles-table
+      # Writes/reads/deletes settings secrets indirected through SSM
+      # Parameter Store instead of plaintext DynamoDB attributes -- see
+      # src/domain/settings_secrets.py.
+      - Effect: Allow
+        Action:
+          - ssm:PutParameter
+          - ssm:GetParameter
+          - ssm:DeleteParameter
+          - ssm:DeleteParameters
+        Resource:
+          - arn:aws:ssm:${self:provider.region}:*:parameter/opencdr-${self:provider.stage}/settings/*
+      - Effect: Allow
+        Action:
+          - kms:Encrypt
+          - kms:Decrypt
+          - kms:GenerateDataKey
+        Resource: "*"
+      # X-Ray write actions don't support resource-level scoping.
+      - Effect: Allow
+        Action:
+          - xray:PutTraceSegments
+          - xray:PutTelemetryRecords
+        Resource: "*"
+    events:
+      - http:
+          path: help
+          method: get
+          private: true
+          cors: true
+      - http:
+          path: status
+          method: get
+          private: true
+          cors: true
+      - http:
+          path: signals
+          method: get
+          private: true
+          cors: true
+      - http:
+          path: logs
+          method: get
+          private: true
+          cors: true
+      - http:
+          path: rules
+          method: get
+          private: true
+          cors: true
+      - http:
+          path: rules
+          method: post
+          private: true
+          cors: true
+      - http:
+          path: rules/{rule_id}
+          method: get
+          private: true
+          cors: true
+      - http:
+          path: rules/{rule_id}
+          method: put
+          private: true
+          cors: true
+      - http:
+          path: rules/{rule_id}
+          method: delete
+          private: true
+          cors: true
+      - http:
+          path: settings
+          method: get
+          private: true
+          cors: true
+      - http:
+          path: settings
+          method: post
+          private: true
+          cors: true
+      - http:
+          path: settings/{setting_id}
+          method: get
+          private: true
+          cors: true
+      - http:
+          path: settings/{setting_id}
+          method: put
+          private: true
+          cors: true
+      - http:
+          path: settings/{setting_id}
+          method: delete
+          private: true
+          cors: true
+      - http:
+          path: ir-roles
+          method: get
+          private: true
+          cors: true
+      - http:
+          path: ir-roles
+          method: post
+          private: true
+          cors: true
+      - http:
+          path: ir-roles/{aws_account_id}
+          method: get
+          private: true
+          cors: true
+      - http:
+          path: ir-roles/{aws_account_id}
+          method: put
+          private: true
+          cors: true
+      - http:
+          path: ir-roles/{aws_account_id}
+          method: delete
+          private: true
+          cors: true
+
+  # -------------------------
+  # Alarm notifier ← AlarmsSnsTopic → Slack
+  # -------------------------
+  # Forwards CloudWatch Alarm state-change notifications to Slack. The
+  # alarms (Lambda errors per function, DLQ depth, stream iterator age)
+  # already existed -- alarmEmail was never set in any deployment, so
+  # AlarmsEmailSubscription's Condition (HasAlarmEmail) never created a
+  # subscription, and every one of them had been firing into a topic with
+  # zero subscribers. Reuses the same webhook already set up for Phase 5's
+  # post-deploy notifier-reachability check, at a separate SSM path so this
+  # infra-noise channel stays independent of the security-detection one
+  # (channels.slack.webhook_url in the settings table).
+  alarmNotifier:
+    handler: src.handlers.alarm_notifier.lambda_handler
+    environment:
+      SERVICE_NAME: "OPENCDR-ALARM-NOTIFIER"
+    iamRoleStatements:
+      - Effect: Allow
+        Action:
+          - ssm:GetParameter
+        Resource:
+          - arn:aws:ssm:${self:provider.region}:*:parameter/opencdr-${self:provider.stage}/ops-alerts/*
+      - Effect: Allow
+        Action:
+          - kms:Decrypt
+        Resource: "*"
+      # X-Ray write actions don't support resource-level scoping. This
+      # function was missing this grant entirely (added alongside the
+      # other 6 functions' tracing setup, this one wasn't) -- Active
+      # Tracing was on but had no permission to actually emit segments.
+      - Effect: Allow
+        Action:
+          - xray:PutTraceSegments
+          - xray:PutTelemetryRecords
+        Resource: "*"
+    events:
+      - sns:
+          arn: !Ref AlarmsSnsTopic
+          topicName: ${self:service}-${self:provider.stage}-alarms
+
+
+resources:
+  Conditions:
+    HasAlarmEmail: !Not
+      - !Equals
+        - "${param:alarmEmail}"
+        - ""
+    HasAlertEmail: !Not
+      - !Equals
+        - "${param:alertEmail}"
+        - ""
+    HasIrRoleArnOverride: !Not
+      - !Equals
+        - "${env:OPENCDR_IR_ROLE_ARN, ''}"
+        - ""
+
+  Resources:
+
+    # -------------------------
+    # SIGNAL TABLE (events + stream)
+    # -------------------------
+    detection:
+      Type: AWS::DynamoDB::Table
+      Properties:
+        TableName: ${self:service}-${self:provider.stage}-signals-table
+        BillingMode: PAY_PER_REQUEST
+        Tags:
+          - Key: Project
+            Value: opencdr
+          - Key: Stage
+            Value: ${self:provider.stage}
+        AttributeDefinitions:
+          - AttributeName: severity
+            AttributeType: S
+          - AttributeName: timestamp
+            AttributeType: S
+          - AttributeName: event_id
+            AttributeType: S
+          - AttributeName: category
+            AttributeType: S
+          - AttributeName: actor_user_name
+            AttributeType: S
+        KeySchema:
+          - AttributeName: severity
+            KeyType: HASH
+          - AttributeName: timestamp
+            KeyType: RANGE
+        GlobalSecondaryIndexes:
+          - IndexName: gsi_signal_event_id
+            KeySchema:
+              - AttributeName: event_id
+                KeyType: HASH
+              - AttributeName: timestamp
+                KeyType: RANGE
+            Projection:
+              ProjectionType: ALL
+          - IndexName: gsi_signal_category_id
+            KeySchema:
+              - AttributeName: category
+                KeyType: HASH
+              - AttributeName: timestamp
+                KeyType: RANGE
+            Projection:
+              ProjectionType: ALL
+          - IndexName: gsi_signal_actor_user_name
+            KeySchema:
+              - AttributeName: actor_user_name
+                KeyType: HASH
+              - AttributeName: timestamp
+                KeyType: RANGE
+            Projection:
+              ProjectionType: ALL
+        StreamSpecification:
+          StreamViewType: NEW_IMAGE
+
+    # -------------------------
+    # ALERTS TABLE (correlation outputs)
+    # -------------------------
+    alerts:
+      Type: AWS::DynamoDB::Table
+      Properties:
+        TableName: ${self:service}-${self:provider.stage}-alerts-table
+        BillingMode: PAY_PER_REQUEST
+        Tags:
+          - Key: Project
+            Value: opencdr
+          - Key: Stage
+            Value: ${self:provider.stage}
+        AttributeDefinitions:
+          - AttributeName: alert_key
+            AttributeType: S
+          - AttributeName: timestamp
+            AttributeType: S
+        KeySchema:
+          - AttributeName: alert_key
+            KeyType: HASH
+          - AttributeName: timestamp
+            KeyType: RANGE
+
+    # -------------------------
+    # OUTBOX TABLE (publisher pattern) + stream
+    # -------------------------
+    OutboxTable:
+      Type: AWS::DynamoDB::Table
+      Properties:
+        TableName: ${self:service}-${self:provider.stage}-outbox-table
+        BillingMode: PAY_PER_REQUEST
+        Tags:
+          - Key: Project
+            Value: opencdr
+          - Key: Stage
+            Value: ${self:provider.stage}
+        AttributeDefinitions:
+          - AttributeName: outbox_id
+            AttributeType: S
+        KeySchema:
+          - AttributeName: outbox_id
+            KeyType: HASH
+        StreamSpecification:
+          StreamViewType: NEW_IMAGE
+
+    # -------------------------
+    # LOGS TABLE
+    # -------------------------
+    logs:
+      Type: AWS::DynamoDB::Table
+      Properties:
+        TableName: ${self:service}-${self:provider.stage}-logs-table
+        BillingMode: PAY_PER_REQUEST
+        Tags:
+          - Key: Project
+            Value: opencdr
+          - Key: Stage
+            Value: ${self:provider.stage}
+        AttributeDefinitions:
+          - AttributeName: service
+            AttributeType: S
+          - AttributeName: timestamp
+            AttributeType: S
+          - AttributeName: event_id
+            AttributeType: S
+          - AttributeName: event_name
+            AttributeType: S
+        KeySchema:
+          - AttributeName: service
+            KeyType: HASH
+          - AttributeName: timestamp
+            KeyType: RANGE
+        GlobalSecondaryIndexes:
+          - IndexName: gsi_logs_event_id
+            KeySchema:
+              - AttributeName: event_id
+                KeyType: HASH
+              - AttributeName: timestamp
+                KeyType: RANGE
+            Projection:
+              ProjectionType: ALL
+          - IndexName: gsi_activity_name
+            KeySchema:
+              - AttributeName: event_name
+                KeyType: HASH
+              - AttributeName: timestamp
+                KeyType: RANGE
+            Projection:
+              ProjectionType: ALL
+
+    # -------------------------
+    # DETECTION RULES TABLE
+    # -------------------------
+    detectionRules:
+      Type: AWS::DynamoDB::Table
+      Properties:
+        TableName: ${self:service}-${self:provider.stage}-detection-rules-table
+        BillingMode: PAY_PER_REQUEST
+        Tags:
+          - Key: Project
+            Value: opencdr
+          - Key: Stage
+            Value: ${self:provider.stage}
+        AttributeDefinitions:
+          - AttributeName: rule_kind
+            AttributeType: S
+          - AttributeName: rule_id
+            AttributeType: S
+        KeySchema:
+          - AttributeName: rule_kind
+            KeyType: HASH
+          - AttributeName: rule_id
+            KeyType: RANGE
+
+    # -------------------------
+    # SETTINGS TABLE
+    # -------------------------
+    globalSettingsTable:
+      Type: AWS::DynamoDB::Table
+      Properties:
+        TableName: ${self:service}-${self:provider.stage}-settings-table
+        BillingMode: PAY_PER_REQUEST
+        Tags:
+          - Key: Project
+            Value: opencdr
+          - Key: Stage
+            Value: ${self:provider.stage}
+        AttributeDefinitions:
+          - AttributeName: setting_id
+            AttributeType: S
+        KeySchema:
+          - AttributeName: setting_id
+            KeyType: HASH
+
+    # -------------------------
+    # IR ACCOUNT ROLES TABLE (account_id -> role_arn the responder assumes)
+    # -------------------------
+    irAccountRolesTable:
+      Type: AWS::DynamoDB::Table
+      Properties:
+        TableName: ${self:service}-${self:provider.stage}-ir-account-roles-table
+        BillingMode: PAY_PER_REQUEST
+        Tags:
+          - Key: Project
+            Value: opencdr
+          - Key: Stage
+            Value: ${self:provider.stage}
+        AttributeDefinitions:
+          - AttributeName: aws_account_id
+            AttributeType: S
+        KeySchema:
+          - AttributeName: aws_account_id
+            KeyType: HASH
+
+    # -------------------------
+    # IR ROLE for the home account (the account this stack deploys into).
+    # Assumed by the responder Lambda for incident-response actions -- see
+    # docs/ir-role.md. For additional (non-home) accounts, create this same
+    # role by hand there (docs/ir-role.md has the trust + permissions JSON)
+    # and add a row to irAccountRolesTable; a `serverless deploy` in one
+    # account/region can't provision IAM roles in a different AWS account.
+    #
+    # Keep the Policies statements below in sync with
+    # docs/ir-role-permissions.json -- same 6 statements, duplicated here
+    # because CloudFormation has no clean way to include an external JSON
+    # policy file.
+    # -------------------------
+    OpencdrIrRole:
+      Type: AWS::IAM::Role
+      Properties:
+        RoleName: ${self:service}-${self:provider.stage}-ir-role
+        AssumeRolePolicyDocument:
+          Version: "2012-10-17"
+          Statement:
+            - Effect: Allow
+              Principal:
+                AWS:
+                  Fn::GetAtt: [ResponderIamRoleLambdaExecution, Arn]
+              Action: sts:AssumeRole
+        Policies:
+          - PolicyName: opencdr-ir-permissions
+            PolicyDocument:
+              Version: "2012-10-17"
+              Statement:
+                - Sid: IamAccessKeys
+                  Effect: Allow
+                  Action:
+                    - iam:ListAccessKeys
+                    - iam:UpdateAccessKey
+                    - iam:DeleteAccessKey
+                  Resource: "arn:aws:iam::*:user/*"
+                - Sid: IamUsers
+                  Effect: Allow
+                  Action:
+                    - iam:ListGroupsForUser
+                    - iam:RemoveUserFromGroup
+                    - iam:DeleteLoginProfile
+                    - iam:ListAttachedUserPolicies
+                    - iam:DetachUserPolicy
+                    - iam:ListUserPolicies
+                    - iam:DeleteUserPolicy
+                    - iam:DeleteUser
+                  Resource: "arn:aws:iam::*:user/*"
+                - Sid: IamRoles
+                  Effect: Allow
+                  Action:
+                    - iam:ListAttachedRolePolicies
+                    - iam:DetachRolePolicy
+                    - iam:ListRolePolicies
+                    - iam:DeleteRolePolicy
+                    - iam:UpdateAssumeRolePolicy
+                  Resource: "arn:aws:iam::*:role/*"
+                - Sid: S3AccountPublicAccessBlock
+                  Effect: Allow
+                  Action: s3control:PutPublicAccessBlock
+                  Resource: "*"
+                - Sid: S3BucketAndObjectContainment
+                  Effect: Allow
+                  Action:
+                    - s3:PutBucketPublicAccessBlock
+                    - s3:PutBucketAcl
+                    - s3:DeleteBucketPolicy
+                    - s3:PutObjectAcl
+                  Resource: "*"
+                - Sid: Ec2Isolation
+                  Effect: Allow
+                  Action:
+                    - ec2:DescribeInstances
+                    - ec2:DescribeSecurityGroups
+                    - ec2:CreateSecurityGroup
+                    - ec2:RevokeSecurityGroupEgress
+                    - ec2:ModifyInstanceAttribute
+                  Resource: "*"
+
+    # -------------------------
+    # SQS — notifications
+    # -------------------------
+    NotificationsQueueDLQ:
+      Type: AWS::SQS::Queue
+      Properties:
+        QueueName: ${self:service}-${self:provider.stage}-notifications-dlq
+        MessageRetentionPeriod: 1209600  # 14 days
+        Tags:
+          - Key: Project
+            Value: opencdr
+          - Key: Stage
+            Value: ${self:provider.stage}
+
+    NotificationsQueue:
+      Type: AWS::SQS::Queue
+      Properties:
+        QueueName: ${self:service}-${self:provider.stage}-notifications-queue
+        RedrivePolicy:
+          deadLetterTargetArn:
+            Fn::GetAtt: [NotificationsQueueDLQ, Arn]
+          maxReceiveCount: 3
+        Tags:
+          - Key: Project
+            Value: opencdr
+          - Key: Stage
+            Value: ${self:provider.stage}
+
+    # -------------------------
+    # SQS — responses (IR actions)
+    # -------------------------
+    ResponsesQueueDLQ:
+      Type: AWS::SQS::Queue
+      Properties:
+        QueueName: ${self:service}-${self:provider.stage}-responses-dlq
+        MessageRetentionPeriod: 1209600  # 14 days
+        Tags:
+          - Key: Project
+            Value: opencdr
+          - Key: Stage
+            Value: ${self:provider.stage}
+
+    ResponsesQueue:
+      Type: AWS::SQS::Queue
+      Properties:
+        QueueName: ${self:service}-${self:provider.stage}-responses-queue
+        RedrivePolicy:
+          deadLetterTargetArn:
+            Fn::GetAtt: [ResponsesQueueDLQ, Arn]
+          maxReceiveCount: 3
+        Tags:
+          - Key: Project
+            Value: opencdr
+          - Key: Stage
+            Value: ${self:provider.stage}
+
+    # -------------------------
+    # SQS — stream failure sink (poison-pill DLQ for DynamoDB streams)
+    # -------------------------
+    StreamFailureQueue:
+      Type: AWS::SQS::Queue
+      Properties:
+        QueueName: ${self:service}-${self:provider.stage}-stream-failures
+        MessageRetentionPeriod: 1209600  # 14 days
+        Tags:
+          - Key: Project
+            Value: opencdr
+          - Key: Stage
+            Value: ${self:provider.stage}
+
+    # -------------------------
+    # SNS — alarms topic (subscribe via CLI after deploy)
+    # -------------------------
+    AlarmsSnsTopic:
+      Type: AWS::SNS::Topic
+      Properties:
+        TopicName: ${self:service}-${self:provider.stage}-alarms
+        DisplayName: OpenCDR Alarms
+        Tags:
+          - Key: Project
+            Value: opencdr
+          - Key: Stage
+            Value: ${self:provider.stage}
+
+    AlarmsEmailSubscription:
+      Type: AWS::SNS::Subscription
+      Condition: HasAlarmEmail
+      Properties:
+        TopicArn: !Ref AlarmsSnsTopic
+        Protocol: email
+        Endpoint: "${param:alarmEmail}"
+
+    # -------------------------
+    # AWS Budgets requires an explicit resource policy granting
+    # budgets.amazonaws.com permission to publish -- unlike CloudWatch
+    # alarm actions, this is not implicitly allowed same-account.
+    # Reuses AlarmsSnsTopic (-> alarmNotifier -> Slack) rather than
+    # provisioning a second topic/subscriber path for the same purpose.
+    # -------------------------
+    AlarmsSnsTopicPolicy:
+      Type: AWS::SNS::TopicPolicy
+      Properties:
+        Topics:
+          - !Ref AlarmsSnsTopic
+        PolicyDocument:
+          Version: "2012-10-17"
+          Statement:
+            - Sid: AllowBudgetsPublish
+              Effect: Allow
+              Principal:
+                Service: budgets.amazonaws.com
+              Action: sns:Publish
+              Resource: !Ref AlarmsSnsTopic
+              Condition:
+                StringEquals:
+                  AWS:SourceAccount: !Ref AWS::AccountId
+
+    # -------------------------
+    # Cost budget -- scoped to this stack's own tagged resources (Project/
+    # Stage), not the whole account, so it reflects what OpenCDR itself
+    # costs to run. Amount is a deploy-time param (params.monthlyBudgetUsd)
+    # rather than hardcoded, since this is expected to vary a lot by
+    # traffic/client and shouldn't require a serverless.yml edit to change.
+    # First deploy attempt confirmed the SNS/notification wiring below is
+    # correct; it failed on CostFilters' tag-key-value syntax specifically
+    # -- "user:Stage$${self:provider.stage}" resolved to "user:Stagedev",
+    # Serverless Framework's variable resolver silently ate the literal "$"
+    # sitting directly next to a ${...} interpolation. Fixed with Fn::Join:
+    # the stage is resolved as a normal, already-proven-safe standalone
+    # ${self:provider.stage} reference (used everywhere else in this file),
+    # then CloudFormation joins it with the literal "$" delimiter at deploy
+    # time -- no Serverless-Framework-level $ escaping involved at all.
+    # -------------------------
+    CostBudget:
+      Type: AWS::Budgets::Budget
+      DependsOn: AlarmsSnsTopicPolicy
+      Properties:
+        Budget:
+          BudgetName: ${self:service}-${self:provider.stage}-monthly-cost
+          BudgetType: COST
+          TimeUnit: MONTHLY
+          BudgetLimit:
+            Amount: ${param:monthlyBudgetUsd}
+            Unit: USD
+          CostFilters:
+            TagKeyValue:
+              - user:Project$opencdr
+              - Fn::Join:
+                  - "$"
+                  - - "user:Stage"
+                    - "${self:provider.stage}"
+        NotificationsWithSubscribers:
+          - Notification:
+              NotificationType: ACTUAL
+              ComparisonOperator: GREATER_THAN
+              Threshold: 80
+              ThresholdType: PERCENTAGE
+            Subscribers:
+              - SubscriptionType: SNS
+                Address: !Ref AlarmsSnsTopic
+          - Notification:
+              NotificationType: ACTUAL
+              ComparisonOperator: GREATER_THAN
+              Threshold: 100
+              ThresholdType: PERCENTAGE
+            Subscribers:
+              - SubscriptionType: SNS
+                Address: !Ref AlarmsSnsTopic
+          - Notification:
+              NotificationType: FORECASTED
+              ComparisonOperator: GREATER_THAN
+              Threshold: 100
+              ThresholdType: PERCENTAGE
+            Subscribers:
+              - SubscriptionType: SNS
+                Address: !Ref AlarmsSnsTopic
+
+    # -------------------------
+    # SNS — alerts topic (security detection notifications)
+    # -------------------------
+    AlertsSnsTopic:
+      Type: AWS::SNS::Topic
+      Properties:
+        TopicName: ${self:service}-${self:provider.stage}-alerts
+        DisplayName: OpenCDR Security Alerts
+        Tags:
+          - Key: Project
+            Value: opencdr
+          - Key: Stage
+            Value: ${self:provider.stage}
+
+    AlertsEmailSubscription:
+      Type: AWS::SNS::Subscription
+      Condition: HasAlertEmail
+      Properties:
+        TopicArn: !Ref AlertsSnsTopic
+        Protocol: email
+        Endpoint: "${param:alertEmail}"
+
+    # -------------------------
+    # CloudWatch Alarms — Lambda errors (one per function)
+    # -------------------------
+    AlarmProcessorErrors:
+      Type: AWS::CloudWatch::Alarm
+      Properties:
+        AlarmName: ${self:service}-${self:provider.stage}-processor-errors
+        AlarmDescription: "processor Lambda error count > 0"
+        Namespace: AWS/Lambda
+        MetricName: Errors
+        Dimensions:
+          - Name: FunctionName
+            Value: !Ref ProcessorLambdaFunction
+        Statistic: Sum
+        Period: 60
+        EvaluationPeriods: 1
+        Threshold: 0
+        ComparisonOperator: GreaterThanThreshold
+        TreatMissingData: notBreaching
+        AlarmActions:
+          - !Ref AlarmsSnsTopic
+
+    AlarmAlerterErrors:
+      Type: AWS::CloudWatch::Alarm
+      Properties:
+        AlarmName: ${self:service}-${self:provider.stage}-alerter-errors
+        AlarmDescription: "alerter Lambda error count > 0"
+        Namespace: AWS/Lambda
+        MetricName: Errors
+        Dimensions:
+          - Name: FunctionName
+            Value: !Ref AlerterLambdaFunction
+        Statistic: Sum
+        Period: 60
+        EvaluationPeriods: 1
+        Threshold: 0
+        ComparisonOperator: GreaterThanThreshold
+        TreatMissingData: notBreaching
+        AlarmActions:
+          - !Ref AlarmsSnsTopic
+
+    AlarmPublisherErrors:
+      Type: AWS::CloudWatch::Alarm
+      Properties:
+        AlarmName: ${self:service}-${self:provider.stage}-publisher-errors
+        AlarmDescription: "publisher Lambda error count > 0"
+        Namespace: AWS/Lambda
+        MetricName: Errors
+        Dimensions:
+          - Name: FunctionName
+            Value: !Ref PublisherLambdaFunction
+        Statistic: Sum
+        Period: 60
+        EvaluationPeriods: 1
+        Threshold: 0
+        ComparisonOperator: GreaterThanThreshold
+        TreatMissingData: notBreaching
+        AlarmActions:
+          - !Ref AlarmsSnsTopic
+
+    AlarmNotifierErrors:
+      Type: AWS::CloudWatch::Alarm
+      Properties:
+        AlarmName: ${self:service}-${self:provider.stage}-notifier-errors
+        AlarmDescription: "notifier Lambda error count > 0"
+        Namespace: AWS/Lambda
+        MetricName: Errors
+        Dimensions:
+          - Name: FunctionName
+            Value: !Ref NotifierLambdaFunction
+        Statistic: Sum
+        Period: 60
+        EvaluationPeriods: 1
+        Threshold: 0
+        ComparisonOperator: GreaterThanThreshold
+        TreatMissingData: notBreaching
+        AlarmActions:
+          - !Ref AlarmsSnsTopic
+
+    AlarmResponderErrors:
+      Type: AWS::CloudWatch::Alarm
+      Properties:
+        AlarmName: ${self:service}-${self:provider.stage}-responder-errors
+        AlarmDescription: "responder Lambda error count > 0"
+        Namespace: AWS/Lambda
+        MetricName: Errors
+        Dimensions:
+          - Name: FunctionName
+            Value: !Ref ResponderLambdaFunction
+        Statistic: Sum
+        Period: 60
+        EvaluationPeriods: 1
+        Threshold: 0
+        ComparisonOperator: GreaterThanThreshold
+        TreatMissingData: notBreaching
+        AlarmActions:
+          - !Ref AlarmsSnsTopic
+
+    AlarmApiErrors:
+      Type: AWS::CloudWatch::Alarm
+      Properties:
+        AlarmName: ${self:service}-${self:provider.stage}-api-errors
+        AlarmDescription: "api Lambda error count > 0"
+        Namespace: AWS/Lambda
+        MetricName: Errors
+        Dimensions:
+          - Name: FunctionName
+            Value: !Ref ApiLambdaFunction
+        Statistic: Sum
+        Period: 60
+        EvaluationPeriods: 1
+        Threshold: 0
+        ComparisonOperator: GreaterThanThreshold
+        TreatMissingData: notBreaching
+        AlarmActions:
+          - !Ref AlarmsSnsTopic
+
+    # -------------------------
+    # CloudWatch Alarms — DLQ depth
+    # -------------------------
+    AlarmNotificationsDLQDepth:
+      Type: AWS::CloudWatch::Alarm
+      Properties:
+        AlarmName: ${self:service}-${self:provider.stage}-notifications-dlq-depth
+        AlarmDescription: "Messages visible in notifications DLQ > 0"
+        Namespace: AWS/SQS
+        MetricName: ApproximateNumberOfMessagesVisible
+        Dimensions:
+          - Name: QueueName
+            Value: !GetAtt NotificationsQueueDLQ.QueueName
+        Statistic: Sum
+        Period: 60
+        EvaluationPeriods: 1
+        Threshold: 0
+        ComparisonOperator: GreaterThanThreshold
+        TreatMissingData: notBreaching
+        AlarmActions:
+          - !Ref AlarmsSnsTopic
+
+    AlarmResponsesDLQDepth:
+      Type: AWS::CloudWatch::Alarm
+      Properties:
+        AlarmName: ${self:service}-${self:provider.stage}-responses-dlq-depth
+        AlarmDescription: "Messages visible in responses DLQ > 0"
+        Namespace: AWS/SQS
+        MetricName: ApproximateNumberOfMessagesVisible
+        Dimensions:
+          - Name: QueueName
+            Value: !GetAtt ResponsesQueueDLQ.QueueName
+        Statistic: Sum
+        Period: 60
+        EvaluationPeriods: 1
+        Threshold: 0
+        ComparisonOperator: GreaterThanThreshold
+        TreatMissingData: notBreaching
+        AlarmActions:
+          - !Ref AlarmsSnsTopic
+
+    AlarmStreamFailureQueueDepth:
+      Type: AWS::CloudWatch::Alarm
+      Properties:
+        AlarmName: ${self:service}-${self:provider.stage}-stream-failures-depth
+        AlarmDescription: "Messages visible in stream failure queue > 0"
+        Namespace: AWS/SQS
+        MetricName: ApproximateNumberOfMessagesVisible
+        Dimensions:
+          - Name: QueueName
+            Value: !GetAtt StreamFailureQueue.QueueName
+        Statistic: Sum
+        Period: 60
+        EvaluationPeriods: 1
+        Threshold: 0
+        ComparisonOperator: GreaterThanThreshold
+        TreatMissingData: notBreaching
+        AlarmActions:
+          - !Ref AlarmsSnsTopic
+
+    # -------------------------
+    # CloudWatch Alarms — DynamoDB stream iterator age
+    # -------------------------
+    AlarmAlerterIteratorAge:
+      Type: AWS::CloudWatch::Alarm
+      Properties:
+        AlarmName: ${self:service}-${self:provider.stage}-alerter-iterator-age
+        AlarmDescription: "alerter stream iterator age > 5 min — consumer falling behind"
+        Namespace: AWS/Lambda
+        MetricName: IteratorAge
+        Dimensions:
+          - Name: FunctionName
+            Value: !Ref AlerterLambdaFunction
+        Statistic: Maximum
+        Period: 60
+        EvaluationPeriods: 1
+        Threshold: 300000
+        ComparisonOperator: GreaterThanThreshold
+        TreatMissingData: notBreaching
+        AlarmActions:
+          - !Ref AlarmsSnsTopic
+
+    AlarmPublisherIteratorAge:
+      Type: AWS::CloudWatch::Alarm
+      Properties:
+        AlarmName: ${self:service}-${self:provider.stage}-publisher-iterator-age
+        AlarmDescription: "publisher stream iterator age > 5 min — consumer falling behind"
+        Namespace: AWS/Lambda
+        MetricName: IteratorAge
+        Dimensions:
+          - Name: FunctionName
+            Value: !Ref PublisherLambdaFunction
+        Statistic: Maximum
+        Period: 60
+        EvaluationPeriods: 1
+        Threshold: 300000
+        ComparisonOperator: GreaterThanThreshold
+        TreatMissingData: notBreaching
+        AlarmActions:
+          - !Ref AlarmsSnsTopic
+
+    # -------------------------
+    # CloudWatch Dashboard
+    # -------------------------
+    OpsDashboard:
+      Type: AWS::CloudWatch::Dashboard
+      Properties:
+        DashboardName: ${self:service}-${self:provider.stage}-ops
+        DashboardBody:
+          Fn::Sub: |
+            {
+              "widgets": [
+                {
+                  "type": "metric",
+                  "x": 0, "y": 0, "width": 12, "height": 6,
+                  "properties": {
+                    "title": "Lambda Errors",
+                    "view": "timeSeries",
+                    "stacked": false,
+                    "region": "${AWS::Region}",
+                    "stat": "Sum",
+                    "period": 60,
+                    "metrics": [
+                      ["AWS/Lambda", "Errors", "FunctionName", "${ProcessorLambdaFunction}", {"label": "processor"}],
+                      ["AWS/Lambda", "Errors", "FunctionName", "${AlerterLambdaFunction}", {"label": "alerter"}],
+                      ["AWS/Lambda", "Errors", "FunctionName", "${PublisherLambdaFunction}", {"label": "publisher"}],
+                      ["AWS/Lambda", "Errors", "FunctionName", "${NotifierLambdaFunction}", {"label": "notifier"}],
+                      ["AWS/Lambda", "Errors", "FunctionName", "${ResponderLambdaFunction}", {"label": "responder"}],
+                      ["AWS/Lambda", "Errors", "FunctionName", "${ApiLambdaFunction}", {"label": "api"}],
+                      ["AWS/Lambda", "Errors", "FunctionName", "${AlarmNotifierLambdaFunction}", {"label": "alarmNotifier"}]
+                    ]
+                  }
+                },
+                {
+                  "type": "metric",
+                  "x": 12, "y": 0, "width": 12, "height": 6,
+                  "properties": {
+                    "title": "Lambda p99 Duration (ms)",
+                    "view": "timeSeries",
+                    "stacked": false,
+                    "region": "${AWS::Region}",
+                    "stat": "p99",
+                    "period": 60,
+                    "metrics": [
+                      ["AWS/Lambda", "Duration", "FunctionName", "${ProcessorLambdaFunction}", {"label": "processor"}],
+                      ["AWS/Lambda", "Duration", "FunctionName", "${AlerterLambdaFunction}", {"label": "alerter"}],
+                      ["AWS/Lambda", "Duration", "FunctionName", "${PublisherLambdaFunction}", {"label": "publisher"}],
+                      ["AWS/Lambda", "Duration", "FunctionName", "${NotifierLambdaFunction}", {"label": "notifier"}],
+                      ["AWS/Lambda", "Duration", "FunctionName", "${ResponderLambdaFunction}", {"label": "responder"}],
+                      ["AWS/Lambda", "Duration", "FunctionName", "${ApiLambdaFunction}", {"label": "api"}],
+                      ["AWS/Lambda", "Duration", "FunctionName", "${AlarmNotifierLambdaFunction}", {"label": "alarmNotifier"}]
+                    ]
+                  }
+                },
+                {
+                  "type": "metric",
+                  "x": 0, "y": 6, "width": 12, "height": 6,
+                  "properties": {
+                    "title": "Lambda Invocations",
+                    "view": "timeSeries",
+                    "stacked": true,
+                    "region": "${AWS::Region}",
+                    "stat": "Sum",
+                    "period": 60,
+                    "metrics": [
+                      ["AWS/Lambda", "Invocations", "FunctionName", "${ProcessorLambdaFunction}", {"label": "processor"}],
+                      ["AWS/Lambda", "Invocations", "FunctionName", "${AlerterLambdaFunction}", {"label": "alerter"}],
+                      ["AWS/Lambda", "Invocations", "FunctionName", "${PublisherLambdaFunction}", {"label": "publisher"}],
+                      ["AWS/Lambda", "Invocations", "FunctionName", "${NotifierLambdaFunction}", {"label": "notifier"}],
+                      ["AWS/Lambda", "Invocations", "FunctionName", "${ResponderLambdaFunction}", {"label": "responder"}],
+                      ["AWS/Lambda", "Invocations", "FunctionName", "${ApiLambdaFunction}", {"label": "api"}],
+                      ["AWS/Lambda", "Invocations", "FunctionName", "${AlarmNotifierLambdaFunction}", {"label": "alarmNotifier"}]
+                    ]
+                  }
+                },
+                {
+                  "type": "metric",
+                  "x": 12, "y": 6, "width": 12, "height": 6,
+                  "properties": {
+                    "title": "Queue Depth (DLQs + stream failures)",
+                    "view": "timeSeries",
+                    "stacked": false,
+                    "region": "${AWS::Region}",
+                    "stat": "Maximum",
+                    "period": 60,
+                    "metrics": [
+                      ["AWS/SQS", "ApproximateNumberOfMessagesVisible", "QueueName", "${NotificationsQueueDLQ.QueueName}", {"label": "notifications-dlq"}],
+                      ["AWS/SQS", "ApproximateNumberOfMessagesVisible", "QueueName", "${ResponsesQueueDLQ.QueueName}", {"label": "responses-dlq"}],
+                      ["AWS/SQS", "ApproximateNumberOfMessagesVisible", "QueueName", "${StreamFailureQueue.QueueName}", {"label": "stream-failures"}]
+                    ]
+                  }
+                },
+                {
+                  "type": "metric",
+                  "x": 0, "y": 12, "width": 24, "height": 6,
+                  "properties": {
+                    "title": "Detections & Publishing (custom metrics)",
+                    "view": "timeSeries",
+                    "stacked": false,
+                    "region": "${AWS::Region}",
+                    "period": 60,
+                    "metrics": [
+                      [{"expression": "SEARCH('{OpenCDR,rule_id,severity} MetricName=\"SignalsCreated\"', 'Sum', 60)", "label": "SignalsCreated", "id": "e1"}],
+                      [{"expression": "SEARCH('{OpenCDR,rule_id} MetricName=\"CorrelationMatches\"', 'Sum', 60)", "label": "CorrelationMatches", "id": "e2"}],
+                      [{"expression": "SEARCH('{OpenCDR,destination} MetricName=\"PublishSuccess\"', 'Sum', 60)", "label": "PublishSuccess", "id": "e3"}],
+                      [{"expression": "SEARCH('{OpenCDR,destination} MetricName=\"PublishFailure\"', 'Sum', 60)", "label": "PublishFailure", "id": "e4"}],
+                      [{"expression": "SEARCH('{OpenCDR,response_module,result} MetricName=\"ResponderActionsExecuted\"', 'Sum', 60)", "label": "ResponderActionsExecuted", "id": "e5"}]
+                    ]
+                  }
+                }
+              ]
+            }
+
+    # -------------------------
+    # Cross-region event forwarding (receiving side)
+    #
+    # processor's EventBridge rule above only exists on this stack's own
+    # default bus, in this stack's own region -- CloudTrail delivers events
+    # to the bus in whichever region the API call actually happened in
+    # (true even for a multi-region trail; the only exception is global
+    # services like IAM/STS, always us-east-1), and GuardDuty detectors are
+    # inherently per-region. An account operating in more than one region
+    # is otherwise silently blind everywhere except this one.
+    #
+    # This role + bus policy is the receiving half: it lets a forwarding
+    # rule deployed separately in each additional region (see
+    # region-forwarding/cross-region-forwarder.yaml, applied via
+    # scripts/setup_region_forwarding.sh -- a `serverless deploy` in this
+    # region can't provision a rule in another region, same reason
+    # additional-account IR roles need their own manual step, see
+    # docs/ir-role.md) send its region's CloudTrail/GuardDuty events here.
+    # Opt-in per region, not automatic -- see docs/region-forwarding.md.
+    # -------------------------
+    RegionForwarderRole:
+      Type: AWS::IAM::Role
+      Properties:
+        RoleName: ${self:service}-${self:provider.stage}-region-forwarder
+        AssumeRolePolicyDocument:
+          Version: "2012-10-17"
+          Statement:
+            - Effect: Allow
+              Principal:
+                Service: events.amazonaws.com
+              Action: sts:AssumeRole
+        Policies:
+          - PolicyName: put-events-to-home-bus
+            PolicyDocument:
+              Version: "2012-10-17"
+              Statement:
+                - Effect: Allow
+                  Action:
+                    - events:PutEvents
+                  Resource:
+                    - !Sub "arn:aws:events:${AWS::Region}:${AWS::AccountId}:event-bus/default"
+
+    RegionForwarderBusPolicy:
+      Type: AWS::Events::EventBusPolicy
+      Properties:
+        EventBusName: default
+        StatementId: ${self:service}-${self:provider.stage}-allow-region-forwarding
+        Statement:
+          Effect: Allow
+          Principal:
+            AWS: !GetAtt RegionForwarderRole.Arn
+          Action: events:PutEvents
+          Resource: !Sub "arn:aws:events:${AWS::Region}:${AWS::AccountId}:event-bus/default"
+
+  Outputs:
+    AlarmsTopicArn:
+      Description: "SNS topic ARN for CloudWatch alarms — subscribe to receive notifications"
+      Value: !Ref AlarmsSnsTopic
+    AlertsTopicArn:
+      Description: "SNS topic ARN for security detection alerts — subscribe to receive email notifications"
+      Value: !Ref AlertsSnsTopic
+    DashboardUrl:
+      Description: "CloudWatch Dashboard for Lambda health, queue depth, and detection/publishing metrics"
+      Value: !Sub "https://${AWS::Region}.console.aws.amazon.com/cloudwatch/home?region=${AWS::Region}#dashboards:name=${OpsDashboard}"
+    RegionForwarderRoleArn:
+      Description: "IAM role ARN a per-region forwarding rule (region-forwarding/cross-region-forwarder.yaml) assumes to send events here -- see docs/region-forwarding.md"
+      Value: !GetAtt RegionForwarderRole.Arn
+    DefaultEventBusArn:
+      Description: "This region's default EventBridge bus ARN -- the forwarding target for additional-region rules, see docs/region-forwarding.md"
+      Value: !Sub "arn:aws:events:${AWS::Region}:${AWS::AccountId}:event-bus/default"
+
+
+plugins:
+  - serverless-python-requirements
+  - serverless-iam-roles-per-function
+
+custom:
+  pythonRequirements:
+    dockerizePip: false
+    pythonBin: python3
+    slim: true

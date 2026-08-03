@@ -1,0 +1,16 @@
+{
+  "rule_id": "005_iam_user_created",
+  "rule_kind": "signal",
+  "created_by": "opencdr",
+  "description": "New IAM user created. May indicate persistence or legitimate provisioning — verify intent.",
+  "enabled": true,
+  "severity": "MEDIUM",
+  "notify": true,
+  "response_module": "",
+  "playbook": "Confirm the new user was created by an authorised principal via your change management process. Check if a policy was attached shortly after (look for correlated signals). If unexpected, disable the user immediately.",
+  "version": 1,
+  "conditions": [
+    { "field": "activity_name", "op": "equals", "value": "CreateUser" },
+    { "field": "api.service", "op": "equals", "value": "iam.amazonaws.com" }
+  ]
+}

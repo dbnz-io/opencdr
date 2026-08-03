@@ -1,0 +1,28 @@
+{
+  "detail-type": "AWS API Call via CloudTrail",
+  "source": "aws.ec2",
+  "account": "123456789012",
+  "region": "us-east-1",
+  "detail": {
+    "eventTime": "2026-01-01T12:00:00Z",
+    "eventSource": "ec2.amazonaws.com",
+    "eventName": "AuthorizeSecurityGroupIngress",
+    "awsRegion": "us-east-1",
+    "sourceIPAddress": "203.0.113.2",
+    "userAgent": "aws-cli/2.x",
+    "eventID": "test-evt-011",
+    "recipientAccountId": "123456789012",
+    "userIdentity": {
+      "type": "IAMUser",
+      "principalId": "AIDATEST002",
+      "arn": "arn:aws:iam::123456789012:user/attacker",
+      "userName": "attacker"
+    },
+    "requestParameters": {
+      "groupId": "sg-0abc123",
+      "ipPermissions": {
+        "items": [{ "ipProtocol": "tcp", "fromPort": 22, "toPort": 22, "ipRanges": { "items": [{ "cidrIp": "0.0.0.0/0" }] } }]
+      }
+    }
+  }
+}

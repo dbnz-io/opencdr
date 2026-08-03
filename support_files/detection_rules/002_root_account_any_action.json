@@ -1,0 +1,15 @@
+{
+  "rule_id": "002_root_account_any_action",
+  "rule_kind": "signal",
+  "created_by": "opencdr",
+  "description": "Root account used for any API action. Root should never be used for day-to-day operations.",
+  "enabled": true,
+  "severity": "CRITICAL",
+  "notify": true,
+  "response_module": "",
+  "playbook": "Root activity is almost always abnormal. Verify if this was intentional (e.g. billing change). If not, treat as a full account compromise: rotate root credentials, check for new IAM users or access keys, enable MFA on root immediately, and review all recent CloudTrail activity.",
+  "version": 1,
+  "conditions": [
+    { "field": "actor.type", "op": "equals", "value": "Root" }
+  ]
+}

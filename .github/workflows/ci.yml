@@ -1,0 +1,488 @@
+name: OpenCDR CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate-rules:
+    name: Validate Detection Rules
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate JSON syntax and required fields
+        run: |
+          python3 - <<'EOF'
+          import json, sys
+          from pathlib import Path
+
+          RULE_REQUIRED_FIELDS = ("rule_id", "rule_kind", "severity", "enabled")
+          LIST_REQUIRED_FIELDS = ("rule_id", "rule_kind", "values")
+          rule_dir = Path("support_files/detection_rules")
+          paths = sorted(rule_dir.glob("*.json"))
+
+          if not paths:
+              print("WARNING: no rule files found", file=sys.stderr)
+              sys.exit(0)
+
+          errors = []
+          for path in paths:
+              try:
+                  rule = json.loads(path.read_text())
+              except json.JSONDecodeError as exc:
+                  errors.append(f"{path.name}: invalid JSON — {exc}")
+                  continue
+              if rule.get("rule_kind") == "list":
+                  for field in LIST_REQUIRED_FIELDS:
+                      if field not in rule:
+                          errors.append(f"{path.name}: missing required field '{field}'")
+                  if "values" in rule and not isinstance(rule["values"], list):
+                      errors.append(f"{path.name}: 'values' must be an array")
+              else:
+                  for field in RULE_REQUIRED_FIELDS:
+                      if field not in rule:
+                          errors.append(f"{path.name}: missing required field '{field}'")
+
+          if errors:
+              for msg in errors:
+                  print(f"ERROR: {msg}", file=sys.stderr)
+              sys.exit(1)
+
+          print(f"All {len(paths)} rule(s) passed validation.")
+          EOF
+
+  secrets-scan:
+    name: Secrets Scan (gitleaks)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      # Installs the OSS gitleaks binary directly rather than using the
+      # gitleaks/gitleaks-action wrapper -- that wrapper requires a paid
+      # GITLEAKS_LICENSE for repos owned by a GitHub organization beyond
+      # the first one (this repo is under the dbnz-io org). The binary
+      # itself is MIT-licensed with no such restriction.
+      - name: Install gitleaks
+        run: |
+          VERSION=$(curl -sL https://api.github.com/repos/gitleaks/gitleaks/releases/latest | grep '"tag_name"' | cut -d '"' -f4 | sed 's/^v//')
+          curl -sSL "https://github.com/gitleaks/gitleaks/releases/download/v${VERSION}/gitleaks_${VERSION}_linux_x64.tar.gz" -o gitleaks.tar.gz
+          tar -xzf gitleaks.tar.gz gitleaks
+          sudo mv gitleaks /usr/local/bin/
+          rm gitleaks.tar.gz
+
+      # --no-git scans the checked-out tree as plain files, not the full
+      # commit history -- keeps this an ongoing "did this PR add a new
+      # secret" gate rather than re-scanning all of history every run.
+      - name: Scan working tree for secrets
+        run: gitleaks detect --source . --no-git --verbose --redact
+
+  python-sast:
+    name: Python SAST (bandit)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install bandit
+        run: pip install bandit
+
+      # -ll/-ii: report medium+ severity and medium+ confidence only --
+      # keeps this actionable rather than drowning in low-confidence noise.
+      - name: Run bandit
+        run: bandit -r src/ -ll -ii
+
+  sbom:
+    name: Generate SBOM
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      # GitHub's own dependency-graph SBOM export -- free on every repo
+      # including private ones (unlike CodeQL/native secret scanning,
+      # which need a paid GitHub Advanced Security license here).
+      - name: Export SBOM from GitHub's dependency graph
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh api "/repos/${{ github.repository }}/dependency-graph/sbom" > sbom.json
+
+      - name: Upload SBOM artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom-${{ github.sha }}
+          path: sbom.json
+          retention-days: 90
+
+  test:
+    name: Tests (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    needs: [validate-rules]
+    permissions:
+      contents: write
+
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements-dev.txt
+
+      - name: Run tests
+        run: pytest tests/ -v --cov=src --cov-report=xml
+
+      - name: Generate coverage badge
+        if: matrix.python-version == '3.12' && github.ref == 'refs/heads/main'
+        run: |
+          pip install genbadge[coverage]
+          genbadge coverage -i coverage.xml -o coverage-badge.svg
+
+      - name: Commit coverage badge
+        if: matrix.python-version == '3.12' && github.ref == 'refs/heads/main'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add coverage-badge.svg
+          git diff --staged --quiet || git commit -m "chore: update coverage badge [skip ci]"
+          git pull --rebase
+          git push
+
+  deploy:
+    name: Deploy (dev)
+    runs-on: ubuntu-latest
+    needs: [test]
+    # Only on a real push to main -- never on pull_request (no OIDC trust
+    # for fork PRs anyway, and shouldn't deploy unmerged code regardless).
+    # Requires ci-bootstrap/ to have been applied once and its role ARN
+    # set as the OPENCDR_CI_DEPLOY_ROLE_ARN repo variable -- see
+    # ci-bootstrap/README.md. Until that's done, this job fails clearly
+    # at the credentials step rather than silently skipping.
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    permissions:
+      id-token: write
+      contents: read
+    env:
+      STAGE: dev
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install serverless + plugins
+        run: npm ci
+
+      - name: Configure AWS credentials (OIDC, no long-lived keys)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.OPENCDR_CI_DEPLOY_ROLE_ARN }}
+          role-session-name: opencdr-ci-deploy
+          aws-region: us-east-1
+
+      # Piped through sed to redact the "api keys:" line from serverless's
+      # own summary output -- it prints the real key value in plaintext,
+      # which would otherwise sit in this job's log on every deploy (same
+      # exposure class as the .opencdr.json file already removed from this
+      # repo, just a different location). set -o pipefail so a failed
+      # deploy still fails the step even though sed itself exits 0.
+      - name: Deploy
+        run: |
+          set -o pipefail
+          npx serverless deploy --stage "$STAGE" 2>&1 | \
+            sed -E 's/^([[:space:]]*[^[:space:]]*-api-key:[[:space:]]*).+/\1***REDACTED*** (see SSM: \/opencdr-'"$STAGE"'\/api-key)/'
+
+      # Writes the real API Gateway key value to SSM as a SecureString
+      # instead of anyone pulling it into a local file by hand -- that's
+      # exactly how a real key ended up committed to this repo once
+      # already (see .opencdr.json in git history, since removed).
+      # ::add-mask:: is defense-in-depth; the value is never echoed here.
+      - name: Store API key in SSM Parameter Store
+        run: |
+          KEY_ID=$(aws apigateway get-api-keys \
+            --name-query "opencdr-${STAGE}-api-key" \
+            --query 'items[0].id' --output text)
+          KEY_VALUE=$(aws apigateway get-api-key \
+            --api-key "$KEY_ID" --include-value \
+            --query 'value' --output text)
+          echo "::add-mask::$KEY_VALUE"
+          aws ssm put-parameter \
+            --name "/opencdr-${STAGE}/api-key" \
+            --value "$KEY_VALUE" \
+            --type SecureString \
+            --overwrite
+
+      - name: Enable stack termination protection
+        run: |
+          aws cloudformation update-termination-protection \
+            --enable-termination-protection \
+            --stack-name "opencdr-${STAGE}"
+
+  post-deploy-check:
+    name: Post-Deploy Integrity Check
+    runs-on: ubuntu-latest
+    needs: [deploy]
+    permissions:
+      id-token: write
+      contents: read
+    env:
+      STAGE: dev
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC, no long-lived keys)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.OPENCDR_CI_DEPLOY_ROLE_ARN }}
+          role-session-name: opencdr-ci-post-deploy-check
+          aws-region: us-east-1
+
+      - name: Fetch API URL and key
+        run: |
+          API_URL=$(aws cloudformation describe-stacks \
+            --stack-name "opencdr-${STAGE}" \
+            --query "Stacks[0].Outputs[?OutputKey=='ServiceEndpoint'].OutputValue" \
+            --output text)
+          API_KEY=$(aws ssm get-parameter \
+            --name "/opencdr-${STAGE}/api-key" \
+            --with-decryption --query 'Parameter.Value' --output text)
+          echo "::add-mask::$API_KEY"
+          echo "API_URL=$API_URL" >> "$GITHUB_ENV"
+          echo "API_KEY=$API_KEY" >> "$GITHUB_ENV"
+
+      # Gate: the API must actually enforce its own auth, and a valid key
+      # must actually work. Both are fast and deterministic -- a real
+      # regression here should fail the pipeline, not just get logged.
+      - name: API auth enforcement
+        run: |
+          for path in rules signals; do
+            # /signals requires exactly one of severity|event_id|category
+            # (src/handlers/api.py _handle_list_signals) -- /rules has no
+            # such requirement. Confirmed against a real CI run: calling
+            # /signals with no query params returns 400, not 200.
+            qs=""
+            [[ "$path" == "signals" ]] && qs="?severity=HIGH"
+
+            invalid_status=$(curl -s -o /dev/null -w "%{http_code}" \
+              "${API_URL}/${path}${qs}" -H "x-api-key: not-a-real-key")  # gitleaks:allow -- deliberately fake, tests invalid-key rejection
+            if [[ "$invalid_status" != "403" && "$invalid_status" != "401" ]]; then
+              echo "FAIL: GET /${path} with an invalid key returned ${invalid_status}, expected 401/403"
+              exit 1
+            fi
+
+            valid_status=$(curl -s -o /dev/null -w "%{http_code}" \
+              "${API_URL}/${path}${qs}" -H "x-api-key: ${API_KEY}")
+            if [[ "$valid_status" != "200" ]]; then
+              echo "FAIL: GET /${path} with a valid key returned ${valid_status}, expected 200"
+              exit 1
+            fi
+            echo "OK: /${path} — invalid key rejected (${invalid_status}), valid key accepted (${valid_status})"
+          done
+
+      # Self-contained and isolated from the real rule set: a dedicated
+      # canary rule that only exists for this check, not one of the 23
+      # real detection rules scripts/load_rules.sh seeds. Deliberately
+      # decoupled -- "did this deploy work" shouldn't depend on "are all
+      # real rules loaded", and this also avoids ever touching the real
+      # rules, which may have been edited live via the API since the
+      # last load_rules.sh run (a plain upsert, not a merge, so
+      # re-running it on every deploy would silently clobber that edit).
+      # response_module empty means this can never trigger a real IR
+      # action; notify false and severity INFO keep it out of anything
+      # that treats it as a genuine finding.
+      - name: Ensure canary detection rule exists
+        run: |
+          RULE_ITEM=$(jq -n '{
+            "rule_kind": { "S": "signal" },
+            "rule_id":   { "S": "ci-canary-rule" },
+            "rule_body": { "S": ({
+              "rule_id": "ci-canary-rule",
+              "rule_kind": "signal",
+              "created_by": "ci",
+              "description": "Dedicated canary rule for the post-deploy integrity check -- not a real detection rule.",
+              "enabled": true,
+              "severity": "INFO",
+              "notify": false,
+              "response_module": "",
+              "playbook": "",
+              "version": 1,
+              "conditions": [
+                { "field": "activity_name", "op": "equals", "value": "ConsoleLogin" },
+                { "field": "raw_event.detail.additionalEventData.MFAUsed", "op": "equals", "value": "No" }
+              ]
+            } | tostring) }
+          }')
+          aws dynamodb put-item \
+            --table-name "opencdr-${STAGE}-detection-rules-table" \
+            --item "$RULE_ITEM"
+
+      # Gate: a synthetic event fired straight at the processor Lambda
+      # (same invoke mechanism scripts/test_deployed.sh already uses)
+      # must actually produce a signal via the canary rule above. Reuses
+      # the 001_console_login_no_mfa fixture's shape as the event payload
+      # only -- matching is against our own canary rule, not the real
+      # rule 001 -- with a fresh eventID per run (jq-patched) so each run
+      # proves *this* deploy works rather than finding a stale signal
+      # from a previous run. AWS's canonical placeholder account
+      # (123456789012, already used by every fixture in this repo) is
+      # what makes this identifiable as synthetic, same as it always has
+      # been for the manual test script.
+      - name: Synthetic rule-firing check
+        run: |
+          EVENT_ID="ci-canary-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          jq --arg eid "$EVENT_ID" '.detail.eventID = $eid' \
+            support_files/test_events/001_console_login_no_mfa.json > /tmp/canary_event.json
+
+          signal_count=0
+          # Two invoke attempts, not just DynamoDB polling: processor.py
+          # caches loaded rules per warm Lambda container for up to
+          # PROCESSOR_RULES_TTL_SECONDS (60s default). A container already
+          # warm from an earlier invocation before this run's canary rule
+          # was written would serve a stale rule set and correctly report
+          # no_detection -- confirmed directly against a real run, not
+          # assumed. Retrying once after a 65s gap (past the TTL) resolves
+          # that race deterministically instead of the check being flaky.
+          for invoke_attempt in 1 2; do
+            # raw-in-base64-out means the CLI wants the RAW payload and
+            # base64-encodes it internally -- passing an already-base64
+            # string here (as scripts/test_deployed.sh also does) double
+            # encodes it, which is exactly what broke on the first real
+            # run: "Could not parse payload into json" on the base64 text
+            # itself. file:// hands over the raw file content directly.
+            invoke_response=$(aws lambda invoke \
+              --function-name "opencdr-${STAGE}-processor" \
+              --payload file:///tmp/canary_event.json \
+              --cli-binary-format raw-in-base64-out \
+              --log-type None \
+              /tmp/canary_invoke_output.json)
+
+            invoke_status=$(echo "$invoke_response" | jq -r '.StatusCode')
+            function_error=$(echo "$invoke_response" | jq -r '.FunctionError // empty')
+
+            # StatusCode 200 only means the Invoke API call itself
+            # succeeded -- a synchronous Lambda invoke still returns 200
+            # even when the function raised an unhandled exception; that's
+            # what FunctionError is for. Print the response body either
+            # way so a failure here is self-diagnosing.
+            echo "Processor response body (invoke attempt ${invoke_attempt}):"
+            cat /tmp/canary_invoke_output.json
+            echo ""
+
+            if [[ "$invoke_status" != "200" || -n "$function_error" ]]; then
+              echo "FAIL: processor invocation returned StatusCode=${invoke_status} FunctionError=${function_error:-none}"
+              exit 1
+            fi
+
+            for attempt in 1 2 3 4 5; do
+              signal_count=$(aws dynamodb query \
+                --table-name "opencdr-${STAGE}-signals-table" \
+                --index-name gsi_signal_event_id \
+                --key-condition-expression "event_id = :eid" \
+                --expression-attribute-values "{\":eid\":{\"S\":\"${EVENT_ID}\"}}" \
+                --select COUNT --query "Count" --output text)
+              [[ "$signal_count" -gt 0 ]] && break
+              sleep 2
+            done
+
+            [[ "$signal_count" -gt 0 ]] && break
+
+            if [[ "$invoke_attempt" -lt 2 ]]; then
+              echo "No signal yet -- waiting 65s for the processor's rule cache to expire, then retrying once."
+              sleep 65
+            fi
+          done
+
+          if [[ "$signal_count" -eq 0 ]]; then
+            echo "FAIL: no signal found for synthetic event ${EVENT_ID} after 2 invoke attempts -- see the processor response body(s) printed above for why (no_rules means the rules table wasn't seeded, no_detection means the canary rule's conditions didn't match even after the cache-expiry retry)"
+            exit 1
+          fi
+          echo "OK: synthetic event produced ${signal_count} signal(s)"
+
+      # Alert-only: confirms the test webhook endpoint itself is reachable,
+      # independent of the real notifier/settings pipeline (which routes
+      # by whatever channels are actually configured for this stage, not
+      # by rule). continue-on-error at the step level, not the job level --
+      # the two gates above still block on failure.
+      - name: Notifier destination reachability (non-blocking)
+        continue-on-error: true
+        run: |
+          status=$(curl -s -o /dev/null -w "%{http_code}" -X POST \
+            -H "Content-Type: application/json" \
+            -d '{"text":"OpenCDR CI post-deploy check — this is a synthetic reachability test, not a real detection."}' \
+            "${{ secrets.OPENCDR_TEST_WEBHOOK_URL }}")
+          if [[ "$status" -lt 200 || "$status" -ge 300 ]]; then
+            echo "WARN: test webhook returned ${status}"
+            exit 1
+          fi
+          echo "OK: test webhook reachable (${status})"
+
+  release:
+    name: Cut Release from CHANGELOG
+    runs-on: ubuntu-latest
+    # Gated on the post-deploy check, not just deploy succeeding -- a
+    # release should mean "this version is confirmed working", not just
+    # "the deploy command exited zero".
+    needs: [deploy, post-deploy-check]
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # Idempotent by design: if the top CHANGELOG.md entry's version
+      # already has a matching tag, this is a no-op on every push where
+      # nothing new was added -- simpler than path-filtering the trigger,
+      # and correct either way.
+      - name: Cut tag + GitHub Release if CHANGELOG has an untagged version
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION=$(grep -m1 -oE '^## \[[0-9]+\.[0-9]+\.[0-9]+\]' CHANGELOG.md | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')
+          if [[ -z "$VERSION" ]]; then
+            echo "No version header found at the top of CHANGELOG.md, skipping."
+            exit 0
+          fi
+          TAG="v${VERSION}"
+
+          if git rev-parse "$TAG" >/dev/null 2>&1; then
+            echo "Tag ${TAG} already exists, nothing to do."
+            exit 0
+          fi
+
+          NOTES=$(awk -v ver="$VERSION" '
+            $0 ~ "^## \\[" ver "\\]" { found=1; next }
+            found && /^## \[/ { exit }
+            found { print }
+          ' CHANGELOG.md)
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -a "$TAG" -m "Release ${TAG}"
+          git push origin "$TAG"
+          gh release create "$TAG" --title "$TAG" --notes "$NOTES"

@@ -1,0 +1,79 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  Standalone template forwarding one AWS region's CloudTrail/GuardDuty
+  EventBridge events to OpenCDR's home (deployment) region.
+
+  Why this exists: OpenCDR's own serverless.yml wires processor's
+  EventBridge rule to the default bus in its own deployment region only.
+  CloudTrail delivers an event to the default bus in whichever region the
+  API call actually happened in -- true even for a multi-region trail --
+  and GuardDuty detectors are inherently per-region. An account operating
+  in more than one region is otherwise silently blind everywhere except
+  the one region OpenCDR is deployed to.
+
+  Deliberately kept separate from the main serverless.yml, same reasoning
+  as ci-bootstrap/ -- a `serverless deploy` in the home region can't
+  provision a rule in a different region, so this is applied independently
+  once per additional region you want covered (via
+  scripts/setup_region_forwarding.sh, not manually region by region).
+
+  The event pattern below must be kept in sync with processor's own
+  EventBridge rule in serverless.yml -- if you add a new event source
+  there, add it here too, or that source goes blind in every
+  non-deployment region.
+
+Parameters:
+  ServiceName:
+    Type: String
+    Default: opencdr
+  Stage:
+    Type: String
+    Default: dev
+  HomeEventBusArn:
+    Type: String
+    Description: >
+      The home region's default event bus ARN -- the
+      `DefaultEventBusArn` output from the main serverless.yml stack.
+  HomeForwarderRoleArn:
+    Type: String
+    Description: >
+      The IAM role this rule assumes to call PutEvents on the home bus --
+      the `RegionForwarderRoleArn` output from the main serverless.yml
+      stack. Not created here: IAM roles aren't region-scoped, and
+      creating one per region under the same name would collide.
+
+Resources:
+  ForwardingRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub "${ServiceName}-${Stage}-region-forwarder"
+      Description: !Sub "Forwards this region's CloudTrail/GuardDuty events to ${HomeEventBusArn}"
+      EventBusName: default
+      State: ENABLED
+      EventPattern:
+        source:
+          - "aws.guardduty"
+          - "aws.signin"
+          - "aws.iam"
+          - "aws.sts"
+          - "aws.lambda"
+          - "aws.ec2"
+          - "aws.cloudtrail"
+          - "aws.config"
+          - "aws.securityhub"
+          - "aws.secretsmanager"
+          - "aws.ssm"
+          - "aws.s3"
+          - "aws.rds"
+        detail-type:
+          - "GuardDuty Finding"
+          - "AWS API Call via CloudTrail"
+          - "AWS Console Sign In via CloudTrail"
+      Targets:
+        - Id: HomeRegionBus
+          Arn: !Ref HomeEventBusArn
+          RoleArn: !Ref HomeForwarderRoleArn
+
+Outputs:
+  ForwardingRuleArn:
+    Value: !GetAtt ForwardingRule.Arn

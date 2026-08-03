@@ -1,0 +1,16 @@
+{
+  "rule_id": "003_root_console_login",
+  "rule_kind": "signal",
+  "created_by": "opencdr",
+  "description": "Root account logged in to the AWS Console. Highest-severity identity event.",
+  "enabled": true,
+  "severity": "CRITICAL",
+  "notify": true,
+  "response_module": "",
+  "playbook": "Confirm with the account owner if this login was intentional. Root console access should be an extremely rare event. If unexpected: lock down root by removing access keys, enforce MFA, and initiate a full account review.",
+  "version": 1,
+  "conditions": [
+    { "field": "actor.type", "op": "equals", "value": "Root" },
+    { "field": "activity_name", "op": "equals", "value": "ConsoleLogin" }
+  ]
+}

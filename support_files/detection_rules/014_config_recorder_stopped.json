@@ -1,0 +1,16 @@
+{
+  "rule_id": "014_config_recorder_stopped",
+  "rule_kind": "signal",
+  "created_by": "opencdr",
+  "description": "AWS Config recorder or delivery channel stopped or deleted. Removes configuration change visibility.",
+  "enabled": true,
+  "severity": "HIGH",
+  "notify": true,
+  "response_module": "",
+  "playbook": "Re-enable the Config recorder and delivery channel. Review the configuration timeline gap — any resource changes made while Config was off will not have been recorded. Cross-reference with CloudTrail for activity during the outage window.",
+  "version": 1,
+  "conditions": [
+    { "field": "activity_name", "op": "in", "value": ["StopConfigurationRecorder", "DeleteConfigurationRecorder", "DeleteDeliveryChannel"] },
+    { "field": "api.service", "op": "equals", "value": "config.amazonaws.com" }
+  ]
+}

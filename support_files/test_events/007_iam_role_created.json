@@ -1,0 +1,26 @@
+{
+  "detail-type": "AWS API Call via CloudTrail",
+  "source": "aws.iam",
+  "account": "123456789012",
+  "region": "us-east-1",
+  "detail": {
+    "eventTime": "2026-01-01T12:00:00Z",
+    "eventSource": "iam.amazonaws.com",
+    "eventName": "CreateRole",
+    "awsRegion": "us-east-1",
+    "sourceIPAddress": "203.0.113.2",
+    "userAgent": "aws-cli/2.x",
+    "eventID": "test-evt-007",
+    "recipientAccountId": "123456789012",
+    "userIdentity": {
+      "type": "IAMUser",
+      "principalId": "AIDATEST002",
+      "arn": "arn:aws:iam::123456789012:user/attacker",
+      "userName": "attacker"
+    },
+    "requestParameters": {
+      "roleName": "backdoor-role",
+      "assumeRolePolicyDocument": "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\",\"Principal\":{\"AWS\":\"arn:aws:iam::999999999999:root\"},\"Action\":\"sts:AssumeRole\"}]}"
+    }
+  }
+}

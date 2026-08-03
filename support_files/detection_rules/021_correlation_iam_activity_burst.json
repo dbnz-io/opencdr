@@ -1,0 +1,17 @@
+{
+  "rule_id": "021_correlation_iam_activity_burst",
+  "rule_kind": "correlation",
+  "created_by": "opencdr",
+  "description": "High volume of IAM signals from the same actor within 5 minutes — indicates automated enumeration or privilege escalation scripting.",
+  "enabled": true,
+  "severity": "CRITICAL",
+  "notify": true,
+  "response_module": "disable_user",
+  "playbook": "An attacker running automated IAM tooling (e.g. Pacu, enumerate-iam) will generate many IAM signals in a short window. Disable the actor, revoke active sessions, and review every IAM change made during the burst window.",
+  "group_by": "actor.user_name",
+  "time_window_seconds": 300,
+  "threshold": 5,
+  "signal_conditions": [
+    { "field": "category", "op": "equals", "value": "iam" }
+  ]
+}

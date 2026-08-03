@@ -1,0 +1,39 @@
+{
+  "setting_id": "global",
+
+  "notifications_enabled": true,
+
+  "channels": {
+    "discord": {
+      "enabled": true,
+      "webhook_url": "https://discord.com/api/webhooks/XXXXXXXX",
+      "severity_threshold": "LOW"
+    },
+    "slack": {
+      "enabled": false,
+      "webhook_url": "",
+      "severity_threshold": "HIGH"
+    },
+    "email": {
+      "enabled": false,
+      "topic_arn": ""
+    }
+  },
+
+  "routing": {
+    "severity_overrides": {
+      "CRITICAL": ["discord", "slack"],
+      "HIGH": ["discord"],
+      "MEDIUM": []
+    }
+  },
+
+  "rate_limit": {
+    "max_per_minute": 50
+  },
+
+  "enrichment": {
+    "include_raw_event": false,
+    "include_signal_summary": true
+  }
+}

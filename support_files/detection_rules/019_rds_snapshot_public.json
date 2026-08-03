@@ -1,0 +1,16 @@
+{
+  "rule_id": "019_rds_snapshot_public",
+  "rule_kind": "signal",
+  "created_by": "opencdr",
+  "description": "RDS snapshot attribute modified — may have been made publicly accessible, exposing a full database backup.",
+  "enabled": true,
+  "severity": "HIGH",
+  "notify": true,
+  "response_module": "",
+  "playbook": "Check the snapshot's restore attribute in the RDS console. If 'all' was added to the restore attribute list, the snapshot is publicly accessible. Remove the public permission immediately, assess what data the snapshot contains, and treat as a data breach.",
+  "version": 1,
+  "conditions": [
+    { "field": "activity_name", "op": "equals", "value": "ModifyDBSnapshotAttribute" },
+    { "field": "api.service", "op": "equals", "value": "rds.amazonaws.com" }
+  ]
+}

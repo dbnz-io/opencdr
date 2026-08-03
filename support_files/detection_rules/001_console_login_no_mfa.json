@@ -1,0 +1,16 @@
+{
+  "rule_id": "001_console_login_no_mfa",
+  "rule_kind": "signal",
+  "created_by": "opencdr",
+  "description": "Console login without MFA — high-risk indicator of account compromise or stolen credentials.",
+  "enabled": true,
+  "severity": "HIGH",
+  "notify": true,
+  "response_module": "",
+  "playbook": "Verify the user and source IP. If unexpected, revoke active sessions via the IAM console, enforce MFA on the account, rotate credentials, and review CloudTrail for activity in the 30 minutes following the login.",
+  "version": 1,
+  "conditions": [
+    { "field": "activity_name", "op": "equals", "value": "ConsoleLogin" },
+    { "field": "raw_event.detail.additionalEventData.MFAUsed", "op": "equals", "value": "No" }
+  ]
+}

@@ -1,0 +1,14 @@
+# Paths excluded from `git archive` output -- used by
+# .github/workflows/promote-to-public.yml to build the public repo's tree.
+# Internal-only tooling, gitignored-but-tracked build artifacts (see
+# node_modules/.serverless/.requirements.zip below -- .gitignore doesn't
+# retroactively untrack what was already committed), and stray files that
+# have no business in a public release.
+
+.claude/ export-ignore
+node_modules/ export-ignore
+.serverless/ export-ignore
+.requirements.zip export-ignore
+flag export-ignore
+*.pdf export-ignore
+*.pptx export-ignore

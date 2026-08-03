@@ -1,0 +1,361 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  Standalone bootstrap for OpenCDR's CI deploy pipeline: a GitHub Actions
+  OIDC identity provider and an IAM role GitHub Actions can assume (via
+  short-lived federated credentials, no long-lived AWS keys) to run
+  `serverless deploy` and post-deploy stack protection/drift checks.
+
+  Deliberately kept separate from this repo's main serverless.yml -- this
+  is account-bootstrap infrastructure, not part of the OpenCDR application
+  stack, and is meant to be applied once per AWS account (yours, or a
+  client's) rather than redeployed alongside the app. See README.md in
+  this folder for the one-time setup steps.
+
+Parameters:
+  GitHubOrg:
+    Type: String
+    Default: dbnz-io
+    Description: GitHub org/user that owns the repo allowed to assume this role.
+  GitHubRepo:
+    Type: String
+    Default: opencdr-internal
+    Description: Repo name (without org) allowed to assume this role.
+  GitHubBranch:
+    Type: String
+    Default: main
+    Description: Only workflow runs on this branch may assume this role.
+  ServiceName:
+    Type: String
+    Default: opencdr
+    Description: >
+      Must match `service` in the target serverless.yml -- used to scope
+      this role's permissions to that service's resource-naming prefix.
+  CreateOidcProvider:
+    Type: String
+    Default: "true"
+    AllowedValues: ["true", "false"]
+    Description: >
+      Set to "false" if this account already has a GitHub Actions OIDC
+      provider (token.actions.githubusercontent.com) -- CloudFormation
+      fails if you try to create a second one for the same URL. Check
+      first with:
+        aws iam list-open-id-connect-providers
+
+Conditions:
+  ShouldCreateOidcProvider: !Equals [!Ref CreateOidcProvider, "true"]
+
+Resources:
+  GitHubOidcProvider:
+    Type: AWS::IAM::OIDCProvider
+    Condition: ShouldCreateOidcProvider
+    Properties:
+      Url: https://token.actions.githubusercontent.com
+      ClientIdList:
+        - sts.amazonaws.com
+      # GitHub's current OIDC TLS certificate thumbprint. Rotate this if
+      # GitHub ever rotates their certificate authority -- see
+      # https://github.blog/changelog/2023-06-27-github-actions-update-on-oidc-integration-with-aws/
+      ThumbprintList:
+        - 6938fd4d98bab03faadb97b34396831e3780aea1
+
+  OpencdrCiDeployRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${ServiceName}-ci-deploy-role"
+      Description: >
+        Assumed by GitHub Actions (OIDC, no long-lived keys) to deploy
+        OpenCDR and run post-deploy stack protection/drift checks.
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: !Sub
+                - "arn:aws:iam::${AWS::AccountId}:oidc-provider/token.actions.githubusercontent.com"
+                - {}
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                "token.actions.githubusercontent.com:aud": sts.amazonaws.com
+              StringLike:
+                "token.actions.githubusercontent.com:sub": !Sub "repo:${GitHubOrg}/${GitHubRepo}:ref:refs/heads/${GitHubBranch}"
+      Policies:
+        - PolicyName: opencdr-deploy-permissions
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              # CloudFormation: the stack itself. No resource-name scoping
+              # possible narrower than the stack -- serverless deploy
+              # manages the whole stack as one unit.
+              - Sid: CloudFormationStack
+                Effect: Allow
+                Action:
+                  - cloudformation:CreateStack
+                  - cloudformation:UpdateStack
+                  - cloudformation:DeleteStack
+                  - cloudformation:DescribeStacks
+                  - cloudformation:DescribeStackEvents
+                  - cloudformation:DescribeStackResource
+                  - cloudformation:DescribeStackResources
+                  - cloudformation:GetTemplate
+                  - cloudformation:ValidateTemplate
+                  - cloudformation:ListStackResources
+                  - cloudformation:CreateChangeSet
+                  - cloudformation:DescribeChangeSet
+                  - cloudformation:ExecuteChangeSet
+                  - cloudformation:DeleteChangeSet
+                Resource:
+                  - !Sub "arn:aws:cloudformation:*:${AWS::AccountId}:stack/${ServiceName}-*/*"
+
+              # Stack protection + drift detection (Phase 3, item 3) --
+              # same role covers deploy and ongoing operational checks.
+              - Sid: CloudFormationStackOps
+                Effect: Allow
+                Action:
+                  - cloudformation:UpdateTerminationProtection
+                  - cloudformation:DetectStackDrift
+                  - cloudformation:DescribeStackDriftDetectionStatus
+                  - cloudformation:DescribeStackResourceDrifts
+                Resource:
+                  - !Sub "arn:aws:cloudformation:*:${AWS::AccountId}:stack/${ServiceName}-*/*"
+
+              # Deployment bucket -- serverless's default auto-created
+              # bucket name includes a random suffix unknown ahead of
+              # time, so this is scoped by prefix, not an exact name.
+              - Sid: DeploymentBucket
+                Effect: Allow
+                Action:
+                  - s3:CreateBucket
+                  - s3:PutBucketPolicy
+                  - s3:PutBucketVersioning
+                  - s3:PutEncryptionConfiguration
+                  - s3:PutBucketPublicAccessBlock
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:DeleteObject
+                  - s3:ListBucket
+                Resource:
+                  - !Sub "arn:aws:s3:::${ServiceName}-*-serverlessdeploymentbucket-*"
+                  - !Sub "arn:aws:s3:::${ServiceName}-*-serverlessdeploymentbucket-*/*"
+
+              # Lambda functions.
+              - Sid: Lambda
+                Effect: Allow
+                Action:
+                  - lambda:CreateFunction
+                  - lambda:UpdateFunctionCode
+                  - lambda:UpdateFunctionConfiguration
+                  - lambda:GetFunction
+                  - lambda:GetFunctionConfiguration
+                  - lambda:DeleteFunction
+                  - lambda:AddPermission
+                  - lambda:RemovePermission
+                  - lambda:GetPolicy
+                  - lambda:PublishVersion
+                  - lambda:CreateAlias
+                  - lambda:UpdateAlias
+                  - lambda:ListVersionsByFunction
+                  - lambda:TagResource
+                  - lambda:UntagResource
+                  - lambda:ListTags
+                  - lambda:CreateEventSourceMapping
+                  - lambda:UpdateEventSourceMapping
+                  - lambda:DeleteEventSourceMapping
+                  - lambda:GetEventSourceMapping
+                Resource:
+                  - !Sub "arn:aws:lambda:*:${AWS::AccountId}:function:${ServiceName}-*"
+                  - !Sub "arn:aws:lambda:*:${AWS::AccountId}:event-source-mapping:*"
+
+              # IAM: creating/updating the per-function execution roles
+              # (serverless-iam-roles-per-function) and the OpencdrIrRole
+              # -- both already follow the ${service}-${stage}-* naming
+              # convention used throughout serverless.yml. PassRole is
+              # required for Lambda to assume the role it's given at
+              # creation time, scoped to the same prefix.
+              - Sid: IamRoleManagement
+                Effect: Allow
+                Action:
+                  - iam:CreateRole
+                  - iam:DeleteRole
+                  - iam:GetRole
+                  - iam:PutRolePolicy
+                  - iam:DeleteRolePolicy
+                  - iam:GetRolePolicy
+                  - iam:AttachRolePolicy
+                  - iam:DetachRolePolicy
+                  - iam:UpdateAssumeRolePolicy
+                  - iam:TagRole
+                  - iam:UntagRole
+                  - iam:PassRole
+                Resource:
+                  - !Sub "arn:aws:iam::${AWS::AccountId}:role/${ServiceName}-*"
+
+              # DynamoDB tables (+ streams -- alerter/publisher trigger
+              # off them) and their GSIs. Data-plane actions (Query/PutItem/
+              # GetItem/Scan) added for Phase 5's CI steps that write/read
+              # table data directly rather than through the app's own
+              # Lambda roles: load_rules.sh seeds the detection-rules-table
+              # after every deploy, and post-deploy-check queries the
+              # signals-table's gsi_signal_event_id GSI.
+              - Sid: DynamoDb
+                Effect: Allow
+                Action:
+                  - dynamodb:CreateTable
+                  - dynamodb:UpdateTable
+                  - dynamodb:DeleteTable
+                  - dynamodb:DescribeTable
+                  - dynamodb:DescribeTimeToLive
+                  - dynamodb:UpdateTimeToLive
+                  - dynamodb:DescribeContinuousBackups
+                  - dynamodb:ListTagsOfResource
+                  - dynamodb:TagResource
+                  - dynamodb:UntagResource
+                  - dynamodb:DescribeStream
+                  - dynamodb:ListStreams
+                  - dynamodb:PutItem
+                  - dynamodb:GetItem
+                  - dynamodb:Query
+                  - dynamodb:Scan
+                Resource:
+                  - !Sub "arn:aws:dynamodb:*:${AWS::AccountId}:table/${ServiceName}-*"
+                  - !Sub "arn:aws:dynamodb:*:${AWS::AccountId}:table/${ServiceName}-*/index/*"
+                  - !Sub "arn:aws:dynamodb:*:${AWS::AccountId}:table/${ServiceName}-*/stream/*"
+
+              # EventBridge: processor's rules (GuardDuty + CloudTrail
+              # sources on the default bus) and, as of the cross-region
+              # forwarding work, RegionForwarderBusPolicy (an
+              # AWS::Events::EventBusPolicy, backed by the PutPermission/
+              # RemovePermission API actions, not a *Attributes-style call
+              # the way SQS/SNS resource policies work). This Sid was
+              # missing entirely before -- a pre-existing gap unrelated to
+              # this addition, masked the same way Phase 5's DynamoDB gap
+              # was: the actual deployed CI role currently runs with admin
+              # privileges, a known, agreed drift from this template.
+              - Sid: EventBridge
+                Effect: Allow
+                Action:
+                  - events:PutRule
+                  - events:DeleteRule
+                  - events:DescribeRule
+                  - events:PutTargets
+                  - events:RemoveTargets
+                  - events:ListTargetsByRule
+                  - events:TagResource
+                  - events:UntagResource
+                Resource:
+                  - !Sub "arn:aws:events:*:${AWS::AccountId}:rule/${ServiceName}-*"
+              - Sid: EventBridgeBusPolicy
+                Effect: Allow
+                Action:
+                  - events:PutPermission
+                  - events:RemovePermission
+                  - events:DescribeEventBus
+                Resource:
+                  - !Sub "arn:aws:events:*:${AWS::AccountId}:event-bus/default"
+
+              # SQS queues (+ DLQs).
+              - Sid: Sqs
+                Effect: Allow
+                Action:
+                  - sqs:CreateQueue
+                  - sqs:DeleteQueue
+                  - sqs:GetQueueAttributes
+                  - sqs:SetQueueAttributes
+                  - sqs:TagQueue
+                  - sqs:UntagQueue
+                Resource:
+                  - !Sub "arn:aws:sqs:*:${AWS::AccountId}:${ServiceName}-*"
+
+              # SNS topics + subscriptions (alarms, security alerts).
+              - Sid: Sns
+                Effect: Allow
+                Action:
+                  - sns:CreateTopic
+                  - sns:DeleteTopic
+                  - sns:GetTopicAttributes
+                  - sns:SetTopicAttributes
+                  - sns:Subscribe
+                  - sns:Unsubscribe
+                  - sns:TagResource
+                  - sns:UntagResource
+                Resource:
+                  - !Sub "arn:aws:sns:*:${AWS::AccountId}:${ServiceName}-*"
+
+              # AWS Budgets (cost alert, CostBudget in serverless.yml).
+              # Budgets' IAM action namespace is unusually coarse -- these
+              # two actions cover the full create/read/update/delete
+              # lifecycle, there's no per-verb split like most services.
+              # Not resource-scopable to a name prefix the way most
+              # services here are; Budgets ARNs don't support wildcards
+              # on the account-scoped resource the way arn:aws:sqs:...
+              # does above, so this stays account-wide like X-Ray's writes.
+              - Sid: Budgets
+                Effect: Allow
+                Action:
+                  - budgets:ViewBudget
+                  - budgets:ModifyBudget
+                Resource: "*"
+
+              # API Gateway (REST API, API keys, usage plan).
+              - Sid: ApiGateway
+                Effect: Allow
+                Action:
+                  - apigateway:GET
+                  - apigateway:POST
+                  - apigateway:PUT
+                  - apigateway:PATCH
+                  - apigateway:DELETE
+                Resource:
+                  - "arn:aws:apigateway:*::/restapis*"
+                  - "arn:aws:apigateway:*::/apikeys*"
+                  - "arn:aws:apigateway:*::/usageplans*"
+
+              # CloudWatch Logs (one log group per Lambda) + Alarms.
+              - Sid: LogsAndAlarms
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:DeleteLogGroup
+                  - logs:DescribeLogGroups
+                  - logs:PutRetentionPolicy
+                  - logs:TagLogGroup
+                  - cloudwatch:PutMetricAlarm
+                  - cloudwatch:DeleteAlarms
+                  - cloudwatch:DescribeAlarms
+                Resource:
+                  - !Sub "arn:aws:logs:*:${AWS::AccountId}:log-group:/aws/lambda/${ServiceName}-*"
+                  - !Sub "arn:aws:cloudwatch:*:${AWS::AccountId}:alarm:${ServiceName}-*"
+
+              # SSM -- storing the deployed API Gateway key's real value as
+              # a SecureString after `serverless deploy`, so it never has
+              # to be pulled into a local file by hand (that's exactly how
+              # a real key ended up committed to this repo once already).
+              - Sid: SsmApiKeyStorage
+                Effect: Allow
+                Action:
+                  - ssm:PutParameter
+                  - ssm:GetParameter
+                Resource:
+                  - !Sub "arn:aws:ssm:*:${AWS::AccountId}:parameter/${ServiceName}-*/api-key"
+
+              # KMS -- Phase 2's settings-secrets SSM indirection needs
+              # deploy-time grants to exist, not just runtime ones (SSM
+              # parameters are created empty; no KMS key management here).
+              # Encrypt/GenerateDataKey added for the SsmApiKeyStorage
+              # write above, which actually writes a SecureString value
+              # from this role (Phase 2's own writes happen from the api
+              # Lambda's own role, not this one).
+              - Sid: KmsDescribe
+                Effect: Allow
+                Action:
+                  - kms:DescribeKey
+                  - kms:Encrypt
+                  - kms:GenerateDataKey
+                Resource: "*"
+
+Outputs:
+  RoleArn:
+    Description: >
+      Set this as a GitHub repo VARIABLE (not secret) named
+      OPENCDR_CI_DEPLOY_ROLE_ARN -- see README.md in this folder.
+    Value: !GetAtt OpencdrCiDeployRole.Arn

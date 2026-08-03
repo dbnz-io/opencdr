@@ -1,0 +1,16 @@
+{
+  "rule_id": "017_ssm_parameter_accessed",
+  "rule_kind": "signal",
+  "created_by": "opencdr",
+  "description": "SSM Parameter Store value retrieved. SecureString parameters may contain sensitive credentials or tokens.",
+  "enabled": true,
+  "severity": "MEDIUM",
+  "notify": true,
+  "response_module": "",
+  "playbook": "Confirm the accessing principal is a known application or pipeline. If unexpected, rotate all values stored in the accessed parameters. Review the principal's session for further enumeration activity.",
+  "version": 1,
+  "conditions": [
+    { "field": "activity_name", "op": "in", "value": ["GetParameter", "GetParameters", "GetParametersByPath"] },
+    { "field": "api.service", "op": "equals", "value": "ssm.amazonaws.com" }
+  ]
+}

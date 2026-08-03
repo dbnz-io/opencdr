@@ -1,0 +1,16 @@
+{
+  "rule_id": "007_iam_role_created",
+  "rule_kind": "signal",
+  "created_by": "opencdr",
+  "description": "New IAM role created. Review the trust policy for external or wildcard principals that could allow cross-account or public assumption.",
+  "enabled": true,
+  "severity": "MEDIUM",
+  "notify": true,
+  "response_module": "",
+  "playbook": "Review the role's trust policy in the IAM console. Look for external account IDs, wildcard principals ('*'), or unexpected federated principals. If the role was not created via an approved pipeline, disable it and investigate the creating principal.",
+  "version": 1,
+  "conditions": [
+    { "field": "activity_name", "op": "equals", "value": "CreateRole" },
+    { "field": "api.service", "op": "equals", "value": "iam.amazonaws.com" }
+  ]
+}

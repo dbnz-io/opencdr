@@ -1,0 +1,25 @@
+version: 2
+updates:
+  - package-ecosystem: "npm"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 10
+    ignore:
+      # serverless.yml pins frameworkVersion: "3" -- v4 can't run against
+      # it (confirmed directly: this caused a real CI deploy failure,
+      # "No version found for 3", fixed by pinning serverless ^3.40.0).
+      # Minor/patch bumps within v3 are still fine and still proposed.
+      - dependency-name: "serverless"
+        update-types: ["version-update:semver-major"]
+
+  - package-ecosystem: "pip"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 10
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"

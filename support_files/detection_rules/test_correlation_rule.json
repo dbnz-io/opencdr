@@ -1,0 +1,23 @@
+{
+  "rule_id": "000_test_create_user_correlation",
+  "rule_kind": "correlation",
+  "enabled": true,
+  "severity": "CRITICAL",
+  "description": "Suspicious login followed by privilege escalation actions",
+
+  "group_by": "actor.user_name",
+
+  "time_window_seconds": 900,
+  "threshold": 1,
+
+  "sequence": [
+    {
+      "signal_rule_id": "000_test_create_user"
+    }
+  ],
+
+  "notify": true,
+  "response_module": "disable_user",
+
+  "playbook": "Possible account takeover — disable user and review activity."
+}

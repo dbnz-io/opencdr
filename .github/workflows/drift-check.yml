@@ -1,0 +1,68 @@
+name: OpenCDR Stack Drift Check
+
+on:
+  schedule:
+    # Every Monday at 13:00 UTC. Purely observational -- reports drift,
+    # takes no corrective action.
+    - cron: "0 13 * * 1"
+  workflow_dispatch: {}
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  drift-check:
+    name: Detect stack drift (dev)
+    runs-on: ubuntu-latest
+    # Requires ci-bootstrap/ to have been applied once and its role ARN
+    # set as the OPENCDR_CI_DEPLOY_ROLE_ARN repo variable -- see
+    # ci-bootstrap/README.md. Same role as the deploy job; only the
+    # read-only drift-detection actions it grants are used here.
+    steps:
+      - name: Configure AWS credentials (OIDC, no long-lived keys)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.OPENCDR_CI_DEPLOY_ROLE_ARN }}
+          role-session-name: opencdr-drift-check
+          aws-region: us-east-1
+
+      - name: Detect and report drift
+        run: |
+          set -euo pipefail
+          STACK_NAME="opencdr-dev"
+
+          DETECTION_ID=$(aws cloudformation detect-stack-drift \
+            --stack-name "$STACK_NAME" \
+            --query "StackDriftDetectionId" --output text)
+
+          echo "Drift detection started: $DETECTION_ID"
+
+          STATUS="DETECTION_IN_PROGRESS"
+          while [ "$STATUS" = "DETECTION_IN_PROGRESS" ]; do
+            sleep 10
+            STATUS=$(aws cloudformation describe-stack-drift-detection-status \
+              --stack-drift-detection-id "$DETECTION_ID" \
+              --query "DetectionStatus" --output text)
+            echo "Status: $STATUS"
+          done
+
+          if [ "$STATUS" != "DETECTION_COMPLETE" ]; then
+            echo "Drift detection did not complete cleanly: $STATUS"
+            exit 1
+          fi
+
+          DRIFTED=$(aws cloudformation describe-stack-resource-drifts \
+            --stack-name "$STACK_NAME" \
+            --stack-resource-drift-status-filters MODIFIED DELETED \
+            --query "StackResourceDrifts" --output json)
+
+          COUNT=$(echo "$DRIFTED" | python3 -c "import json,sys; print(len(json.load(sys.stdin)))")
+
+          if [ "$COUNT" -gt 0 ]; then
+            echo "::error::$COUNT drifted resource(s) detected in $STACK_NAME"
+            echo "$DRIFTED" | python3 -m json.tool
+            exit 1
+          fi
+
+          echo "No drift detected in $STACK_NAME."
