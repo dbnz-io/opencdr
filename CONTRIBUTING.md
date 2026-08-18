@@ -7,15 +7,22 @@ Thank you for your interest in contributing. OpenCDR is an open-source project a
 ## Getting Started
 
 ```bash
-git clone https://github.com/<your-org>/opencdr.git
+git clone --recurse-submodules https://github.com/<your-org>/opencdr.git
 cd opencdr
 pip install -r requirements-dev.txt
 ```
+
+`support_files/detection_rules` is a git submodule (rule content lives in its own repo, see
+[Detection Rules](#detection-rules) below) — `--recurse-submodules` populates it on clone. If you
+already cloned without that flag: `git submodule update --init`.
 
 Run the test suite before making any changes:
 
 ```bash
 pytest tests/ -v
+
+# With coverage
+pytest tests/ --cov=src --cov=scripts --cov-report=term-missing
 ```
 
 ---
@@ -30,14 +37,23 @@ Open a GitHub issue with:
 - Deployment stage and region (redact account IDs)
 
 ### Detection Rules
-New rules are the highest-value contribution. To add a rule:
+New rules are the highest-value contribution, and rule content lives in its own repo —
+[dbnz-io/opencdr-detection-rules](https://github.com/dbnz-io/opencdr-detection-rules), MIT-licensed
+— consumed here as a git submodule at `support_files/detection_rules`. Adding a rule is a two-repo
+change:
 
-1. Add the rule JSON to `support_files/detection_rules/` following the naming convention `NNN_rule_name.json`
-2. Add a matching test event to `support_files/test_events/NNN_event_name.json`
+1. Open a PR to [dbnz-io/opencdr-detection-rules](https://github.com/dbnz-io/opencdr-detection-rules)
+   adding the rule JSON to `<source>/` (e.g. `cloudtrail/`, `guardduty/` — one folder per event
+   source; add a new source folder the same way if the rule doesn't fit an existing one) following
+   the naming convention `NNN_rule_name.json`. See that repo's README for the rule schema and
+   contribution expectations.
+2. Once merged there, open a companion PR here that bumps the submodule pin
+   (`git submodule update --remote support_files/detection_rules`) and adds a matching test event to
+   `support_files/test_events/NNN_event_name.json`.
 3. Verify locally: `python3 scripts/test_rules_local.py --event NNN`
-4. Open a PR with the rule, the test event, and a description of the attack pattern it covers
+4. Describe the attack pattern the rule covers in the PR description.
 
-For rule schema reference see the [Writing Detection Rules](README.md#writing-detection-rules) section of the README.
+For rule schema reference see [dbnz-io/opencdr-detection-rules](https://github.com/dbnz-io/opencdr-detection-rules), and [Detection Rules](docs/detection-rules.md) for how rules are stored and loaded here.
 
 ### Code Changes
 - Keep PRs focused — one logical change per PR

@@ -24,8 +24,10 @@ You can expect an acknowledgement within **48 hours** and a status update within
 
 This policy covers vulnerabilities in:
 - Detection and correlation logic (`src/domain/`)
-- Incident response actions (`src/dredge/`)
+- Incident response / automated response handling (`src/handlers/responder.py`)
 - API handlers (`src/handlers/`)
 - Bundled detection rules (`support_files/detection_rules/`)
+
+The actual incident-response actions (disabling a user, revoking an access key, etc.) live in [`dbnz-io/dredge`](https://github.com/dbnz-io/dredge), a separate pinned dependency, not vendored in this repo — report vulnerabilities in that code to that repository directly.
 
 Out of scope: vulnerabilities in third-party dependencies (report those upstream), AWS infrastructure misconfigurations in user deployments, or issues in forked/modified versions.

@@ -3,14 +3,42 @@
 import json
 import os
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import boto3
 
 from ..config.requirements import ALLOWED_EVENT_TYPES
+from .partition_keys import day_bucket_key
 
 _logs_table = None
+
+# Optional, off by default: narrow which levels actually get persisted to
+# DynamoDB (CloudWatch still gets every line via the print() below,
+# regardless). Unset means "store everything" -- today's behavior,
+# unchanged -- since GET /logs already only supports targeted GSI Query
+# lookups, never a full scan (see docs/data-archival.md), storing
+# everything isn't itself a correctness problem, just a cost one some
+# deployments may want to opt into trimming. Every log line is archived
+# to S3 first regardless of what's persisted to DynamoDB (see
+# src/handlers/archiver.py) -- narrowing this only affects what's
+# queryable live via the API, never what's retained for investigation.
+_LEVEL_ORDER = {"INFO": 0, "WARNING": 1, "ERROR": 2}
+
+
+def _should_store_in_dynamodb(level: str) -> bool:
+    min_level = os.environ.get("LOGS_MIN_LEVEL_TO_STORE", "").upper()
+    if min_level not in _LEVEL_ORDER:
+        return True
+    return _LEVEL_ORDER.get(level, 0) >= _LEVEL_ORDER[min_level]
+
+
+def _ttl_expires_at() -> int:
+    # Duplicated from aws_handler.ttl_expires_at rather than imported --
+    # aws_handler.py itself imports Logger from this module, so importing
+    # back would be circular. Same DYNAMODB_TTL_DAYS env var, same math.
+    days = int(os.environ.get("DYNAMODB_TTL_DAYS", "90"))
+    return int((datetime.now(UTC) + timedelta(days=days)).timestamp())
 
 
 def _get_logs_table():
@@ -174,6 +202,11 @@ class Logger:
             "user_name": self.user_name,
             "details": merged_details,
             "service": self.service,
+            # logs-table-v2's actual HASH key -- a separate attribute
+            # from `service`, so `service` stays clean for archiver.py's
+            # flatten_log and the S3/Athena archive.
+            "service_bucket": day_bucket_key(self.service, timestamp),
+            "expires_at": _ttl_expires_at(),
         }
 
         # Only include event_id if it's a real string
@@ -182,6 +215,9 @@ class Logger:
 
         # Always print to stdout (Lambda logging)
         print(json.dumps(log_item, default=str))
+
+        if not _should_store_in_dynamodb(level):
+            return
 
         # Write audit record to DynamoDB
         try:

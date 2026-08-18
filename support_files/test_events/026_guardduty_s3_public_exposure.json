@@ -1,0 +1,38 @@
+{
+  "source": "aws.guardduty",
+  "detail-type": "GuardDuty Finding",
+  "account": "123456789012",
+  "region": "us-east-1",
+  "detail": {
+    "id": "gd-s3-finding-026",
+    "type": "Policy:S3/BucketPublicAccessGranted",
+    "severity": 8.0,
+    "accountId": "123456789012",
+    "createdAt": "2026-02-14T13:00:00Z",
+    "updatedAt": "2026-02-14T13:15:00Z",
+    "resource": {
+      "s3BucketDetails": [
+        {
+          "arn": "arn:aws:s3:::demo-public-bucket",
+          "name": "demo-public-bucket",
+          "type": "Destination",
+          "owner": { "id": "123456789012" },
+          "publicAccess": {
+            "effectivePermission": "PUBLIC",
+            "permissionConfiguration": {
+              "bucketLevelPermissions": {
+                "blockPublicAccess": {
+                  "ignorePublicAcls": false,
+                  "restrictPublicBuckets": false,
+                  "blockPublicAcls": false,
+                  "blockPublicPolicy": false
+                }
+              }
+            }
+          },
+          "tags": []
+        }
+      ]
+    }
+  }
+}

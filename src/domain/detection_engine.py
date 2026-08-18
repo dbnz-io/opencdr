@@ -106,8 +106,14 @@ def evaluate_condition(
     if op == "prefix":
         return observed.startswith(str(value))
 
+    if op == "not_prefix":
+        return not observed.startswith(str(value))
+
     if op == "suffix":
         return observed.endswith(str(value))
+
+    if op == "not_suffix":
+        return not observed.endswith(str(value))
 
     if op == "matches":
         try:
@@ -133,6 +139,11 @@ def evaluate_condition(
             )
             return False
 
+    _log.warning(
+        "detection_engine: unknown condition operator op=%r field=%r -- treating as no-match",
+        op,
+        field,
+    )
     return False
 
 
@@ -186,6 +197,7 @@ def build_detection_event(
         "resources": [r.__dict__ for r in normalized_event.resources],
         "cloud_account_id": normalized_event.cloud_account_id,
         "cloud_region": normalized_event.cloud_region,
+        "gd_resource_type": normalized_event.gd_resource_type,
         "raw_event": normalized_event.raw_event,
     }
 

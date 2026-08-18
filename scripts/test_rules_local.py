@@ -47,8 +47,10 @@ def load_json(path: Path) -> dict:
 
 
 def load_signal_rules() -> list:
+    # Recursive: rule files live in per-source subfolders (cloudtrail/,
+    # guardduty/, and any future source folder added the same way).
     rules = []
-    for path in sorted(RULES_DIR.glob("*.json")):
+    for path in sorted(RULES_DIR.rglob("*.json")):
         rule = load_json(path)
         if rule.get("rule_kind") == "signal":
             rules.append(rule)

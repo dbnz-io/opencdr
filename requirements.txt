@@ -12,6 +12,26 @@ aws-xray-sdk>=2.12.0
 
 # Pinned to a commit, not a tag -- dbnz-io/dredge has no releases/tags yet.
 # Replaces the previously vendored, drifted copy at src/dredge/ (Phase 2).
-# Pulls in google-cloud-logging/google-auth transitively even though only
-# dredge.aws_ir is used here -- accepted tradeoff, see the roadmap.
-dredge @ git+https://github.com/dbnz-io/dredge.git@cb678b43e24cfb3235738488338cc9c61493da1a
+# dredge/__init__.py lazily imports github_ir/gcp_ir/k8s_ir (only inside
+# the Dredge.__init__ branch that actually constructs one, as of this
+# pin) -- pip still installs their transitive deps (google-cloud-logging/
+# google-auth, the kubernetes client + its grpc/protobuf stack, ~120MB
+# uncompressed combined) since they're declared in dredge's own
+# pyproject.toml, but nothing here ever imports them at runtime (only
+# .aws_ir is used, via auth=/config= only -- see responder.py's
+# _get_dredge). Safe to add a pythonRequirements.noDeploy entry for them
+# in serverless.yml if the packaged Lambda size ever becomes a problem;
+# wasn't before this pin (github_ir/gcp_ir/k8s_ir were all still eagerly
+# imported at module top level, which would have broken cold start).
+#
+# Bumping this pin is the ONLY way the responder/rollbackHandler Lambdas
+# pick up new dredge.aws_ir.response methods -- src/handlers/responder.py
+# referencing a method this pin's installed dredge doesn't have yet fails
+# at call time with a plain AttributeError (caught, logged as
+# IR_ACTION_EXCEPTION, action silently skipped), not at deploy time --
+# verify with `pip install --force-reinstall "dredge @ git+...@<new-sha>"`
+# (full install, not `--no-deps` -- with the lazy imports above, aws_ir
+# usage no longer needs kubernetes/google-cloud-logging installed at all,
+# so `--no-deps` is now a legitimate way to test that in isolation too)
+# and a full `pytest` run before bumping.
+dredge @ git+https://github.com/dbnz-io/dredge.git@63eeae6e8823cff3b9bdd00cacdc9129d5d469cb
