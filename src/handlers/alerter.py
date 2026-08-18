@@ -12,7 +12,7 @@ from boto3.dynamodb.conditions import Key
 from boto3.dynamodb.types import TypeDeserializer
 
 from ..domain.correlation_engine import CorrelationEngine
-from ..infra.aws_handler import AwsHandler
+from ..infra.aws_handler import AwsHandler, ttl_expires_at
 from ..infra.detection_rules_repository import load_detection_rules
 from ..infra.logger import Logger
 from ..infra.metrics import emit_metric
@@ -25,6 +25,7 @@ patch_boto3()
 # ----------------------------
 
 SIGNALS_TABLE_NAME = os.getenv("SIGNALS_TABLE_NAME", "")
+SIGNALS_WRITE_QUEUE_URL = os.getenv("SIGNALS_WRITE_QUEUE_URL", "")
 ALERTS_TABLE_NAME = os.getenv("ALERTS_TABLE_NAME", "")  # optional, but recommended
 OUTBOX_TABLE_NAME = os.getenv("OUTBOX_TABLE_NAME", "")  # optional
 DEFAULT_QUERY_LIMIT = int(os.getenv("CORRELATION_QUERY_LIMIT", "300"))
@@ -79,9 +80,13 @@ def get_correlation_rules(*, aws: AwsHandler, logger: Logger) -> list[dict[str, 
 # ----------------------------
 
 # group_by dot-path -> (GSI name, flat top-level attribute it's keyed on).
-# Only actor.user_name is indexed today -- it's the only group_by any real
-# correlation rule uses (support_files/detection_rules/020-023_correlation_*.json).
-# A rule using any other group_by falls back to the scan-and-filter path.
+# Only actor.user_name is indexed today -- it's the highest-volume group_by
+# (all pure-CloudTrail correlation rules, support_files/detection_rules/
+# cloudtrail/020-023_correlation_*.json, plus 029's cross-source rule).
+# A rule using any other group_by falls back to the scan-and-filter path --
+# see 030_correlation_guardduty_backdoor_then_secrets_access.json
+# (support_files/detection_rules/correlation/), grouped by network.source_ip,
+# for the first (and so far only) rule that actually uses it.
 _INDEXED_GROUP_BY_FIELDS: dict[str, tuple[str, str]] = {
     "actor.user_name": ("gsi_signal_actor_user_name", "actor_user_name"),
 }
@@ -199,7 +204,10 @@ class DynamoSignalsRepository:
         """
         Generic fallback for a group_by field with no GSI (see
         _INDEXED_GROUP_BY_FIELDS above) -- correct for any dot-path, but
-        scans the whole table. No real correlation rule uses this today.
+        scans the whole table. Used by
+        030_correlation_guardduty_backdoor_then_secrets_access.json
+        (group_by="network.source_ip") -- the first shipped rule to hit
+        this path; no GSI added for it since nothing else uses it yet.
         """
         self.logger.warning(
             event_name="ALERTER_SIGNALS_SCAN_FALLBACK",
@@ -283,6 +291,7 @@ def _marshal_outbox(*, payload: dict[str, Any], destinations: list[str]) -> dict
         "destinations": {"S": json.dumps(destinations)},
         "attempts": {"N": "0"},
         "payload": {"S": json.dumps(payload)},
+        "expires_at": {"N": str(ttl_expires_at())},
     }
 
 
@@ -427,15 +436,20 @@ def lambda_handler(event, context):
 
                     # Write correlation result back to signals table so it appears
                     # in the unified signal log. item_type="correlation" prevents
-                    # the alerter stream trigger from re-processing it.
+                    # the alerter stream trigger from re-processing it. Enqueued
+                    # via signal_writer.py (see serverless.yml's SIGNALS TABLE V2
+                    # comment) rather than written directly, same as processor.py
+                    # -- this was already fire-and-forget (return value unused),
+                    # so routing it through the buffer is a zero-risk swap.
                     if SIGNALS_TABLE_NAME:
                         corr_signal = dict(alert)
                         corr_signal["item_type"] = "correlation"
                         corr_signal["detection_id"] = str(alert["alert_id"])
-                        aws.put_signal_if_not_exists(
-                            table_name=SIGNALS_TABLE_NAME,
-                            signal_item=corr_signal,
-                            id_attribute="detection_id",
+                        aws.sqs_send(
+                            queue_url=SIGNALS_WRITE_QUEUE_URL,
+                            body=corr_signal,
+                            success_event_name="SIGNAL_ENQUEUED",
+                            failure_event_name="SIGNAL_ENQUEUE_FAIL",
                         )
 
             # Write outbox for publisher (optional) -- only for a genuinely

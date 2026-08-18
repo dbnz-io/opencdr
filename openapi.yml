@@ -67,6 +67,14 @@ paths:
           name: category
           schema: { type: string }
         - in: query
+          name: date_from
+          description: "Only applies to the severity selector. YYYY-MM-DD, UTC, inclusive. Defaults to 6 days before date_to/today."
+          schema: { type: string, format: date }
+        - in: query
+          name: date_to
+          description: "Only applies to the severity selector. YYYY-MM-DD, UTC, inclusive. Defaults to today."
+          schema: { type: string, format: date }
+        - in: query
           name: order
           schema: { type: string, enum: [asc, desc], default: desc }
         - in: query
@@ -93,6 +101,14 @@ paths:
         - in: query
           name: event_name
           schema: { type: string }
+        - in: query
+          name: date_from
+          description: "Only applies to the service selector. YYYY-MM-DD, UTC, inclusive. Defaults to 6 days before date_to/today."
+          schema: { type: string, format: date }
+        - in: query
+          name: date_to
+          description: "Only applies to the service selector. YYYY-MM-DD, UTC, inclusive. Defaults to today."
+          schema: { type: string, format: date }
         - in: query
           name: order
           schema: { type: string, enum: [asc, desc], default: desc }

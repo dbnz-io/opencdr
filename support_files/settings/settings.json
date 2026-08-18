@@ -4,36 +4,44 @@
   "notifications_enabled": true,
 
   "channels": {
-    "discord": {
-      "enabled": true,
-      "webhook_url": "https://discord.com/api/webhooks/XXXXXXXX",
-      "severity_threshold": "LOW"
-    },
     "slack": {
       "enabled": false,
-      "webhook_url": "",
-      "severity_threshold": "HIGH"
+      "webhook_url": ""
+    },
+    "discord": {
+      "enabled": true,
+      "webhook_url": "https://discord.com/api/webhooks/XXXXXXXX"
     },
     "email": {
       "enabled": false,
       "topic_arn": ""
+    },
+    "securityhub": {
+      "enabled": false
+    },
+    "jira": {
+      "enabled": false,
+      "base_url": "",
+      "project_key": "",
+      "user_email": "",
+      "api_token": ""
+    },
+    "webhook": {
+      "enabled": false,
+      "targets": []
     }
   },
 
   "routing": {
-    "severity_overrides": {
-      "CRITICAL": ["discord", "slack"],
-      "HIGH": ["discord"],
-      "MEDIUM": []
+    "CRITICAL": ["discord", "slack"],
+    "HIGH": ["discord"],
+    "MEDIUM": []
+  },
+
+  "guardduty_notify": {
+    "default": false,
+    "by_severity": {
+      "CRITICAL": true
     }
-  },
-
-  "rate_limit": {
-    "max_per_minute": 50
-  },
-
-  "enrichment": {
-    "include_raw_event": false,
-    "include_signal_summary": true
   }
 }

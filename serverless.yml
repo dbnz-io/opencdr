@@ -1,11 +1,12 @@
 service: opencdr
-frameworkVersion: "3"
+frameworkVersion: "4"
 
 params:
   default:
     alarmEmail: ""
     alertEmail: ""  # email for security detection alerts; can match alarmEmail
     monthlyBudgetUsd: "50"  # threshold for the AWS Budgets cost alert -- override with --param="monthlyBudgetUsd=<amount>"
+    orgId: ""  # your AWS Organization ID (o-xxxxxxxxxx) -- only set this for an org-wide deployment, see docs/org-forwarding.md
 
 package:
   patterns:
@@ -43,17 +44,34 @@ provider:
   # on every function and turns on X-Ray tracing on the API Gateway stage.
   # The IAM permission this needs is added explicitly per function below
   # rather than relied on to merge automatically, since this repo builds a
-  # separate role per function (serverless-iam-roles-per-function) instead
-  # of using the framework's single default role that this setting
-  # normally grants the permission to.
+  # separate role per function (provider.iam.role.mode: perFunction,
+  # below) instead of using the framework's single default role that this
+  # setting normally grants the permission to.
   tracing:
     lambda: true
     apiGateway: true
 
+  # Native per-function IAM roles (v4+) -- replaces the third-party
+  # serverless-iam-roles-per-function plugin, which was last published in
+  # 2021 with no confirmed v4 support. Every function's iamRoleStatements:
+  # block below is unchanged; this just switches who reads it.
+  iam:
+    role:
+      mode: perFunction
+
   apiGateway:
     apiKeys:
+      # Bare name (no suffix) = full access, back-compat with the key
+      # already deployed before route-level scoping existed (src/handlers/
+      # api.py's _scopes_from_key_name). Suffixed keys are scoped to just
+      # the dash-joined scopes in their name -- see docs/api-reference.md's
+      # "API key scopes" section before adding more. The second key here
+      # carries all five scopes (mcp_server/ is the default OpenCDR
+      # management plane and needs to reach every route) but is still a
+      # separate, independently revocable key from the bare one above.
       - opencdrPlan:
           - ${self:service}-${self:provider.stage}-api-key
+          - ${self:service}-${self:provider.stage}-api-key-read-rules-settings-ir_roles-ir_actions
     usagePlan:
       - opencdrPlan:
           quota:
@@ -67,10 +85,16 @@ provider:
     STAGE: "${self:provider.stage}"
 
     # Tables
-    SIGNALS_TABLE_NAME: "${self:service}-${self:provider.stage}-signals-table"
+    # SIGNALS_TABLE_NAME/LOGS_TABLE_NAME point at the -v2, composite-key
+    # tables (see the SIGNALS TABLE V2 comment in resources: below) --
+    # every write path (processor/alerter via signal_writer.py,
+    # logger.py) and api.py's read path both use these. The original
+    # bare severity/service-keyed tables this migration replaced have
+    # since been fully decommissioned.
+    SIGNALS_TABLE_NAME: "${self:service}-${self:provider.stage}-signals-table-v2"
     ALERTS_TABLE_NAME: "${self:service}-${self:provider.stage}-alerts-table"
     SETTINGS_TABLE_NAME: "${self:service}-${self:provider.stage}-settings-table"
-    LOGS_TABLE_NAME: "${self:service}-${self:provider.stage}-logs-table"
+    LOGS_TABLE_NAME: "${self:service}-${self:provider.stage}-logs-table-v2"
     DETECTION_RULES_TABLE_NAME: "${self:service}-${self:provider.stage}-detection-rules-table"
     OUTBOX_TABLE_NAME: "${self:service}-${self:provider.stage}-outbox-table"
     IR_ACCOUNT_ROLES_TABLE_NAME: "${self:service}-${self:provider.stage}-ir-account-roles-table"
@@ -84,6 +108,15 @@ provider:
     # Correlation tuning (optional)
     CORRELATION_QUERY_LIMIT: ${env:CORRELATION_QUERY_LIMIT, '300'}
 
+    # Archival / retention tuning (optional) -- see docs/data-archival.md
+    DYNAMODB_TTL_DAYS: ${env:DYNAMODB_TTL_DAYS, '90'}
+    # Unset (default) = store every log line in DynamoDB, same as before
+    # archival existed. Set to INFO/WARNING/ERROR to only persist that
+    # level and above -- CloudWatch still gets everything regardless, and
+    # so does the S3 archive (this only narrows what GET /logs can query
+    # live).
+    LOGS_MIN_LEVEL_TO_STORE: ${env:LOGS_MIN_LEVEL_TO_STORE, ''}
+
 
 functions:
 
@@ -95,28 +128,40 @@ functions:
     environment:
       SERVICE_NAME: "OPENCDR-PROCESSOR"
       LAMBDA_NAME: "${self:service}-${self:provider.stage}-processor"
-      SIGNALS_TABLE_NAME: "${self:service}-${self:provider.stage}-signals-table"
+      SIGNALS_WRITE_QUEUE_URL: !Ref SignalsWriteQueue
       ALERTS_TABLE_NAME: "${self:service}-${self:provider.stage}-alerts-table"
       OUTBOX_TABLE_NAME: "${self:service}-${self:provider.stage}-outbox-table"
       DETECTION_RULES_TABLE_NAME: "${self:service}-${self:provider.stage}-detection-rules-table"
-      LOGS_TABLE_NAME: "${self:service}-${self:provider.stage}-logs-table"
+      LOGS_TABLE_NAME: "${self:service}-${self:provider.stage}-logs-table-v2"
     iamRoleStatements:
+      # No more signals-table resources here -- see SIGNALS TABLE V2
+      # comment above; processor now enqueues instead of writing
+      # directly. detection-rules-table/logs-table PutItem stays (the
+      # latter is every function's own Logger writing log_item).
       - Effect: Allow
         Action:
           - dynamodb:PutItem
           - dynamodb:GetItem
           - dynamodb:Query
         Resource:
-          - arn:aws:dynamodb:${self:provider.region}:*:table/${self:service}-${self:provider.stage}-signals-table
-          - arn:aws:dynamodb:${self:provider.region}:*:table/${self:service}-${self:provider.stage}-signals-table/index/*
           - arn:aws:dynamodb:${self:provider.region}:*:table/${self:service}-${self:provider.stage}-detection-rules-table
-          - arn:aws:dynamodb:${self:provider.region}:*:table/${self:service}-${self:provider.stage}-logs-table
+          - arn:aws:dynamodb:${self:provider.region}:*:table/${self:service}-${self:provider.stage}-logs-table-v2
       - Effect: Allow
         Action:
           - dynamodb:PutItem
         Resource:
           - arn:aws:dynamodb:${self:provider.region}:*:table/${self:service}-${self:provider.stage}-alerts-table
           - arn:aws:dynamodb:${self:provider.region}:*:table/${self:service}-${self:provider.stage}-outbox-table
+      - Effect: Allow
+        Action:
+          - sqs:SendMessage
+        Resource:
+          - Fn::GetAtt: [SignalsWriteQueue, Arn]
+      - Effect: Allow
+        Action:
+          - sqs:SendMessage
+        Resource:
+          - Fn::GetAtt: [SignalsWriteQueue, Arn]
       # X-Ray write actions don't support resource-level scoping.
       - Effect: Allow
         Action:
@@ -168,6 +213,47 @@ functions:
               - "AWS Console Sign In via CloudTrail"
 
   # -------------------------
+  # Signal writer ← signals write queue → writes signals-table-v2
+  # -------------------------
+  # See serverless.yml's SIGNALS TABLE V2 / SQS — signals write buffer
+  # comments above for why this exists: processor/alerter enqueue here
+  # instead of writing directly, so a hot severity_bucket partition
+  # throttles a retry, not a lost signal.
+  signalWriter:
+    handler: src.handlers.signal_writer.lambda_handler
+    timeout: 25 # strictly under SQS's default 30s visibility timeout
+    memorySize: 256
+    environment:
+      SERVICE_NAME: "OPENCDR-SIGNAL-WRITER"
+      LAMBDA_NAME: "${self:service}-${self:provider.stage}-signal-writer"
+      SIGNALS_TABLE_NAME: "${self:service}-${self:provider.stage}-signals-table-v2"
+    iamRoleStatements:
+      - Effect: Allow
+        Action:
+          - dynamodb:PutItem
+        Resource:
+          - arn:aws:dynamodb:${self:provider.region}:*:table/${self:service}-${self:provider.stage}-signals-table-v2
+      - Effect: Allow
+        Action:
+          - sqs:ReceiveMessage
+          - sqs:DeleteMessage
+          - sqs:GetQueueAttributes
+        Resource:
+          - Fn::GetAtt: [SignalsWriteQueue, Arn]
+      # X-Ray write actions don't support resource-level scoping.
+      - Effect: Allow
+        Action:
+          - xray:PutTraceSegments
+          - xray:PutTelemetryRecords
+        Resource: "*"
+    events:
+      - sqs:
+          arn:
+            Fn::GetAtt: [SignalsWriteQueue, Arn]
+          batchSize: 10
+          functionResponseType: ReportBatchItemFailures
+
+  # -------------------------
   # Alerter ← signals stream → runs correlation → writes alerts + outbox
   # -------------------------
   alerter:
@@ -177,11 +263,12 @@ functions:
     environment:
       SERVICE_NAME: "OPENCDR-ALERTER"
       LAMBDA_NAME: "${self:service}-${self:provider.stage}-alerter"
-      SIGNALS_TABLE_NAME: "${self:service}-${self:provider.stage}-signals-table"
+      SIGNALS_TABLE_NAME: "${self:service}-${self:provider.stage}-signals-table-v2"
+      SIGNALS_WRITE_QUEUE_URL: !Ref SignalsWriteQueue
       ALERTS_TABLE_NAME: "${self:service}-${self:provider.stage}-alerts-table"
       DETECTION_RULES_TABLE_NAME: "${self:service}-${self:provider.stage}-detection-rules-table"
       OUTBOX_TABLE_NAME: "${self:service}-${self:provider.stage}-outbox-table"
-      LOGS_TABLE_NAME: "${self:service}-${self:provider.stage}-logs-table"
+      LOGS_TABLE_NAME: "${self:service}-${self:provider.stage}-logs-table-v2"
       CORRELATION_QUERY_LIMIT: ${env:CORRELATION_QUERY_LIMIT, '300'}
     iamRoleStatements:
       - Effect: Allow
@@ -192,12 +279,21 @@ functions:
           - dynamodb:UpdateItem
           - dynamodb:Scan
         Resource:
-          - arn:aws:dynamodb:${self:provider.region}:*:table/${self:service}-${self:provider.stage}-signals-table
-          - arn:aws:dynamodb:${self:provider.region}:*:table/${self:service}-${self:provider.stage}-signals-table/index/*
           - arn:aws:dynamodb:${self:provider.region}:*:table/${self:service}-${self:provider.stage}-alerts-table
           - arn:aws:dynamodb:${self:provider.region}:*:table/${self:service}-${self:provider.stage}-detection-rules-table
           - arn:aws:dynamodb:${self:provider.region}:*:table/${self:service}-${self:provider.stage}-outbox-table
-          - arn:aws:dynamodb:${self:provider.region}:*:table/${self:service}-${self:provider.stage}-logs-table
+          - arn:aws:dynamodb:${self:provider.region}:*:table/${self:service}-${self:provider.stage}-logs-table-v2
+      # signals-table-v2 read access -- correlation lookback (alerter.py's
+      # Query on gsi_signal_actor_user_name), SIGNALS_TABLE_NAME points
+      # here now (see provider.environment above). No grant on the old
+      # signals-table -- alerter no longer references it by name.
+      - Effect: Allow
+        Action:
+          - dynamodb:GetItem
+          - dynamodb:Query
+        Resource:
+          - arn:aws:dynamodb:${self:provider.region}:*:table/${self:service}-${self:provider.stage}-signals-table-v2
+          - arn:aws:dynamodb:${self:provider.region}:*:table/${self:service}-${self:provider.stage}-signals-table-v2/index/*
       - Effect: Allow
         Action:
           - dynamodb:DescribeStream
@@ -205,12 +301,13 @@ functions:
           - dynamodb:GetShardIterator
           - dynamodb:ListStreams
         Resource:
-          - Fn::GetAtt: [detection, StreamArn]
+          - Fn::GetAtt: [SignalsTableV2, StreamArn]
       - Effect: Allow
         Action:
           - sqs:SendMessage
         Resource:
           - Fn::GetAtt: [StreamFailureQueue, Arn]
+          - Fn::GetAtt: [SignalsWriteQueue, Arn]
       # X-Ray write actions don't support resource-level scoping.
       - Effect: Allow
         Action:
@@ -221,7 +318,7 @@ functions:
       - stream:
           type: dynamodb
           arn:
-            Fn::GetAtt: [detection, StreamArn]
+            Fn::GetAtt: [SignalsTableV2, StreamArn]
           batchSize: 50
           startingPosition: LATEST
           bisectBatchOnFunctionError: true
@@ -243,7 +340,7 @@ functions:
       SERVICE_NAME: "OPENCDR-PUBLISHER"
       LAMBDA_NAME: "${self:service}-${self:provider.stage}-publisher"
       OUTBOX_TABLE_NAME: "${self:service}-${self:provider.stage}-outbox-table"
-      LOGS_TABLE_NAME: "${self:service}-${self:provider.stage}-logs-table"
+      LOGS_TABLE_NAME: "${self:service}-${self:provider.stage}-logs-table-v2"
       NOTIFICATIONS_QUEUE_URL:
         Ref: NotificationsQueue
       RESPONSES_QUEUE_URL:
@@ -256,7 +353,7 @@ functions:
           - dynamodb:PutItem
         Resource:
           - arn:aws:dynamodb:${self:provider.region}:*:table/${self:service}-${self:provider.stage}-outbox-table
-          - arn:aws:dynamodb:${self:provider.region}:*:table/${self:service}-${self:provider.stage}-logs-table
+          - arn:aws:dynamodb:${self:provider.region}:*:table/${self:service}-${self:provider.stage}-logs-table-v2
       - Effect: Allow
         Action:
           - dynamodb:DescribeStream
@@ -305,7 +402,7 @@ functions:
     environment:
       SERVICE_NAME: "OPENCDR-NOTIFIER"
       LAMBDA_NAME: "${self:service}-${self:provider.stage}-notifier"
-      LOGS_TABLE_NAME: "${self:service}-${self:provider.stage}-logs-table"
+      LOGS_TABLE_NAME: "${self:service}-${self:provider.stage}-logs-table-v2"
       ALERTS_SNS_TOPIC_ARN: !Ref AlertsSnsTopic
     iamRoleStatements:
       - Effect: Allow
@@ -318,7 +415,7 @@ functions:
         Action:
           - dynamodb:PutItem
         Resource:
-          - arn:aws:dynamodb:${self:provider.region}:*:table/${self:service}-${self:provider.stage}-logs-table
+          - arn:aws:dynamodb:${self:provider.region}:*:table/${self:service}-${self:provider.stage}-logs-table-v2
       # Resolves settings secrets (Slack/Discord/Jira, webhook headers)
       # stored as `ssm:` references -- see src/domain/settings_secrets.py
       - Effect: Allow
@@ -368,15 +465,18 @@ functions:
     environment:
       SERVICE_NAME: "OPENCDR-RESPONDER"
       LAMBDA_NAME: "${self:service}-${self:provider.stage}-incident-response"
-      LOGS_TABLE_NAME: "${self:service}-${self:provider.stage}-logs-table"
+      # v2 -- _recent_action_count()'s rate-limit circuit breaker queries
+      # by service_bucket, which only exists on logs-table-v2.
+      LOGS_TABLE_NAME: "${self:service}-${self:provider.stage}-logs-table-v2"
       OPENCDR_IR_ROLE_ARN:
         Fn::If:
           - HasIrRoleArnOverride
           - ${env:OPENCDR_IR_ROLE_ARN, ''}
           - Fn::GetAtt: [OpencdrIrRole, Arn]
-      DREDGE_DRY_RUN: ${env:DREDGE_DRY_RUN, 'false'}
+      DREDGE_DRY_RUN: ${env:DREDGE_DRY_RUN, 'true'}
       RESPONDER_RATE_LIMIT_WINDOW_MINUTES: ${env:RESPONDER_RATE_LIMIT_WINDOW_MINUTES, '5'}
       RESPONDER_RATE_LIMIT_MAX_ACTIONS: ${env:RESPONDER_RATE_LIMIT_MAX_ACTIONS, '20'}
+      IR_ACTIONS_TABLE_NAME: "${self:service}-${self:provider.stage}-ir-actions-table"
     iamRoleStatements:
       # Responder holds no destructive IAM/EC2/S3 permissions of its own --
       # every response module (see dredge.aws_ir.response, a pinned
@@ -404,12 +504,17 @@ functions:
           - dynamodb:PutItem
           - dynamodb:Query
         Resource:
-          - arn:aws:dynamodb:${self:provider.region}:*:table/${self:service}-${self:provider.stage}-logs-table
+          - arn:aws:dynamodb:${self:provider.region}:*:table/${self:service}-${self:provider.stage}-logs-table-v2
       - Effect: Allow
         Action:
           - dynamodb:PutItem
         Resource:
           - arn:aws:dynamodb:${self:provider.region}:*:table/${self:service}-${self:provider.stage}-outbox-table
+      - Effect: Allow
+        Action:
+          - dynamodb:PutItem
+        Resource:
+          - arn:aws:dynamodb:${self:provider.region}:*:table/${self:service}-${self:provider.stage}-ir-actions-table
       - Effect: Allow
         Action:
           - sqs:ReceiveMessage
@@ -430,13 +535,90 @@ functions:
           batchSize: 10
 
   # -------------------------
+  # ROLLBACK HANDLER -- undoes a prior rollback-eligible IR action. See
+  # src/handlers/ir_rollback.py, ROLLBACK_MODULE_HANDLERS. A separate
+  # Lambda rather than a second concern bolted onto responder's already-
+  # busy hot path, matching this project's one-Lambda-per-responsibility
+  # shape.
+  # -------------------------
+  rollbackHandler:
+    handler: src.handlers.ir_rollback.lambda_handler
+    timeout: 30
+    memorySize: 512
+    environment:
+      # Deliberately its own SERVICE_NAME, not responder's -- see
+      # ir_rollback.py's module docstring: gives rollbacks their own
+      # circuit-breaker budget instead of sharing/competing with
+      # responder's.
+      SERVICE_NAME: "OPENCDR-IR-ROLLBACK"
+      LAMBDA_NAME: "${self:service}-${self:provider.stage}-ir-rollback"
+      LOGS_TABLE_NAME: "${self:service}-${self:provider.stage}-logs-table-v2"
+      IR_ACTIONS_TABLE_NAME: "${self:service}-${self:provider.stage}-ir-actions-table"
+      OUTBOX_TABLE_NAME: "${self:service}-${self:provider.stage}-outbox-table"
+      DREDGE_DRY_RUN: ${env:DREDGE_DRY_RUN, 'true'}
+    iamRoleStatements:
+      # Same cross-account assume-role shape as responder -- role_arn comes
+      # from the stored irActionsTable row, not resolved fresh.
+      - Effect: Allow
+        Action:
+          - sts:AssumeRole
+        Resource:
+          - arn:aws:iam::*:role/${self:service}-${self:provider.stage}-ir-role
+      - Effect: Allow
+        Action:
+          - dynamodb:GetItem
+          - dynamodb:UpdateItem
+        Resource:
+          - arn:aws:dynamodb:${self:provider.region}:*:table/${self:service}-${self:provider.stage}-ir-actions-table
+      - Effect: Allow
+        Action:
+          - dynamodb:PutItem
+          - dynamodb:Query
+        Resource:
+          - arn:aws:dynamodb:${self:provider.region}:*:table/${self:service}-${self:provider.stage}-logs-table-v2
+      # Writes the "rollback_success" (purple) notification -- same
+      # notifications-only outbox item shape responder.py's
+      # _notify_remediation_success already uses, consumed by publisher ->
+      # notifier like any other outbox row.
+      - Effect: Allow
+        Action:
+          - dynamodb:PutItem
+        Resource:
+          - arn:aws:dynamodb:${self:provider.region}:*:table/${self:service}-${self:provider.stage}-outbox-table
+      - Effect: Allow
+        Action:
+          - sqs:ReceiveMessage
+          - sqs:DeleteMessage
+          - sqs:GetQueueAttributes
+        Resource:
+          - Fn::GetAtt: [IrRollbackQueue, Arn]
+      - Effect: Allow
+        Action:
+          - xray:PutTraceSegments
+          - xray:PutTelemetryRecords
+        Resource: "*"
+    events:
+      - sqs:
+          arn:
+            Fn::GetAtt: [IrRollbackQueue, Arn]
+          batchSize: 10
+
+  # -------------------------
   # API
   # -------------------------
   api:
     handler: src.handlers.api.lambda_handler
+    # Default (AWS's 3s) isn't enough headroom for a worst-case
+    # MAX_DATE_RANGE_DAYS-day fan-out of sequential per-day signals/logs
+    # queries (see the day-bucket merge pagination in api.py) -- 25s
+    # stays under API Gateway's 29s integration timeout.
+    timeout: 25
     environment:
       SERVICE_NAME: "OPENCDR-API"
       LAMBDA_NAME: "${self:service}-${self:provider.stage}-api"
+      IR_ACTIONS_TABLE_NAME: "${self:service}-${self:provider.stage}-ir-actions-table"
+      IR_ROLLBACK_QUEUE_URL:
+        Ref: IrRollbackQueue
     iamRoleStatements:
       - Effect: Allow
         Action:
@@ -447,14 +629,22 @@ functions:
           - dynamodb:DeleteItem
           - dynamodb:UpdateItem
         Resource:
-          - arn:aws:dynamodb:${self:provider.region}:*:table/${self:service}-${self:provider.stage}-signals-table
-          - arn:aws:dynamodb:${self:provider.region}:*:table/${self:service}-${self:provider.stage}-signals-table/index/*
+          - arn:aws:dynamodb:${self:provider.region}:*:table/${self:service}-${self:provider.stage}-signals-table-v2
+          - arn:aws:dynamodb:${self:provider.region}:*:table/${self:service}-${self:provider.stage}-signals-table-v2/index/*
+          - arn:aws:dynamodb:${self:provider.region}:*:table/${self:service}-${self:provider.stage}-logs-table-v2
+          - arn:aws:dynamodb:${self:provider.region}:*:table/${self:service}-${self:provider.stage}-logs-table-v2/index/*
           - arn:aws:dynamodb:${self:provider.region}:*:table/${self:service}-${self:provider.stage}-alerts-table
-          - arn:aws:dynamodb:${self:provider.region}:*:table/${self:service}-${self:provider.stage}-logs-table
-          - arn:aws:dynamodb:${self:provider.region}:*:table/${self:service}-${self:provider.stage}-logs-table/index/*
           - arn:aws:dynamodb:${self:provider.region}:*:table/${self:service}-${self:provider.stage}-detection-rules-table
           - arn:aws:dynamodb:${self:provider.region}:*:table/${self:service}-${self:provider.stage}-settings-table
           - arn:aws:dynamodb:${self:provider.region}:*:table/${self:service}-${self:provider.stage}-ir-account-roles-table
+          - arn:aws:dynamodb:${self:provider.region}:*:table/${self:service}-${self:provider.stage}-ir-actions-table
+      # POST /ir-actions/{id}/rollback only ever enqueues -- the actual
+      # rollback runs in rollbackHandler, consuming this same queue.
+      - Effect: Allow
+        Action:
+          - sqs:SendMessage
+        Resource:
+          - Fn::GetAtt: [IrRollbackQueue, Arn]
       # Writes/reads/deletes settings secrets indirected through SSM
       # Parameter Store instead of plaintext DynamoDB attributes -- see
       # src/domain/settings_secrets.py.
@@ -478,6 +668,15 @@ functions:
           - xray:PutTraceSegments
           - xray:PutTelemetryRecords
         Resource: "*"
+      # Route-level API key scoping (_get_key_scopes in api.py) resolves
+      # the caller's key name via GetApiKey on every cold-cache request.
+      # GET only -- this role never needs to create/modify keys, unlike
+      # the CI deploy role's broader apigateway:* grant.
+      - Effect: Allow
+        Action:
+          - apigateway:GET
+        Resource:
+          - arn:aws:apigateway:${self:provider.region}::/apikeys/*
     events:
       - http:
           path: help
@@ -491,6 +690,11 @@ functions:
           cors: true
       - http:
           path: signals
+          method: get
+          private: true
+          cors: true
+      - http:
+          path: signals/stats
           method: get
           private: true
           cors: true
@@ -574,6 +778,21 @@ functions:
           method: delete
           private: true
           cors: true
+      - http:
+          path: ir-actions
+          method: get
+          private: true
+          cors: true
+      - http:
+          path: ir-actions/{detection_id}
+          method: get
+          private: true
+          cors: true
+      - http:
+          path: ir-actions/{detection_id}/rollback
+          method: post
+          private: true
+          cors: true
 
   # -------------------------
   # Alarm notifier ← AlarmsSnsTopic → Slack
@@ -615,6 +834,94 @@ functions:
           arn: !Ref AlarmsSnsTopic
           topicName: ${self:service}-${self:provider.stage}-alarms
 
+  # -------------------------
+  # Archiver ← signals/alerts/logs streams → S3 (Parquet), see docs/data-archival.md
+  # -------------------------
+  archiver:
+    handler: src.handlers.archiver.lambda_handler
+    timeout: 60
+    memorySize: 256
+    environment:
+      SERVICE_NAME: "OPENCDR-ARCHIVER"
+      LAMBDA_NAME: "${self:service}-${self:provider.stage}-archiver"
+      SIGNALS_FIREHOSE_STREAM_NAME: !Ref ArchiveSignalsFirehose
+      ALERTS_FIREHOSE_STREAM_NAME: !Ref ArchiveAlertsFirehose
+      LOGS_FIREHOSE_STREAM_NAME: !Ref ArchiveLogsFirehose
+    iamRoleStatements:
+      - Effect: Allow
+        Action:
+          - dynamodb:DescribeStream
+          - dynamodb:GetRecords
+          - dynamodb:GetShardIterator
+          - dynamodb:ListStreams
+        Resource:
+          - Fn::GetAtt: [alerts, StreamArn]
+          - Fn::GetAtt: [SignalsTableV2, StreamArn]
+          - Fn::GetAtt: [LogsTableV2, StreamArn]
+      - Effect: Allow
+        Action:
+          - firehose:PutRecordBatch
+        Resource:
+          - !GetAtt ArchiveSignalsFirehose.Arn
+          - !GetAtt ArchiveAlertsFirehose.Arn
+          - !GetAtt ArchiveLogsFirehose.Arn
+      - Effect: Allow
+        Action:
+          - sqs:SendMessage
+        Resource:
+          - Fn::GetAtt: [StreamFailureQueue, Arn]
+      # X-Ray write actions don't support resource-level scoping.
+      - Effect: Allow
+        Action:
+          - xray:PutTraceSegments
+          - xray:PutTelemetryRecords
+        Resource: "*"
+    events:
+      - stream:
+          type: dynamodb
+          arn:
+            Fn::GetAtt: [alerts, StreamArn]
+          batchSize: 100
+          startingPosition: LATEST
+          bisectBatchOnFunctionError: true
+          maximumRetryAttempts: 3
+          destinations:
+            onFailure:
+              arn:
+                Fn::GetAtt: [StreamFailureQueue, Arn]
+              type: sqs
+      # _STREAM_ROUTES in src/handlers/archiver.py matches by substring
+      # ("signals-table"/"logs-table" in event_source_arn), and
+      # "signals-table-v2"/"logs-table-v2" both still contain those
+      # substrings, so no code change was needed for these to route to
+      # the same Firehose delivery streams the original tables used.
+      - stream:
+          type: dynamodb
+          arn:
+            Fn::GetAtt: [SignalsTableV2, StreamArn]
+          batchSize: 100
+          startingPosition: LATEST
+          bisectBatchOnFunctionError: true
+          maximumRetryAttempts: 3
+          destinations:
+            onFailure:
+              arn:
+                Fn::GetAtt: [StreamFailureQueue, Arn]
+              type: sqs
+      - stream:
+          type: dynamodb
+          arn:
+            Fn::GetAtt: [LogsTableV2, StreamArn]
+          batchSize: 100
+          startingPosition: LATEST
+          bisectBatchOnFunctionError: true
+          maximumRetryAttempts: 3
+          destinations:
+            onFailure:
+              arn:
+                Fn::GetAtt: [StreamFailureQueue, Arn]
+              type: sqs
+
 
 resources:
   Conditions:
@@ -630,16 +937,20 @@ resources:
       - !Equals
         - "${env:OPENCDR_IR_ROLE_ARN, ''}"
         - ""
+    HasOrgId: !Not
+      - !Equals
+        - "${param:orgId}"
+        - ""
 
   Resources:
 
     # -------------------------
-    # SIGNAL TABLE (events + stream)
+    # ALERTS TABLE (correlation outputs)
     # -------------------------
-    detection:
+    alerts:
       Type: AWS::DynamoDB::Table
       Properties:
-        TableName: ${self:service}-${self:provider.stage}-signals-table
+        TableName: ${self:service}-${self:provider.stage}-alerts-table
         BillingMode: PAY_PER_REQUEST
         Tags:
           - Key: Project
@@ -647,7 +958,84 @@ resources:
           - Key: Stage
             Value: ${self:provider.stage}
         AttributeDefinitions:
-          - AttributeName: severity
+          - AttributeName: alert_key
+            AttributeType: S
+          - AttributeName: timestamp
+            AttributeType: S
+        KeySchema:
+          - AttributeName: alert_key
+            KeyType: HASH
+          - AttributeName: timestamp
+            KeyType: RANGE
+        StreamSpecification:
+          StreamViewType: NEW_IMAGE
+        TimeToLiveSpecification:
+          AttributeName: expires_at
+          Enabled: true
+
+    # -------------------------
+    # OUTBOX TABLE (publisher pattern) + stream
+    # -------------------------
+    OutboxTable:
+      Type: AWS::DynamoDB::Table
+      Properties:
+        TableName: ${self:service}-${self:provider.stage}-outbox-table
+        BillingMode: PAY_PER_REQUEST
+        Tags:
+          - Key: Project
+            Value: opencdr
+          - Key: Stage
+            Value: ${self:provider.stage}
+        AttributeDefinitions:
+          - AttributeName: outbox_id
+            AttributeType: S
+        KeySchema:
+          - AttributeName: outbox_id
+            KeyType: HASH
+        StreamSpecification:
+          StreamViewType: NEW_IMAGE
+        # Not archived -- delivery-tracking data, not investigative
+        # history (see docs/data-archival.md for what is and isn't
+        # archived and why). Safe to just expire.
+        TimeToLiveSpecification:
+          AttributeName: expires_at
+          Enabled: true
+
+    # -------------------------
+    # SIGNALS TABLE V2 / LOGS TABLE V2 -- partition-key redesign
+    # -------------------------
+    # A bare severity/service HASH key (only 6/8 distinct values) meant
+    # every write for one value funneled into a single DynamoDB
+    # partition (~1,000 WCU ceiling, independent of PAY_PER_REQUEST).
+    # Replaced with a composite, self-scaling day-bucketed key
+    # (severity_bucket/service_bucket, computed by
+    # src/infra/partition_keys.py's day_bucket_key() -- "HIGH#2026-08-12")
+    # as a NEW attribute, never a rename: severity/service themselves
+    # stay clean on every item, since archiver.py's flatten_signal/
+    # flatten_log read them as opaque pass-through values into the
+    # S3/Parquet archive (see docs/data-archival.md).
+    #
+    # "V2" naming is a leftover from the migration itself: this was
+    # deployed alongside the original severity/service-keyed tables
+    # (CFN forces delete-and-recreate on any KeySchema change, so an
+    # in-place edit wasn't an option), which have since been fully
+    # decommissioned after their TTL drained (or, for a dev/demo
+    # environment, once real data loss wasn't a concern). Left named
+    # SignalsTableV2/LogsTableV2 rather than renamed post-cleanup --
+    # renaming a CFN logical ID forces the exact same delete-and-recreate
+    # this whole design was built to avoid.
+    SignalsTableV2:
+      Type: AWS::DynamoDB::Table
+      Properties:
+        TableName: ${self:service}-${self:provider.stage}-signals-table-v2
+        BillingMode: PAY_PER_REQUEST
+        Tags:
+          - Key: Project
+            Value: opencdr
+          - Key: Stage
+            Value: ${self:provider.stage}
+        AttributeDefinitions:
+          - AttributeName: severity_bucket
             AttributeType: S
           - AttributeName: timestamp
             AttributeType: S
@@ -658,7 +1046,7 @@ resources:
           - AttributeName: actor_user_name
             AttributeType: S
         KeySchema:
-          - AttributeName: severity
+          - AttributeName: severity_bucket
             KeyType: HASH
           - AttributeName: timestamp
             KeyType: RANGE
@@ -689,14 +1077,14 @@ resources:
               ProjectionType: ALL
         StreamSpecification:
           StreamViewType: NEW_IMAGE
+        TimeToLiveSpecification:
+          AttributeName: expires_at
+          Enabled: true
 
-    # -------------------------
-    # ALERTS TABLE (correlation outputs)
-    # -------------------------
-    alerts:
+    LogsTableV2:
       Type: AWS::DynamoDB::Table
       Properties:
-        TableName: ${self:service}-${self:provider.stage}-alerts-table
+        TableName: ${self:service}-${self:provider.stage}-logs-table-v2
         BillingMode: PAY_PER_REQUEST
         Tags:
           - Key: Project
@@ -704,53 +1092,7 @@ resources:
           - Key: Stage
             Value: ${self:provider.stage}
         AttributeDefinitions:
-          - AttributeName: alert_key
-            AttributeType: S
-          - AttributeName: timestamp
-            AttributeType: S
-        KeySchema:
-          - AttributeName: alert_key
-            KeyType: HASH
-          - AttributeName: timestamp
-            KeyType: RANGE
-
-    # -------------------------
-    # OUTBOX TABLE (publisher pattern) + stream
-    # -------------------------
-    OutboxTable:
-      Type: AWS::DynamoDB::Table
-      Properties:
-        TableName: ${self:service}-${self:provider.stage}-outbox-table
-        BillingMode: PAY_PER_REQUEST
-        Tags:
-          - Key: Project
-            Value: opencdr
-          - Key: Stage
-            Value: ${self:provider.stage}
-        AttributeDefinitions:
-          - AttributeName: outbox_id
-            AttributeType: S
-        KeySchema:
-          - AttributeName: outbox_id
-            KeyType: HASH
-        StreamSpecification:
-          StreamViewType: NEW_IMAGE
-
-    # -------------------------
-    # LOGS TABLE
-    # -------------------------
-    logs:
-      Type: AWS::DynamoDB::Table
-      Properties:
-        TableName: ${self:service}-${self:provider.stage}-logs-table
-        BillingMode: PAY_PER_REQUEST
-        Tags:
-          - Key: Project
-            Value: opencdr
-          - Key: Stage
-            Value: ${self:provider.stage}
-        AttributeDefinitions:
-          - AttributeName: service
+          - AttributeName: service_bucket
             AttributeType: S
           - AttributeName: timestamp
             AttributeType: S
@@ -759,7 +1101,7 @@ resources:
           - AttributeName: event_name
             AttributeType: S
         KeySchema:
-          - AttributeName: service
+          - AttributeName: service_bucket
             KeyType: HASH
           - AttributeName: timestamp
             KeyType: RANGE
@@ -780,6 +1122,364 @@ resources:
                 KeyType: RANGE
             Projection:
               ProjectionType: ALL
+        StreamSpecification:
+          StreamViewType: NEW_IMAGE
+        TimeToLiveSpecification:
+          AttributeName: expires_at
+          Enabled: true
+
+    # -------------------------
+    # ARCHIVAL: signals/alerts/logs -> S3 (Parquet), Hive-partitioned
+    # -------------------------
+    # Why: the tables above now TTL at 90 days -- safe specifically
+    # because every signal/alert/log is streamed here first via
+    # DynamoDB Streams -> the archiver Lambda (functions.archiver) ->
+    # Kinesis Data Firehose, converted to Parquet, and written under
+    # account=<id>/year=<Y>/month=<M>/day=<D>/hour=<H>/ prefixes -- the
+    # standard Hive/Athena-friendly partition scheme. Outbox is
+    # deliberately not archived (delivery-tracking data, not
+    # investigative history) -- it just expires. See
+    # docs/data-archival.md for the full design, including why the Glue
+    # schemas below are intentionally flat (a handful of useful scalar
+    # columns + one raw_item JSON-string column) rather than modeling
+    # the nested actor/network/api/resources shape as Parquet structs.
+    ArchiveBucket:
+      Type: AWS::S3::Bucket
+      Properties:
+        # !Sub, not a bare string: Serverless Framework resolves
+        # ${self:...} at synth time (text pre-processing across the
+        # whole template, including inside intrinsic functions like this
+        # one), but it doesn't recognize AWS::AccountId as one of its own
+        # variable sources -- as a bare, unwrapped string this silently
+        # resolved to undefined/null, which is what actually broke the
+        # first real deploy (CloudFormation's S3 handler crashed trying
+        # to hash a null BucketName). Wrapping in !Sub leaves
+        # AWS::AccountId for CloudFormation's own resolver, same pattern
+        # already used correctly everywhere else in this file (e.g.
+        # OrgForwarderBusPolicy's role ARN pattern below).
+        BucketName: !Sub "${self:service}-${self:provider.stage}-archive-${AWS::AccountId}"
+        Tags:
+          - Key: Project
+            Value: opencdr
+          - Key: Stage
+            Value: ${self:provider.stage}
+        PublicAccessBlockConfiguration:
+          BlockPublicAcls: true
+          BlockPublicPolicy: true
+          IgnorePublicAcls: true
+          RestrictPublicBuckets: true
+        BucketEncryption:
+          ServerSideEncryptionConfiguration:
+            - ServerSideEncryptionByDefault:
+                SSEAlgorithm: AES256
+
+    ArchiveGlueDatabase:
+      Type: AWS::Glue::Database
+      Properties:
+        CatalogId: !Ref AWS::AccountId
+        DatabaseInput:
+          Name: ${self:service}_${self:provider.stage}_archive
+
+    ArchiveSignalsGlueTable: &archiveGlueTableSignals
+      Type: AWS::Glue::Table
+      Properties:
+        CatalogId: !Ref AWS::AccountId
+        DatabaseName: !Ref ArchiveGlueDatabase
+        TableInput:
+          Name: signals
+          TableType: EXTERNAL_TABLE
+          Parameters: &archiveProjectionParamsSignals
+            classification: parquet
+            "projection.enabled": "true"
+            "projection.account.type": "injected"
+            "projection.year.type": "integer"
+            "projection.year.range": "2025,2030"
+            "projection.month.type": "integer"
+            "projection.month.range": "1,12"
+            "projection.month.digits": "2"
+            "projection.day.type": "integer"
+            "projection.day.range": "1,31"
+            "projection.day.digits": "2"
+            "projection.hour.type": "integer"
+            "projection.hour.range": "0,23"
+            "projection.hour.digits": "2"
+            "storage.location.template": !Sub "s3://${ArchiveBucket}/signals/account=${!account}/year=${!year}/month=${!month}/day=${!day}/hour=${!hour}/"
+          StorageDescriptor:
+            Location: !Sub "s3://${ArchiveBucket}/signals/"
+            InputFormat: org.apache.hadoop.hive.ql.io.parquet.MapredParquetInputFormat
+            OutputFormat: org.apache.hadoop.hive.ql.io.parquet.MapredParquetOutputFormat
+            SerdeInfo:
+              SerializationLibrary: org.apache.hadoop.hive.ql.io.parquet.serde.ParquetHiveSerDe
+              Parameters:
+                serialization.format: "1"
+            Columns:
+              - { Name: detection_id, Type: string }
+              - { Name: event_id, Type: string }
+              - { Name: rule_id, Type: string }
+              - { Name: severity, Type: string }
+              - { Name: timestamp, Type: string }
+              - { Name: category, Type: string }
+              - { Name: activity_name, Type: string }
+              - { Name: cloud_account_id, Type: string }
+              - { Name: cloud_region, Type: string }
+              - { Name: source, Type: string }
+              - { Name: actor_user_name, Type: string }
+              - { Name: raw_item, Type: string }
+          PartitionKeys:
+            - { Name: account, Type: string }
+            - { Name: year, Type: string }
+            - { Name: month, Type: string }
+            - { Name: day, Type: string }
+            - { Name: hour, Type: string }
+
+    ArchiveAlertsGlueTable:
+      <<: *archiveGlueTableSignals
+      Properties:
+        CatalogId: !Ref AWS::AccountId
+        DatabaseName: !Ref ArchiveGlueDatabase
+        TableInput:
+          Name: alerts
+          TableType: EXTERNAL_TABLE
+          Parameters:
+            <<: *archiveProjectionParamsSignals
+            "storage.location.template": !Sub "s3://${ArchiveBucket}/alerts/account=${!account}/year=${!year}/month=${!month}/day=${!day}/hour=${!hour}/"
+          StorageDescriptor:
+            Location: !Sub "s3://${ArchiveBucket}/alerts/"
+            InputFormat: org.apache.hadoop.hive.ql.io.parquet.MapredParquetInputFormat
+            OutputFormat: org.apache.hadoop.hive.ql.io.parquet.MapredParquetOutputFormat
+            SerdeInfo:
+              SerializationLibrary: org.apache.hadoop.hive.ql.io.parquet.serde.ParquetHiveSerDe
+              Parameters:
+                serialization.format: "1"
+            Columns:
+              - { Name: alert_id, Type: string }
+              - { Name: alert_key, Type: string }
+              - { Name: rule_id, Type: string }
+              - { Name: severity, Type: string }
+              - { Name: timestamp, Type: string }
+              - { Name: type, Type: string }
+              - { Name: group_value, Type: string }
+              - { Name: cloud_account_id, Type: string }
+              - { Name: match_count, Type: int }
+              - { Name: raw_item, Type: string }
+          PartitionKeys:
+            - { Name: account, Type: string }
+            - { Name: year, Type: string }
+            - { Name: month, Type: string }
+            - { Name: day, Type: string }
+            - { Name: hour, Type: string }
+
+    ArchiveLogsGlueTable:
+      <<: *archiveGlueTableSignals
+      Properties:
+        CatalogId: !Ref AWS::AccountId
+        DatabaseName: !Ref ArchiveGlueDatabase
+        TableInput:
+          Name: logs
+          TableType: EXTERNAL_TABLE
+          Parameters:
+            <<: *archiveProjectionParamsSignals
+            "storage.location.template": !Sub "s3://${ArchiveBucket}/logs/account=${!account}/year=${!year}/month=${!month}/day=${!day}/hour=${!hour}/"
+          StorageDescriptor:
+            Location: !Sub "s3://${ArchiveBucket}/logs/"
+            InputFormat: org.apache.hadoop.hive.ql.io.parquet.MapredParquetInputFormat
+            OutputFormat: org.apache.hadoop.hive.ql.io.parquet.MapredParquetOutputFormat
+            SerdeInfo:
+              SerializationLibrary: org.apache.hadoop.hive.ql.io.parquet.serde.ParquetHiveSerDe
+              Parameters:
+                serialization.format: "1"
+            Columns:
+              - { Name: log_id, Type: string }
+              - { Name: event_id, Type: string }
+              - { Name: event_name, Type: string }
+              - { Name: event_type, Type: string }
+              - { Name: service, Type: string }
+              - { Name: source, Type: string }
+              - { Name: timestamp, Type: string }
+              - { Name: level, Type: string }
+              - { Name: raw_item, Type: string }
+          PartitionKeys:
+            - { Name: account, Type: string }
+            - { Name: year, Type: string }
+            - { Name: month, Type: string }
+            - { Name: day, Type: string }
+            - { Name: hour, Type: string }
+
+    ArchiveFirehoseRole:
+      Type: AWS::IAM::Role
+      Properties:
+        RoleName: ${self:service}-${self:provider.stage}-archive-firehose-role
+        AssumeRolePolicyDocument:
+          Version: "2012-10-17"
+          Statement:
+            - Effect: Allow
+              Principal:
+                Service: firehose.amazonaws.com
+              Action: sts:AssumeRole
+              Condition:
+                StringEquals:
+                  "sts:ExternalId": !Ref AWS::AccountId
+        Policies:
+          - PolicyName: archive-firehose-policy
+            PolicyDocument:
+              Version: "2012-10-17"
+              Statement:
+                - Effect: Allow
+                  Action:
+                    - s3:AbortMultipartUpload
+                    - s3:GetBucketLocation
+                    - s3:GetObject
+                    - s3:ListBucket
+                    - s3:ListBucketMultipartUploads
+                    - s3:PutObject
+                  Resource:
+                    - !GetAtt ArchiveBucket.Arn
+                    - !Sub "${ArchiveBucket.Arn}/*"
+                - Effect: Allow
+                  Action:
+                    - glue:GetTable
+                    - glue:GetTableVersion
+                    - glue:GetTableVersions
+                  Resource:
+                    - !Sub "arn:aws:glue:${AWS::Region}:${AWS::AccountId}:catalog"
+                    - !Sub "arn:aws:glue:${AWS::Region}:${AWS::AccountId}:database/${ArchiveGlueDatabase}"
+                    - !Sub "arn:aws:glue:${AWS::Region}:${AWS::AccountId}:table/${ArchiveGlueDatabase}/*"
+                - Effect: Allow
+                  Action:
+                    - logs:PutLogEvents
+                    - logs:CreateLogGroup
+                    - logs:CreateLogStream
+                  Resource:
+                    - !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/kinesisfirehose/*"
+
+    ArchiveSignalsFirehose: &archiveFirehose
+      Type: AWS::KinesisFirehose::DeliveryStream
+      Properties:
+        DeliveryStreamName: ${self:service}-${self:provider.stage}-archive-signals
+        DeliveryStreamType: DirectPut
+        ExtendedS3DestinationConfiguration:
+          RoleARN: !GetAtt ArchiveFirehoseRole.Arn
+          BucketARN: !GetAtt ArchiveBucket.Arn
+          Prefix: "signals/account=!{partitionKeyFromQuery:account}/year=!{partitionKeyFromQuery:year}/month=!{partitionKeyFromQuery:month}/day=!{partitionKeyFromQuery:day}/hour=!{partitionKeyFromQuery:hour}/"
+          ErrorOutputPrefix: "signals-errors/!{firehose:error-output-type}/year=!{timestamp:yyyy}/month=!{timestamp:MM}/day=!{timestamp:dd}/"
+          BufferingHints:
+            SizeInMBs: 128
+            IntervalInSeconds: 300
+          CompressionFormat: UNCOMPRESSED
+          DynamicPartitioningConfiguration:
+            Enabled: true
+            RetryOptions:
+              DurationInSeconds: 300
+          ProcessingConfiguration:
+            Enabled: true
+            Processors:
+              - Type: MetadataExtraction
+                Parameters:
+                  - ParameterName: MetadataExtractionQuery
+                    ParameterValue: "{account: .account, year: .year, month: .month, day: .day, hour: .hour}"
+                  - ParameterName: JsonParsingEngine
+                    ParameterValue: JQ-1.6
+          DataFormatConversionConfiguration:
+            Enabled: true
+            SchemaConfiguration:
+              CatalogId: !Ref AWS::AccountId
+              RoleARN: !GetAtt ArchiveFirehoseRole.Arn
+              DatabaseName: !Ref ArchiveGlueDatabase
+              TableName: !Ref ArchiveSignalsGlueTable
+              Region: ${self:provider.region}
+              VersionId: LATEST
+            InputFormatConfiguration:
+              Deserializer:
+                OpenXJsonSerDe: {}
+            OutputFormatConfiguration:
+              Serializer:
+                ParquetSerDe: {}
+
+    ArchiveAlertsFirehose:
+      <<: *archiveFirehose
+      Properties:
+        DeliveryStreamName: ${self:service}-${self:provider.stage}-archive-alerts
+        DeliveryStreamType: DirectPut
+        ExtendedS3DestinationConfiguration:
+          RoleARN: !GetAtt ArchiveFirehoseRole.Arn
+          BucketARN: !GetAtt ArchiveBucket.Arn
+          Prefix: "alerts/account=!{partitionKeyFromQuery:account}/year=!{partitionKeyFromQuery:year}/month=!{partitionKeyFromQuery:month}/day=!{partitionKeyFromQuery:day}/hour=!{partitionKeyFromQuery:hour}/"
+          ErrorOutputPrefix: "alerts-errors/!{firehose:error-output-type}/year=!{timestamp:yyyy}/month=!{timestamp:MM}/day=!{timestamp:dd}/"
+          BufferingHints:
+            SizeInMBs: 128
+            IntervalInSeconds: 300
+          CompressionFormat: UNCOMPRESSED
+          DynamicPartitioningConfiguration:
+            Enabled: true
+            RetryOptions:
+              DurationInSeconds: 300
+          ProcessingConfiguration:
+            Enabled: true
+            Processors:
+              - Type: MetadataExtraction
+                Parameters:
+                  - ParameterName: MetadataExtractionQuery
+                    ParameterValue: "{account: .account, year: .year, month: .month, day: .day, hour: .hour}"
+                  - ParameterName: JsonParsingEngine
+                    ParameterValue: JQ-1.6
+          DataFormatConversionConfiguration:
+            Enabled: true
+            SchemaConfiguration:
+              CatalogId: !Ref AWS::AccountId
+              RoleARN: !GetAtt ArchiveFirehoseRole.Arn
+              DatabaseName: !Ref ArchiveGlueDatabase
+              TableName: !Ref ArchiveAlertsGlueTable
+              Region: ${self:provider.region}
+              VersionId: LATEST
+            InputFormatConfiguration:
+              Deserializer:
+                OpenXJsonSerDe: {}
+            OutputFormatConfiguration:
+              Serializer:
+                ParquetSerDe: {}
+
+    ArchiveLogsFirehose:
+      <<: *archiveFirehose
+      Properties:
+        DeliveryStreamName: ${self:service}-${self:provider.stage}-archive-logs
+        DeliveryStreamType: DirectPut
+        ExtendedS3DestinationConfiguration:
+          RoleARN: !GetAtt ArchiveFirehoseRole.Arn
+          BucketARN: !GetAtt ArchiveBucket.Arn
+          Prefix: "logs/account=!{partitionKeyFromQuery:account}/year=!{partitionKeyFromQuery:year}/month=!{partitionKeyFromQuery:month}/day=!{partitionKeyFromQuery:day}/hour=!{partitionKeyFromQuery:hour}/"
+          ErrorOutputPrefix: "logs-errors/!{firehose:error-output-type}/year=!{timestamp:yyyy}/month=!{timestamp:MM}/day=!{timestamp:dd}/"
+          BufferingHints:
+            SizeInMBs: 128
+            IntervalInSeconds: 300
+          CompressionFormat: UNCOMPRESSED
+          DynamicPartitioningConfiguration:
+            Enabled: true
+            RetryOptions:
+              DurationInSeconds: 300
+          ProcessingConfiguration:
+            Enabled: true
+            Processors:
+              - Type: MetadataExtraction
+                Parameters:
+                  - ParameterName: MetadataExtractionQuery
+                    ParameterValue: "{account: .account, year: .year, month: .month, day: .day, hour: .hour}"
+                  - ParameterName: JsonParsingEngine
+                    ParameterValue: JQ-1.6
+          DataFormatConversionConfiguration:
+            Enabled: true
+            SchemaConfiguration:
+              CatalogId: !Ref AWS::AccountId
+              RoleARN: !GetAtt ArchiveFirehoseRole.Arn
+              DatabaseName: !Ref ArchiveGlueDatabase
+              TableName: !Ref ArchiveLogsGlueTable
+              Region: ${self:provider.region}
+              VersionId: LATEST
+            InputFormatConfiguration:
+              Deserializer:
+                OpenXJsonSerDe: {}
+            OutputFormatConfiguration:
+              Serializer:
+                ParquetSerDe: {}
 
     # -------------------------
     # DETECTION RULES TABLE
@@ -845,12 +1545,49 @@ resources:
           - AttributeName: aws_account_id
             KeyType: HASH
 
+    # One row per executed IR action that responder recognizes as
+    # rollback-eligible (ROLLBACK_UNDO_MODULE in src/handlers/responder.py) --
+    # detection_id is 1:1 with the row since responder only ever takes one
+    # action per detection. rollbackHandler reads rollback_kwargs back out
+    # to call the matching dredge undo function; rollback_supported is
+    # false (row still written, for audit visibility) when the module
+    # needed a prior-state capture that itself failed.
+    irActionsTable:
+      Type: AWS::DynamoDB::Table
+      Properties:
+        TableName: ${self:service}-${self:provider.stage}-ir-actions-table
+        BillingMode: PAY_PER_REQUEST
+        Tags:
+          - Key: Project
+            Value: opencdr
+          - Key: Stage
+            Value: ${self:provider.stage}
+        AttributeDefinitions:
+          - AttributeName: detection_id
+            AttributeType: S
+        KeySchema:
+          - AttributeName: detection_id
+            KeyType: HASH
+
     # -------------------------
     # IR ROLE for the home account (the account this stack deploys into).
-    # Assumed by the responder Lambda for incident-response actions -- see
-    # docs/ir-role.md. For additional (non-home) accounts, create this same
-    # role by hand there (docs/ir-role.md has the trust + permissions JSON)
-    # and add a row to irAccountRolesTable; a `serverless deploy` in one
+    # Assumed by both responder (the original action) AND rollbackHandler
+    # (the undo) -- both need to be trusted principals here, not just
+    # responder. This role previously only trusted responder, which meant
+    # a live deploy could execute an action just fine and still fail every
+    # single rollback with a plain AccessDenied on sts:AssumeRole -- the
+    # original action and its undo run as two separate Lambdas
+    # (src/handlers/responder.py vs src/handlers/ir_rollback.py, see the
+    # module docstring on ir_rollback.py for why they're split), each with
+    # its own execution role, and both need to be trusted here
+    # independently; granting sts:AssumeRole in a Lambda's own
+    # iamRoleStatements (which both already had) only covers the caller
+    # side of the check, not this role's trust policy, which is the other,
+    # equally necessary half. See docs/ir-role.md.
+    #
+    # For additional (non-home) accounts, create this same role by hand
+    # there (docs/ir-role.md has the trust + permissions JSON) and add a
+    # row to irAccountRolesTable; a `serverless deploy` in one
     # account/region can't provision IAM roles in a different AWS account.
     #
     # Keep the Policies statements below in sync with
@@ -868,7 +1605,8 @@ resources:
             - Effect: Allow
               Principal:
                 AWS:
-                  Fn::GetAtt: [ResponderIamRoleLambdaExecution, Arn]
+                  - Fn::GetAtt: [ResponderIamRoleLambdaExecution, Arn]
+                  - Fn::GetAtt: [RollbackHandlerIamRoleLambdaExecution, Arn]
               Action: sts:AssumeRole
         Policies:
           - PolicyName: opencdr-ir-permissions
@@ -893,7 +1631,29 @@ resources:
                     - iam:ListUserPolicies
                     - iam:DeleteUserPolicy
                     - iam:DeleteUser
+                    # revoke_active_sessions attaches a deny-all inline
+                    # policy conditioned on aws:TokenIssueTime -- scoped
+                    # to that one response module, not a general grant.
+                    # Also doubles as restore_user's inline-policy restore.
+                    - iam:PutUserPolicy
+                    # disable_user captures each inline policy's document
+                    # before deleting it (rollback_state for restore_user).
+                    - iam:GetUserPolicy
+                    # restore_user's undo for the managed-policy detach /
+                    # group-removal steps disable_user already captured.
+                    - iam:AttachUserPolicy
+                    - iam:AddUserToGroup
                   Resource: "arn:aws:iam::*:user/*"
+                # iam:UpdateAssumeRolePolicy deliberately NOT granted here even
+                # though dredge's disable_role calls it (to clear a role's trust
+                # policy) -- it's a full account-wide privilege-escalation
+                # primitive (lets the holder rewrite ANY role's trust policy, not
+                # just the one being contained), and disable_role already
+                # detaches every managed policy + deletes every inline policy
+                # first, which alone leaves the role assumable but harmless.
+                # Losing the trust-policy-clear step is an accepted, narrow
+                # trade-off -- it'll fail with AccessDenied and get logged, not
+                # silently skipped. See docs/ir-role.md.
                 - Sid: IamRoles
                   Effect: Allow
                   Action:
@@ -901,20 +1661,58 @@ resources:
                     - iam:DetachRolePolicy
                     - iam:ListRolePolicies
                     - iam:DeleteRolePolicy
-                    - iam:UpdateAssumeRolePolicy
+                    # disable_role captures each inline policy's document
+                    # before deleting it (rollback_state for restore_role).
+                    - iam:GetRolePolicy
+                    # restore_role's undo for the managed-policy-detach /
+                    # inline-policy-delete steps above -- NOT trust policy,
+                    # see the iam:UpdateAssumeRolePolicy comment above.
+                    - iam:AttachRolePolicy
+                    - iam:PutRolePolicy
                   Resource: "arn:aws:iam::*:role/*"
                 - Sid: S3AccountPublicAccessBlock
                   Effect: Allow
-                  Action: s3control:PutPublicAccessBlock
+                  Action:
+                    - s3control:PutPublicAccessBlock
+                    # GetPublicAccessBlock: block_s3_public_access captures
+                    # prior state before mutating (rollback_state).
+                    # DeletePublicAccessBlock: restore_s3_account_public_
+                    # access_block's undo, when no PAB existed before.
+                    - s3control:GetPublicAccessBlock
+                    - s3control:DeletePublicAccessBlock
                   Resource: "*"
-                - Sid: S3BucketAndObjectContainment
+                - Sid: S3BucketContainment
                   Effect: Allow
                   Action:
                     - s3:PutBucketPublicAccessBlock
                     - s3:PutBucketAcl
                     - s3:DeleteBucketPolicy
+                    # quarantine_s3_bucket attaches a deny-all bucket
+                    # policy for principals outside the account -- scoped
+                    # to that one response module, not a general grant.
+                    - s3:PutBucketPolicy
+                    # GetPublicAccessBlock/GetBucketAcl: block_s3_bucket_
+                    # public_access captures prior state before mutating.
+                    # DeletePublicAccessBlock: restore_s3_bucket_public_
+                    # access_block_and_acl's undo, when no PAB existed
+                    # before.
+                    - s3:GetPublicAccessBlock
+                    - s3:GetBucketAcl
+                    - s3:DeletePublicAccessBlock
+                    # quarantine_s3_bucket captures the prior bucket policy
+                    # before overwriting it (rollback_state for
+                    # restore_s3_bucket_quarantine) -- Put/DeleteBucketPolicy
+                    # above already cover that undo's own write side.
+                    - s3:GetBucketPolicy
+                  Resource: "arn:aws:s3:::*"
+                - Sid: S3ObjectContainment
+                  Effect: Allow
+                  Action:
                     - s3:PutObjectAcl
-                  Resource: "*"
+                    # block_s3_object_public_access captures the prior ACL
+                    # before mutating (rollback_state for restore_s3_object_acl).
+                    - s3:GetObjectAcl
+                  Resource: "arn:aws:s3:::*/*"
                 - Sid: Ec2Isolation
                   Effect: Allow
                   Action:
@@ -922,8 +1720,44 @@ resources:
                     - ec2:DescribeSecurityGroups
                     - ec2:CreateSecurityGroup
                     - ec2:RevokeSecurityGroupEgress
+                    # deauthorize_security_group_rules (011_security_group_opened)
+                    # revokes the specific ingress rule a CloudTrail event
+                    # just added -- Ingress wasn't needed before this,
+                    # only Egress (isolation SG cleanup).
+                    - ec2:RevokeSecurityGroupIngress
                     - ec2:ModifyInstanceAttribute
+                    # authorize_security_group_rules -- the undo for
+                    # deauthorize_security_group_rules above, re-authorizing
+                    # the exact rules that were revoked.
+                    - ec2:AuthorizeSecurityGroupIngress
+                    - ec2:AuthorizeSecurityGroupEgress
                   Resource: "*"
+                - Sid: LambdaContainment
+                  Effect: Allow
+                  Action:
+                    # disable_lambda_function (008_lambda_modified) throttles
+                    # a function to zero reserved concurrency -- reversible,
+                    # not a delete/disable of the function itself.
+                    - lambda:PutFunctionConcurrency
+                    # GetFunctionConcurrency: disable_lambda_function
+                    # captures prior state before mutating (rollback_state).
+                    # DeleteFunctionConcurrency: restore_lambda_concurrency's
+                    # undo, when no reserved concurrency was set before.
+                    - lambda:GetFunctionConcurrency
+                    - lambda:DeleteFunctionConcurrency
+                  Resource: "arn:aws:lambda:*:*:function:*"
+                - Sid: SecretsManagerContainment
+                  Effect: Allow
+                  Action:
+                    # disable_secrets_manager_secret (016_secretsmanager_accessed)
+                    # schedules the secret for deletion (7-30 day recovery
+                    # window, restorable via RestoreSecret during that
+                    # window) -- not an instant, irreversible delete.
+                    - secretsmanager:DeleteSecret
+                    # restore_secrets_manager_secret -- the undo, clearing
+                    # the pending-deletion marker within the recovery window.
+                    - secretsmanager:RestoreSecret
+                  Resource: "arn:aws:secretsmanager:*:*:secret:*"
 
     # -------------------------
     # SQS — notifications
@@ -974,6 +1808,69 @@ resources:
         RedrivePolicy:
           deadLetterTargetArn:
             Fn::GetAtt: [ResponsesQueueDLQ, Arn]
+          maxReceiveCount: 3
+        Tags:
+          - Key: Project
+            Value: opencdr
+          - Key: Stage
+            Value: ${self:provider.stage}
+
+    # -------------------------
+    # SQS — IR rollback. Separate from ResponsesQueue -- api.py's
+    # POST /ir-actions/{id}/rollback enqueues here, rollbackHandler
+    # consumes it, mirroring the processor -> outbox -> responder shape
+    # rather than calling dredge synchronously from the API Lambda.
+    # -------------------------
+    IrRollbackQueueDLQ:
+      Type: AWS::SQS::Queue
+      Properties:
+        QueueName: ${self:service}-${self:provider.stage}-ir-rollback-dlq
+        MessageRetentionPeriod: 1209600  # 14 days
+        Tags:
+          - Key: Project
+            Value: opencdr
+          - Key: Stage
+            Value: ${self:provider.stage}
+
+    IrRollbackQueue:
+      Type: AWS::SQS::Queue
+      Properties:
+        QueueName: ${self:service}-${self:provider.stage}-ir-rollback-queue
+        RedrivePolicy:
+          deadLetterTargetArn:
+            Fn::GetAtt: [IrRollbackQueueDLQ, Arn]
+          maxReceiveCount: 3
+        Tags:
+          - Key: Project
+            Value: opencdr
+          - Key: Stage
+            Value: ${self:provider.stage}
+
+    # -------------------------
+    # SQS — signals write buffer (decouples burst writes from
+    # signals-table-v2's per-partition throughput ceiling; see the
+    # SIGNALS TABLE V2 comment above. Scoped to signals-table only, not
+    # logs-table -- logs-table already degrades gracefully, see
+    # docs/data-archival.md and src/infra/logger.py's _log().)
+    # -------------------------
+    SignalsWriteQueueDLQ:
+      Type: AWS::SQS::Queue
+      Properties:
+        QueueName: ${self:service}-${self:provider.stage}-signals-write-dlq
+        MessageRetentionPeriod: 1209600  # 14 days
+        Tags:
+          - Key: Project
+            Value: opencdr
+          - Key: Stage
+            Value: ${self:provider.stage}
+
+    SignalsWriteQueue:
+      Type: AWS::SQS::Queue
+      Properties:
+        QueueName: ${self:service}-${self:provider.stage}-signals-write-queue
+        RedrivePolicy:
+          deadLetterTargetArn:
+            Fn::GetAtt: [SignalsWriteQueueDLQ, Arn]
           maxReceiveCount: 3
         Tags:
           - Key: Project
@@ -1241,6 +2138,68 @@ resources:
         AlarmActions:
           - !Ref AlarmsSnsTopic
 
+    AlarmArchiverErrors:
+      Type: AWS::CloudWatch::Alarm
+      Properties:
+        AlarmName: ${self:service}-${self:provider.stage}-archiver-errors
+        AlarmDescription: "archiver Lambda error count > 0"
+        Namespace: AWS/Lambda
+        MetricName: Errors
+        Dimensions:
+          - Name: FunctionName
+            Value: !Ref ArchiverLambdaFunction
+        Statistic: Sum
+        Period: 60
+        EvaluationPeriods: 1
+        Threshold: 0
+        ComparisonOperator: GreaterThanThreshold
+        TreatMissingData: notBreaching
+        AlarmActions:
+          - !Ref AlarmsSnsTopic
+
+    AlarmSignalWriterErrors:
+      Type: AWS::CloudWatch::Alarm
+      Properties:
+        AlarmName: ${self:service}-${self:provider.stage}-signal-writer-errors
+        AlarmDescription: "signalWriter Lambda error count > 0"
+        Namespace: AWS/Lambda
+        MetricName: Errors
+        Dimensions:
+          - Name: FunctionName
+            Value: !Ref SignalWriterLambdaFunction
+        Statistic: Sum
+        Period: 60
+        EvaluationPeriods: 1
+        Threshold: 0
+        ComparisonOperator: GreaterThanThreshold
+        TreatMissingData: notBreaching
+        AlarmActions:
+          - !Ref AlarmsSnsTopic
+
+    # Tripwire for the "logs-table doesn't need an SQS write-buffer"
+    # decision (see the SQS — signals write buffer comment above) --
+    # logs-table relies on its own graceful CloudWatch-first degradation
+    # plus the service_bucket partition-key fix instead of a buffer. If
+    # this ever fires, that decision needs revisiting.
+    AlarmLogsTableThrottled:
+      Type: AWS::CloudWatch::Alarm
+      Properties:
+        AlarmName: ${self:service}-${self:provider.stage}-logs-table-throttled
+        AlarmDescription: "logs-table-v2 write throttling detected"
+        Namespace: AWS/DynamoDB
+        MetricName: ThrottledRequests
+        Dimensions:
+          - Name: TableName
+            Value: !Ref LogsTableV2
+        Statistic: Sum
+        Period: 60
+        EvaluationPeriods: 1
+        Threshold: 0
+        ComparisonOperator: GreaterThanThreshold
+        TreatMissingData: notBreaching
+        AlarmActions:
+          - !Ref AlarmsSnsTopic
+
     # -------------------------
     # CloudWatch Alarms — DLQ depth
     # -------------------------
@@ -1273,6 +2232,25 @@ resources:
         Dimensions:
           - Name: QueueName
             Value: !GetAtt ResponsesQueueDLQ.QueueName
+        Statistic: Sum
+        Period: 60
+        EvaluationPeriods: 1
+        Threshold: 0
+        ComparisonOperator: GreaterThanThreshold
+        TreatMissingData: notBreaching
+        AlarmActions:
+          - !Ref AlarmsSnsTopic
+
+    AlarmSignalsWriteDLQDepth:
+      Type: AWS::CloudWatch::Alarm
+      Properties:
+        AlarmName: ${self:service}-${self:provider.stage}-signals-write-dlq-depth
+        AlarmDescription: "Messages visible in signals write DLQ > 0"
+        Namespace: AWS/SQS
+        MetricName: ApproximateNumberOfMessagesVisible
+        Dimensions:
+          - Name: QueueName
+            Value: !GetAtt SignalsWriteQueueDLQ.QueueName
         Statistic: Sum
         Period: 60
         EvaluationPeriods: 1
@@ -1342,6 +2320,30 @@ resources:
         AlarmActions:
           - !Ref AlarmsSnsTopic
 
+    # archiver has 3 event source mappings (signals/alerts/logs streams),
+    # but AWS/Lambda's IteratorAge metric is dimensioned by FunctionName
+    # only, not per-event-source-mapping -- this alarm fires if ANY of
+    # the three falls behind, without saying which one. Check the
+    # archiver Lambda's own recent invocations/logs to narrow it down.
+    AlarmArchiverIteratorAge:
+      Type: AWS::CloudWatch::Alarm
+      Properties:
+        AlarmName: ${self:service}-${self:provider.stage}-archiver-iterator-age
+        AlarmDescription: "archiver stream iterator age > 5 min (signals/alerts/logs streams) — consumer falling behind"
+        Namespace: AWS/Lambda
+        MetricName: IteratorAge
+        Dimensions:
+          - Name: FunctionName
+            Value: !Ref ArchiverLambdaFunction
+        Statistic: Maximum
+        Period: 60
+        EvaluationPeriods: 1
+        Threshold: 300000
+        ComparisonOperator: GreaterThanThreshold
+        TreatMissingData: notBreaching
+        AlarmActions:
+          - !Ref AlarmsSnsTopic
+
     # -------------------------
     # CloudWatch Dashboard
     # -------------------------
@@ -1370,7 +2372,9 @@ resources:
                       ["AWS/Lambda", "Errors", "FunctionName", "${NotifierLambdaFunction}", {"label": "notifier"}],
                       ["AWS/Lambda", "Errors", "FunctionName", "${ResponderLambdaFunction}", {"label": "responder"}],
                       ["AWS/Lambda", "Errors", "FunctionName", "${ApiLambdaFunction}", {"label": "api"}],
-                      ["AWS/Lambda", "Errors", "FunctionName", "${AlarmNotifierLambdaFunction}", {"label": "alarmNotifier"}]
+                      ["AWS/Lambda", "Errors", "FunctionName", "${AlarmNotifierLambdaFunction}", {"label": "alarmNotifier"}],
+                      ["AWS/Lambda", "Errors", "FunctionName", "${ArchiverLambdaFunction}", {"label": "archiver"}],
+                      ["AWS/Lambda", "Errors", "FunctionName", "${SignalWriterLambdaFunction}", {"label": "signalWriter"}]
                     ]
                   }
                 },
@@ -1391,7 +2395,9 @@ resources:
                       ["AWS/Lambda", "Duration", "FunctionName", "${NotifierLambdaFunction}", {"label": "notifier"}],
                       ["AWS/Lambda", "Duration", "FunctionName", "${ResponderLambdaFunction}", {"label": "responder"}],
                       ["AWS/Lambda", "Duration", "FunctionName", "${ApiLambdaFunction}", {"label": "api"}],
-                      ["AWS/Lambda", "Duration", "FunctionName", "${AlarmNotifierLambdaFunction}", {"label": "alarmNotifier"}]
+                      ["AWS/Lambda", "Duration", "FunctionName", "${AlarmNotifierLambdaFunction}", {"label": "alarmNotifier"}],
+                      ["AWS/Lambda", "Duration", "FunctionName", "${ArchiverLambdaFunction}", {"label": "archiver"}],
+                      ["AWS/Lambda", "Duration", "FunctionName", "${SignalWriterLambdaFunction}", {"label": "signalWriter"}]
                     ]
                   }
                 },
@@ -1412,7 +2418,9 @@ resources:
                       ["AWS/Lambda", "Invocations", "FunctionName", "${NotifierLambdaFunction}", {"label": "notifier"}],
                       ["AWS/Lambda", "Invocations", "FunctionName", "${ResponderLambdaFunction}", {"label": "responder"}],
                       ["AWS/Lambda", "Invocations", "FunctionName", "${ApiLambdaFunction}", {"label": "api"}],
-                      ["AWS/Lambda", "Invocations", "FunctionName", "${AlarmNotifierLambdaFunction}", {"label": "alarmNotifier"}]
+                      ["AWS/Lambda", "Invocations", "FunctionName", "${AlarmNotifierLambdaFunction}", {"label": "alarmNotifier"}],
+                      ["AWS/Lambda", "Invocations", "FunctionName", "${ArchiverLambdaFunction}", {"label": "archiver"}],
+                      ["AWS/Lambda", "Invocations", "FunctionName", "${SignalWriterLambdaFunction}", {"label": "signalWriter"}]
                     ]
                   }
                 },
@@ -1429,7 +2437,8 @@ resources:
                     "metrics": [
                       ["AWS/SQS", "ApproximateNumberOfMessagesVisible", "QueueName", "${NotificationsQueueDLQ.QueueName}", {"label": "notifications-dlq"}],
                       ["AWS/SQS", "ApproximateNumberOfMessagesVisible", "QueueName", "${ResponsesQueueDLQ.QueueName}", {"label": "responses-dlq"}],
-                      ["AWS/SQS", "ApproximateNumberOfMessagesVisible", "QueueName", "${StreamFailureQueue.QueueName}", {"label": "stream-failures"}]
+                      ["AWS/SQS", "ApproximateNumberOfMessagesVisible", "QueueName", "${StreamFailureQueue.QueueName}", {"label": "stream-failures"}],
+                      ["AWS/SQS", "ApproximateNumberOfMessagesVisible", "QueueName", "${SignalsWriteQueueDLQ.QueueName}", {"label": "signals-write-dlq"}]
                     ]
                   }
                 },
@@ -1508,6 +2517,54 @@ resources:
           Action: events:PutEvents
           Resource: !Sub "arn:aws:events:${AWS::Region}:${AWS::AccountId}:event-bus/default"
 
+    # -------------------------
+    # ORG-WIDE ACCOUNT FORWARDING (opt-in: only created if orgId is set)
+    # -------------------------
+    # Scoped replacement for the org-wide deployment recipe that used to
+    # live only in README.md prose: `aws events put-permission --principal
+    # "*" --condition PrincipalOrgID`. That grants events:PutEvents to
+    # *any* principal anywhere in the org -- not just the intended
+    # per-account forwarding mechanism -- so any credential in any member
+    # account (a compromised Lambda, an over-permissioned app role, an
+    # insider) could call PutEvents directly and hand processor a
+    # hand-crafted, CloudTrail-shaped event indistinguishable from a real
+    # one. Once a signal-triggered response action can actually resolve
+    # its target correctly (see the extractor fix elsewhere this
+    # session), that forged event can direct real automated response at
+    # a target of the forger's choosing via crafted requestParameters.
+    #
+    # Fixed the same way RegionForwarderRole/RegionForwarderBusPolicy
+    # restrict region-forwarding to one specific role's ARN, extended to
+    # cross-account: a StringLike condition on aws:PrincipalArn, matching
+    # only the specific per-account forwarder role name
+    # (org-forwarding/account-event-forwarder.yaml, applied once per
+    # member account -- IAM roles are account-scoped, so unlike
+    # RegionForwarderRole this can't be created once and reused). That
+    # role's own trust policy only lets events.amazonaws.com assume it --
+    # no human or application credential can call sts:AssumeRole on it
+    # directly, so forging an event now requires either compromising that
+    # specific role (not directly assumable by anything but EventBridge
+    # itself) or standing up your own same-named role and wiring your own
+    # rule to it, which is "I'm already an account admin building my own
+    # forwarding infra" -- a fundamentally different, already-trusted
+    # threat model. See docs/org-forwarding.md.
+    OrgForwarderBusPolicy:
+      Type: AWS::Events::EventBusPolicy
+      Condition: HasOrgId
+      Properties:
+        EventBusName: default
+        StatementId: ${self:service}-${self:provider.stage}-allow-org-account-forwarding
+        Statement:
+          Effect: Allow
+          Principal: "*"
+          Action: events:PutEvents
+          Resource: !Sub "arn:aws:events:${AWS::Region}:${AWS::AccountId}:event-bus/default"
+          Condition:
+            StringEquals:
+              aws:PrincipalOrgID: "${param:orgId}"
+            StringLike:
+              aws:PrincipalArn: !Sub "arn:aws:iam::*:role/${self:service}-${self:provider.stage}-account-forwarder-role"
+
   Outputs:
     AlarmsTopicArn:
       Description: "SNS topic ARN for CloudWatch alarms — subscribe to receive notifications"
@@ -1522,13 +2579,15 @@ resources:
       Description: "IAM role ARN a per-region forwarding rule (region-forwarding/cross-region-forwarder.yaml) assumes to send events here -- see docs/region-forwarding.md"
       Value: !GetAtt RegionForwarderRole.Arn
     DefaultEventBusArn:
-      Description: "This region's default EventBridge bus ARN -- the forwarding target for additional-region rules, see docs/region-forwarding.md"
+      Description: "This region's default EventBridge bus ARN -- the forwarding target for additional-region rules (docs/region-forwarding.md) and, for an org-wide deployment, for each member account's forwarder too (docs/org-forwarding.md)"
       Value: !Sub "arn:aws:events:${AWS::Region}:${AWS::AccountId}:event-bus/default"
+    OrgAccountForwarderRoleName:
+      Description: "The exact role name org-forwarding/account-event-forwarder.yaml must create in every member account -- OrgForwarderBusPolicy only trusts principals matching this name pattern. Only meaningful if orgId was set at deploy time. See docs/org-forwarding.md"
+      Value: ${self:service}-${self:provider.stage}-account-forwarder-role
 
 
 plugins:
   - serverless-python-requirements
-  - serverless-iam-roles-per-function
 
 custom:
   pythonRequirements:

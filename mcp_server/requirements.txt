@@ -1,0 +1,7 @@
+# Pinned below 2.0 -- 2.0.0 restructured the SDK entirely (no more
+# mcp.server.fastmcp.FastMCP; MCPServer/Extension/auth/elicitation instead).
+# This server is small and stdio-only; the 1.x FastMCP quickstart API is
+# all it needs. Revisit the 2.x migration only if a feature here actually
+# requires it.
+mcp>=1.2.0,<2.0.0
+requests>=2.32.0

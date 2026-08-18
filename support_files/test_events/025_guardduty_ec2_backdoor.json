@@ -1,0 +1,24 @@
+{
+  "source": "aws.guardduty",
+  "detail-type": "GuardDuty Finding",
+  "account": "123456789012",
+  "region": "us-west-2",
+  "detail": {
+    "id": "gd-ec2-finding-025",
+    "type": "Backdoor:EC2/C&CActivity.B",
+    "severity": 8.0,
+    "accountId": "123456789012",
+    "createdAt": "2026-02-14T11:00:00Z",
+    "updatedAt": "2026-02-14T11:30:00Z",
+    "resource": {
+      "instanceDetails": { "instanceId": "i-0abcdef1234567890" }
+    },
+    "service": {
+      "action": {
+        "networkConnectionAction": {
+          "remoteIpDetails": { "ipAddressV4": "20.21.22.23" }
+        }
+      }
+    }
+  }
+}

@@ -16,6 +16,7 @@ os.environ.setdefault("LOGS_TABLE_NAME", "test-logs-table")
 os.environ.setdefault("AWS_DEFAULT_REGION", "us-east-1")
 
 from dredge.aws_ir.models import OperationResult
+
 from src.handlers import responder
 
 
@@ -98,6 +99,28 @@ class TestRecentActionCount:
         assert responder._recent_action_count() == 2
         assert mock_logs_table.query.call_count == 2
         assert "ExclusiveStartKey" in mock_logs_table.query.call_args_list[1].kwargs
+
+    def test_queries_by_service_bucket_not_bare_service(self, mock_logs_table):
+        """logs-table-v2's actual HASH key is service_bucket
+        ("<service>#<YYYY-MM-DD>", see src/infra/partition_keys.py), not
+        bare `service` -- a KeyConditionExpression on `service` alone
+        would raise ValidationException against the real table. This is
+        exactly the kind of thing a table-name-only mock (like every
+        other test in this file) can't catch -- assert the actual
+        expression shape."""
+        import time
+
+        mock_logs_table.query.return_value = {"Items": []}
+        responder._recent_action_count()
+
+        today = time.strftime("%Y-%m-%d", time.gmtime())
+        kwargs = mock_logs_table.query.call_args.kwargs
+        # KeyConditionExpression is an AND of two sub-conditions (eq on
+        # service_bucket, gte on timestamp) -- the eq's own values are
+        # (Key("service_bucket"), "<bucket>").
+        eq_condition = kwargs["KeyConditionExpression"].get_expression()["values"][0]
+        bucket_value = eq_condition.get_expression()["values"][1]
+        assert bucket_value == f"{responder._SERVICE}#{today}"
 
 
 class TestProcessRecordCircuitBreaker:

@@ -1,0 +1,3 @@
+[submodule "support_files/detection_rules"]
+	path = support_files/detection_rules
+	url = https://github.com/dbnz-io/opencdr-detection-rules.git

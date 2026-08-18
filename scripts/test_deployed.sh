@@ -28,7 +28,11 @@ while [[ $# -gt 0 ]]; do
 done
 
 FUNCTION_NAME="opencdr-${STAGE}-processor"
-SIGNALS_TABLE="opencdr-${STAGE}-signals-table"
+# -v2: signals-table's own low-cardinality `severity` HASH key was
+# replaced by a day-bucketed severity_bucket key -- see
+# docs/architecture.md#dynamodb-tables. Nothing writes to the legacy
+# signals-table anymore.
+SIGNALS_TABLE="opencdr-${STAGE}-signals-table-v2"
 
 echo ""
 echo "┌─────────────────────────────────────────────────┐"
@@ -86,10 +90,17 @@ for event_file in "$EVENTS_DIR"/*.json; do
     continue
   fi
 
-  event_id=$(jq -r '.detail.eventID // empty' "$event_file")
+  # CloudTrail fixtures carry their id at .detail.eventID; GuardDuty
+  # Finding fixtures use .detail.id instead (GuardDutyEventBridgeParser's
+  # own convention, src/domain/ocsf_min_parser.py -- finding_id becomes
+  # the normalized event_id, same field signals-table-v2 is queried by
+  # below regardless of source). Without this fallback every GuardDuty
+  # fixture in support_files/test_events/ silently hit the "no eventID"
+  # skip branch instead of actually being tested.
+  event_id=$(jq -r '.detail.eventID // .detail.id // empty' "$event_file")
 
   if [[ -z "$event_id" ]]; then
-    echo "  [SKIP]   $filename — no eventID in detail"
+    echo "  [SKIP]   $filename — no eventID/id in detail"
     ((skipped++)) || true
     continue
   fi
@@ -114,10 +125,17 @@ for event_file in "$EVENTS_DIR"/*.json; do
   response=$(cat "$tmp_output")
   status=$(echo "$response" | jq -r '.status // "unknown"' 2>/dev/null || echo "unknown")
 
-  # Give DynamoDB a moment to be consistent
-  sleep 0.5
-
-  signal_count=$(count_signals "$event_id")
+  # processor enqueues to signalWriter (SQS) rather than writing
+  # signals-table-v2 directly (see docs/architecture.md#dynamodb-tables)
+  # -- retry briefly instead of a single fixed wait, since that hop adds
+  # real, if usually small, latency (an SQS-triggered Lambda invoke,
+  # possibly a cold one).
+  signal_count=0
+  for _ in 1 2 3 4 5; do
+    sleep 1
+    signal_count=$(count_signals "$event_id")
+    [[ "$signal_count" -gt 0 ]] && break
+  done
 
   case "$status" in
     processed)

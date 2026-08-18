@@ -106,6 +106,58 @@ class TestBuildRemediationSuccessEmailMessage:
         assert "disable_access_key" in body
 
 
+class TestBuildRemediationSuccessSlackPayloadDryRun:
+    def test_uses_dry_run_color_not_green(self):
+        payload = build_remediation_success_slack_payload(make_remediation_item(dry_run=True))
+        assert payload["attachments"][0]["color"] == "#607d8b"
+
+    def test_header_says_dry_run_simulated(self):
+        payload = build_remediation_success_slack_payload(make_remediation_item(dry_run=True))
+        text = json.dumps(payload)
+        assert "DRY RUN" in text
+        assert "SIMULATED" in text
+
+    def test_includes_explanatory_note_block(self):
+        payload = build_remediation_success_slack_payload(make_remediation_item(dry_run=True))
+        text = json.dumps(payload)
+        assert "DREDGE_DRY_RUN" in text
+        assert "no AWS API call was made" in text
+
+    def test_real_run_has_no_dry_run_language(self):
+        payload = build_remediation_success_slack_payload(make_remediation_item(dry_run=False))
+        text = json.dumps(payload)
+        assert "DRY RUN" not in text
+        assert "SIMULATED" not in text
+
+
+class TestBuildRemediationSuccessDiscordPayloadDryRun:
+    def test_uses_dry_run_color_not_green(self):
+        payload = build_remediation_success_discord_payload(make_remediation_item(dry_run=True))
+        assert payload["embeds"][0]["color"] == 6323595
+
+    def test_title_says_dry_run_simulated(self):
+        payload = build_remediation_success_discord_payload(make_remediation_item(dry_run=True))
+        assert "DRY RUN" in payload["embeds"][0]["title"]
+        assert "SIMULATED" in payload["embeds"][0]["title"]
+
+    def test_real_run_title_unaffected(self):
+        payload = build_remediation_success_discord_payload(make_remediation_item(dry_run=False))
+        assert payload["embeds"][0]["title"] == "REMEDIATED — 006_access_key_created"
+
+
+class TestBuildRemediationSuccessEmailMessageDryRun:
+    def test_subject_and_body_flag_dry_run(self):
+        subject, body = build_remediation_success_email_message(make_remediation_item(dry_run=True))
+        assert "Dry run" in subject
+        assert "DRY RUN (SIMULATED)" in body
+        assert "DREDGE_DRY_RUN" in body
+
+    def test_real_run_unaffected(self):
+        subject, body = build_remediation_success_email_message(make_remediation_item(dry_run=False))
+        assert "Dry run" not in subject
+        assert "DRY RUN" not in body
+
+
 class TestLambdaHandlerRemediationDispatch:
     def _post_ok(self, url, payload, **kwargs):
         return 200, "ok"
@@ -153,3 +205,17 @@ class TestLambdaHandlerRemediationDispatch:
         sent_payloads = [call.args[1] for call in mock_post.call_args_list]
         # HIGH severity color (#f57c00), not the remediation green.
         assert any(p.get("attachments", [{}])[0].get("color") == "#f57c00" for p in sent_payloads)
+
+    def test_dry_run_remediation_dispatches_the_simulated_payload(self):
+        settings = make_settings_all_channels()
+        with (
+            patch("src.handlers.notifier.load_global_settings", return_value=settings),
+            patch("src.handlers.notifier.AwsHandler"),
+            patch("src.handlers.notifier._post_json", side_effect=self._post_ok) as mock_post,
+        ):
+            result = lambda_handler(make_sqs_event(make_remediation_item(dry_run=True)), make_context())
+
+        assert result["sent"] == 2
+        sent_payloads = [call.args[1] for call in mock_post.call_args_list]
+        assert any(p.get("attachments", [{}])[0].get("color") == "#607d8b" for p in sent_payloads)
+        assert any(p.get("embeds", [{}])[0].get("color") == 6323595 for p in sent_payloads)

@@ -37,6 +37,10 @@ def _make_args(**kwargs) -> argparse.Namespace:
         "webhook_url": None,
         "webhook_name": "",
         "webhook_headers": None,
+        "guardduty_notify_default": None,
+        "guardduty_notify_severity": None,
+        "guardduty_notify_service": None,
+        "guardduty_notify_severity_service": None,
     }
     defaults.update(kwargs)
     return argparse.Namespace(**defaults)
@@ -494,6 +498,189 @@ class TestArgparserWebhook:
 
     def test_webhook_header_registered(self):
         assert "--webhook-header" in self._get_settings_set_options()
+
+
+# ---------------------------------------------------------------------------
+# settings set — guardduty_notify
+# ---------------------------------------------------------------------------
+
+
+class TestSettingsSetGuardDutyNotify:
+    def test_default_builds_correct_payload(self):
+        _, calls = _run_settings_set(_make_args(guardduty_notify_default="true"))
+        assert calls[0][2]["guardduty_notify"] == {"default": True}
+
+    def test_default_false_builds_correct_payload(self):
+        _, calls = _run_settings_set(_make_args(guardduty_notify_default="false"))
+        assert calls[0][2]["guardduty_notify"] == {"default": False}
+
+    def test_invalid_default_value_exits(self, capsys):
+        with (
+            patch.object(opencdr, "_load_config", return_value={}),
+            patch.object(opencdr, "_require_api", return_value=("https://api.example.com", "key")),
+            pytest.raises(SystemExit) as exc_info,
+        ):
+            opencdr.cmd_settings_set(_make_args(guardduty_notify_default="maybe"))
+        assert exc_info.value.code == 1
+        assert "guardduty-notify-default" in capsys.readouterr().out
+
+    def test_severity_flag_builds_by_severity(self):
+        _, calls = _run_settings_set(_make_args(guardduty_notify_severity=["CRITICAL=true"]))
+        assert calls[0][2]["guardduty_notify"] == {"by_severity": {"CRITICAL": True}}
+
+    def test_multiple_severity_flags(self):
+        _, calls = _run_settings_set(
+            _make_args(guardduty_notify_severity=["CRITICAL=true", "LOW=false"])
+        )
+        assert calls[0][2]["guardduty_notify"]["by_severity"] == {"CRITICAL": True, "LOW": False}
+
+    def test_service_flag_builds_by_service(self):
+        _, calls = _run_settings_set(_make_args(guardduty_notify_service=["IAMUser=true"]))
+        assert calls[0][2]["guardduty_notify"] == {"by_service": {"IAMUser": True}}
+
+    def test_severity_service_flag_builds_by_severity_and_service(self):
+        _, calls = _run_settings_set(
+            _make_args(guardduty_notify_severity_service=["HIGH:EC2=true"])
+        )
+        assert calls[0][2]["guardduty_notify"] == {"by_severity_and_service": {"HIGH:EC2": True}}
+
+    def test_all_four_combined(self):
+        _, calls = _run_settings_set(_make_args(
+            guardduty_notify_default="false",
+            guardduty_notify_severity=["CRITICAL=true"],
+            guardduty_notify_service=["IAMUser=true"],
+            guardduty_notify_severity_service=["HIGH:EC2=true"],
+        ))
+        gd = calls[0][2]["guardduty_notify"]
+        assert gd == {
+            "default": False,
+            "by_severity": {"CRITICAL": True},
+            "by_service": {"IAMUser": True},
+            "by_severity_and_service": {"HIGH:EC2": True},
+        }
+
+    def test_invalid_pair_format_exits(self, capsys):
+        with (
+            patch.object(opencdr, "_load_config", return_value={}),
+            patch.object(opencdr, "_require_api", return_value=("https://api.example.com", "key")),
+            pytest.raises(SystemExit) as exc_info,
+        ):
+            opencdr.cmd_settings_set(_make_args(guardduty_notify_severity=["CRITICAL_NO_EQUALS"]))
+        assert exc_info.value.code == 1
+        assert "guardduty-notify-severity" in capsys.readouterr().out
+
+    def test_no_guardduty_notify_in_payload_when_not_set(self):
+        _, calls = _run_settings_set(_make_args(slack_webhook="https://hooks.slack.com/x"))
+        assert "guardduty_notify" not in calls[0][2]
+
+    def test_guardduty_notify_combined_with_channel_flag(self):
+        _, calls = _run_settings_set(_make_args(
+            slack_webhook="https://hooks.slack.com/x",
+            guardduty_notify_default="true",
+        ))
+        payload = calls[0][2]
+        assert payload["channels"]["slack"]["enabled"] is True
+        assert payload["guardduty_notify"] == {"default": True}
+
+    def test_existing_guardduty_notify_merged_not_replaced(self):
+        existing = {
+            "notifications_enabled": True,
+            "channels": {},
+            "guardduty_notify": {"default": False, "by_severity": {"LOW": False}},
+        }
+        _, calls = _run_settings_set(
+            _make_args(guardduty_notify_severity=["CRITICAL=true"]),
+            existing_settings=existing,
+        )
+        gd = calls[0][2]["guardduty_notify"]
+        assert gd["default"] is False
+        assert gd["by_severity"] == {"LOW": False, "CRITICAL": True}
+
+    def test_guardduty_notify_only_update_does_not_touch_channels(self):
+        existing = {
+            "notifications_enabled": True,
+            "channels": {"slack": {"enabled": True, "webhook_url": "https://hooks.slack.com/x"}},
+        }
+        _, calls = _run_settings_set(
+            _make_args(guardduty_notify_default="true"),
+            existing_settings=existing,
+        )
+        assert calls[0][2]["channels"] == existing["channels"]
+
+
+class TestArgparserGuardDutyNotify:
+    def _get_settings_set_options(self) -> list[str]:
+        captured_parser: list[argparse.ArgumentParser] = []
+
+        def _capture(self, args=None, namespace=None):
+            captured_parser.append(self)
+            raise SystemExit(0)
+
+        with (
+            patch.object(argparse.ArgumentParser, "parse_args", _capture),
+            pytest.raises(SystemExit),
+        ):
+            opencdr.main()
+
+        parser = captured_parser[0]
+        for action in parser._subparsers._group_actions:
+            for name, subparser in action.choices.items():
+                if name != "settings":
+                    continue
+                for sub_action in subparser._subparsers._group_actions:
+                    for sub_name, sub_sub in sub_action.choices.items():
+                        if sub_name == "set":
+                            return [s for a in sub_sub._actions for s in a.option_strings]
+        return []
+
+    def test_guardduty_notify_default_registered(self):
+        assert "--guardduty-notify-default" in self._get_settings_set_options()
+
+    def test_guardduty_notify_severity_registered(self):
+        assert "--guardduty-notify-severity" in self._get_settings_set_options()
+
+    def test_guardduty_notify_service_registered(self):
+        assert "--guardduty-notify-service" in self._get_settings_set_options()
+
+    def test_guardduty_notify_severity_service_registered(self):
+        assert "--guardduty-notify-severity-service" in self._get_settings_set_options()
+
+
+# ---------------------------------------------------------------------------
+# _merge_guardduty_notify — unit tests
+# ---------------------------------------------------------------------------
+
+
+class TestMergeGuardDutyNotify:
+    def test_default_added_to_empty(self):
+        merged = opencdr._merge_guardduty_notify({}, {"default": True})
+        assert merged == {"default": True}
+
+    def test_default_replaces_existing(self):
+        merged = opencdr._merge_guardduty_notify({"default": False}, {"default": True})
+        assert merged["default"] is True
+
+    def test_by_severity_merges_key_by_key(self):
+        existing = {"by_severity": {"LOW": False}}
+        merged = opencdr._merge_guardduty_notify(existing, {"by_severity": {"CRITICAL": True}})
+        assert merged["by_severity"] == {"LOW": False, "CRITICAL": True}
+
+    def test_by_severity_key_overridden_not_duplicated(self):
+        existing = {"by_severity": {"CRITICAL": False}}
+        merged = opencdr._merge_guardduty_notify(existing, {"by_severity": {"CRITICAL": True}})
+        assert merged["by_severity"] == {"CRITICAL": True}
+
+    def test_untouched_sub_keys_preserved(self):
+        existing = {
+            "default": False,
+            "by_severity": {"LOW": False},
+            "by_service": {"IAMUser": True},
+        }
+        merged = opencdr._merge_guardduty_notify(existing, {"by_severity_and_service": {"HIGH:EC2": True}})
+        assert merged["default"] is False
+        assert merged["by_severity"] == {"LOW": False}
+        assert merged["by_service"] == {"IAMUser": True}
+        assert merged["by_severity_and_service"] == {"HIGH:EC2": True}
 
 
 # ---------------------------------------------------------------------------

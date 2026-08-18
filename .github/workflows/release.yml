@@ -1,0 +1,47 @@
+name: Cut Release (on demand)
+
+# Manual counterpart to ci.yml's automatic `release` job -- that one only
+# fires after a push-to-main deploy where ALL post-deploy checks passed,
+# specifically so a release means "confirmed working," not just "the
+# deploy command exited zero" (see docs/deployment.md). This workflow
+# skips that gate entirely -- it exists for the real, ordinary case where
+# you've already deployed and verified a change (e.g. via
+# docs/manual-testing.md, or a push-to-main deploy that already went
+# green), then separately added/edited a CHANGELOG.md entry and don't
+# want to push a no-op commit just to re-trigger the whole pipeline to
+# get a release cut.
+#
+# Both this workflow and ci.yml's own `release` job call the same
+# .github/actions/cut-release composite action, so the actual tag/SBOM/
+# GitHub-Release logic exists in exactly one place.
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Print what would be tagged/released without actually doing it"
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    name: Cut Release from CHANGELOG
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0
+
+      - name: Reminder -- this bypasses the automatic path's confirmed-working gate
+        run: |
+          echo "::warning::This workflow does not check that the current commit has been deployed and passed post-deploy checks -- that's ci.yml's automatic release job's job. Only run this against a commit you've already confirmed working (e.g. via docs/manual-testing.md, or a green push-to-main deploy)."
+
+      - uses: ./.github/actions/cut-release
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          dry-run: ${{ inputs.dry_run }}

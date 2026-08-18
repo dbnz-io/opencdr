@@ -1,6 +1,6 @@
 [project]
 name = "opencdr"
-version = "1.0.5"
+version = "1.0.7"
 description = "Open-source Cloud Detection & Response for AWS"
 readme = "README.md"
 license = { text = "MPL-2.0" }

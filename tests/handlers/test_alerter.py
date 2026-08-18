@@ -22,7 +22,6 @@ os.environ.setdefault("AWS_DEFAULT_REGION", "us-east-1")
 
 import src.handlers.alerter as alerter
 
-
 _ser = TypeSerializer()
 
 
@@ -203,11 +202,11 @@ class TestAlertStorageAndOutbox:
         assert kwargs["table_name"] == "test-alerts-table"
         assert kwargs["alert_item"]["alert_key"] == "hash-abc"
 
-        fake_aws.put_signal_if_not_exists.assert_called_once()
-        _, kwargs = fake_aws.put_signal_if_not_exists.call_args
-        assert kwargs["table_name"] == "test-signals-table"
-        assert kwargs["signal_item"]["item_type"] == "correlation"
-        assert kwargs["signal_item"]["detection_id"] == "alert-abc"
+        fake_aws.sqs_send.assert_called_once()
+        _, kwargs = fake_aws.sqs_send.call_args
+        assert kwargs["queue_url"] == alerter.SIGNALS_WRITE_QUEUE_URL
+        assert kwargs["body"]["item_type"] == "correlation"
+        assert kwargs["body"]["detection_id"] == "alert-abc"
 
         fake_aws.ddb_put_item.assert_called_once()
         _, kwargs = fake_aws.ddb_put_item.call_args

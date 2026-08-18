@@ -9,12 +9,15 @@ from ..domain.ocsf_min_parser import build_default_router
 from ..infra.aws_handler import AwsHandler
 from ..infra.detection_rules_repository import load_detection_rules  # used by get_rules()
 from ..infra.logger import Logger
-from ..infra.metrics import emit_metric
 from ..infra.xray_setup import patch_boto3
 
 patch_boto3()
 
-SIGNALS_TABLE_NAME = os.environ["SIGNALS_TABLE_NAME"]
+# signals-table-v2 writes go through signal_writer.py (SQS-buffered, see
+# serverless.yml's SIGNALS TABLE V2 comment) instead of a direct PutItem
+# here -- signals-table's low-cardinality severity key can hit a
+# per-partition throughput ceiling under a burst.
+SIGNALS_WRITE_QUEUE_URL = os.environ["SIGNALS_WRITE_QUEUE_URL"]
 ALERTS_TABLE_NAME = os.getenv("ALERTS_TABLE_NAME", "")
 OUTBOX_TABLE_NAME = os.getenv("OUTBOX_TABLE_NAME", "")
 
@@ -159,35 +162,34 @@ def lambda_handler(event, context):
 
     for detection in detections:
         try:
-            inserted = aws.put_signal_if_not_exists(
-                table_name=SIGNALS_TABLE_NAME,
-                signal_item=detection,
+            aws.sqs_send(
+                queue_url=SIGNALS_WRITE_QUEUE_URL,
+                body=detection,
+                success_event_name="SIGNAL_ENQUEUED",
+                failure_event_name="SIGNAL_ENQUEUE_FAIL",
             )
-
-            if inserted:
-                stored += 1
-                emit_metric(
-                    "SignalsCreated",
-                    dimensions={
-                        "rule_id": str(detection.get("rule_id", "unknown")),
-                        "severity": str(detection.get("severity", "UNKNOWN")),
-                    },
-                )
+            # "Enqueued for storage", not "inserted" -- the real write
+            # (and the accurate SignalsCreated metric, since only it
+            # knows the true insert-vs-duplicate outcome) now happens in
+            # signal_writer.py. Proceeding straight to alert/outbox on a
+            # successful enqueue is safe here specifically because
+            # detection_id is a fresh uuid4() per call
+            # (src/domain/detection_engine.py's build_detection_event),
+            # so the duplicate-skip case this used to gate on is not
+            # realistically reachable at this call site.
+            stored += 1
 
         except Exception as e:
             ocdr_logger.error(
-                event_name="SIGNAL_STORE_ERROR",
+                event_name="SIGNAL_ENQUEUE_ERROR",
                 event_type="STORAGE",
-                message="Failed storing detection signal",
+                message="Failed enqueueing detection signal for storage",
                 details={
                     "error": str(e),
                     "detection_id": detection.get("detection_id"),
                 },
             )
             raise
-
-        if not inserted:
-            continue
 
         if not detection.get("notify"):
             continue
@@ -212,6 +214,9 @@ def lambda_handler(event, context):
             "api": detection.get("api", {}),
             "cloud_account_id": detection.get("cloud_account_id", ""),
             "cloud_region": detection.get("cloud_region", ""),
+            "source": detection.get("source", ""),
+            "gd_resource_type": detection.get("gd_resource_type", ""),
+            "resources": detection.get("resources", []),
             "raw_event": detection.get("raw_event", {}),
         }
 

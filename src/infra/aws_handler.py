@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import json
+import os
 import time
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import boto3
@@ -12,6 +14,20 @@ from boto3.dynamodb.conditions import Attr
 from botocore.exceptions import ClientError
 
 from .logger import Logger
+from .partition_keys import day_bucket_key
+
+# How long a signal/alert/outbox item lives in DynamoDB before TTL expires
+# it. Safe at 90 days specifically because signals/alerts (not outbox --
+# see put_outbox_record's own comment) are archived to S3 first via the
+# archiver Lambda + Firehose, well before they'd ever expire here -- see
+# docs/data-archival.md. Configurable per deploy in case 90 days is wrong
+# for a given client's retention/compliance needs.
+ARCHIVE_TTL_DAYS = int(os.getenv("DYNAMODB_TTL_DAYS", "90"))
+
+
+def ttl_expires_at(days: int = ARCHIVE_TTL_DAYS) -> int:
+    """Epoch seconds DynamoDB's own TTL attribute expects."""
+    return int((datetime.now(UTC) + timedelta(days=days)).timestamp())
 
 
 def _err_code(e: Exception) -> str:
@@ -516,6 +532,17 @@ class AwsHandler:
         signal_item: dict,
         id_attribute: str = "detection_id",
     ) -> bool:
+        # severity_bucket is signals-table-v2's actual HASH key (see
+        # docs/architecture.md) -- a separate attribute, not a rename of
+        # `severity`, so archiver.py's flatten_signal and the S3/Athena
+        # archive keep seeing a clean severity value untouched by this.
+        signal_item = {
+            **signal_item,
+            "expires_at": ttl_expires_at(),
+            "severity_bucket": day_bucket_key(
+                signal_item.get("severity"), signal_item.get("timestamp")
+            ),
+        }
         signal_id = signal_item.get(id_attribute)
         return self.ddb_put_item_if_absent_resource(
             table_name=table_name,
@@ -545,7 +572,8 @@ class AwsHandler:
         Publisher lambda consumes DynamoDB stream.
         """
         import uuid as _uuid
-        from datetime import UTC as _UTC, datetime as _datetime
+        from datetime import UTC as _UTC
+        from datetime import datetime as _datetime
 
         if not outbox_id:
             outbox_id = str(_uuid.uuid4())
@@ -558,6 +586,7 @@ class AwsHandler:
             # JSON string so publisher's _extract_destinations can parse it as a list
             "destinations": {"S": json.dumps(destinations)},
             "attempts": {"N": "0"},
+            "expires_at": {"N": str(ttl_expires_at())},
         }
 
         self.ddb_put_item(
@@ -583,6 +612,7 @@ class AwsHandler:
         Idempotent alert write using the high-level resource API.
         Returns True if inserted (new), False if duplicate.
         """
+        alert_item = {**alert_item, "expires_at": ttl_expires_at()}
         alert_id = alert_item.get(id_attribute)
         return self.ddb_put_item_if_absent_resource(
             table_name=table_name,

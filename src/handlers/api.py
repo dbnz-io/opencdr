@@ -5,8 +5,9 @@ import base64
 import json
 import os
 import re
+import time
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import boto3
@@ -20,6 +21,7 @@ from ..domain.settings_secrets import (
     ssm_ref,
     ssm_ref_param_name,
 )
+from ..infra.detection_rules_repository import unpack_rule_body
 from ..infra.xray_setup import patch_boto3
 
 patch_boto3()
@@ -36,9 +38,13 @@ LOGS_TABLE_NAME = os.getenv("LOGS_TABLE_NAME", "")
 DETECTION_RULES_TABLE_NAME = os.getenv("DETECTION_RULES_TABLE_NAME", "")
 SETTINGS_TABLE_NAME = os.getenv("SETTINGS_TABLE_NAME", "")
 IR_ACCOUNT_ROLES_TABLE_NAME = os.getenv("IR_ACCOUNT_ROLES_TABLE_NAME", "")
+IR_ACTIONS_TABLE_NAME = os.getenv("IR_ACTIONS_TABLE_NAME", "")
+IR_ROLLBACK_QUEUE_URL = os.getenv("IR_ROLLBACK_QUEUE_URL", "")
 
 ddb = boto3.resource("dynamodb")
 ssm = boto3.client("ssm")
+apigateway = boto3.client("apigateway")
+sqs = boto3.client("sqs")
 
 signals_table = ddb.Table(SIGNALS_TABLE_NAME)
 alerts_table = ddb.Table(ALERTS_TABLE_NAME)
@@ -46,6 +52,7 @@ logs_table = ddb.Table(LOGS_TABLE_NAME)
 detection_rules_table = ddb.Table(DETECTION_RULES_TABLE_NAME)
 settings_table = ddb.Table(SETTINGS_TABLE_NAME)
 ir_account_roles_table = ddb.Table(IR_ACCOUNT_ROLES_TABLE_NAME)
+ir_actions_table = ddb.Table(IR_ACTIONS_TABLE_NAME)
 
 
 # ---------------------------------------------------------------------------
@@ -55,14 +62,84 @@ ir_account_roles_table = ddb.Table(IR_ACCOUNT_ROLES_TABLE_NAME)
 SERVICE = os.getenv("SERVICE_NAME", "OPENCDR-API")
 
 ALLOWED_SEVERITIES = {"CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO", "INFORMATIONAL"}
-ALLOWED_RULE_KINDS = {"signal", "correlation"}
+ALLOWED_RULE_KINDS = {"signal", "correlation", "list"}
 
-# NOTE: adjust these to your engine’s supported ops
+# Every handler src/handlers/responder.py's RESPONSE_MODULE_HANDLERS actually
+# registers. Kept in sync by hand -- api.py deliberately doesn't import
+# responder.py (that would pull dredge and its transitive closure into the
+# api Lambda's cold start for a set of string literals) -- but drifting
+# is exactly the ALLOWED_CONDITION_OPS/engine class of bug this repo has
+# already hit once, so tests/handlers/test_api.py asserts this set equals
+# responder.RESPONSE_MODULE_HANDLERS.keys() exactly.
+ALLOWED_RESPONSE_MODULES = {
+    "disable_access_key",
+    "disable_user",
+    "delete_user",
+    "disable_role",
+    "revoke_active_sessions",
+    "delete_inline_policy",
+    "block_s3_public_access",
+    "block_s3_bucket_public_access",
+    "block_s3_object_public_access",
+    "quarantine_s3_bucket",
+    "isolate_ec2_instances",
+    "deauthorize_security_group_rules",
+    "disable_lambda_function",
+    "disable_secrets_manager_secret",
+    "revoke_rds_snapshot_public_access",
+    "enable_cloudtrail_logging",
+    "enable_guardduty_detector",
+    "start_config_recorder",
+    "enable_security_hub",
+}
+
+# Same hand-synced-and-tested pattern as ALLOWED_RESPONSE_MODULES above, this
+# time mirroring responder.ROLLBACK_UNDO_MODULE.keys() -- the subset of
+# response modules dredge can actually undo (see dredge/aws_ir/response.py's
+# "Rollback / undo actions" section and docs/incident-response.md#rollback).
+# tests/handlers/test_api.py asserts this equals that dict's keys exactly.
+ROLLBACK_ELIGIBLE_MODULES = {
+    "disable_access_key",
+    "revoke_active_sessions",
+    "deauthorize_security_group_rules",
+    "block_s3_public_access",
+    "block_s3_bucket_public_access",
+    "block_s3_object_public_access",
+    "disable_lambda_function",
+    "disable_secrets_manager_secret",
+    "disable_user",
+    "disable_role",
+    "quarantine_s3_bucket",
+    "isolate_ec2_instances",
+    "revoke_rds_snapshot_public_access",
+    "delete_inline_policy",
+}
+
+# GET /signals?severity=.. / GET /logs?service=.. now query a day-bucketed
+# key (see src/infra/partition_keys.py), one Query per day in range --
+# bounds how wide a single request's fan-out can get.
+MAX_DATE_RANGE_DAYS = 31
+
+# Partitions GET /rules queries when no ?rule_kind filter is given.
+# Deliberately excludes "list" -- a list rule is a lookup table other rules
+# reference (in_list/not_in_list), not itself something a user browsing
+# "all rules" expects to see mixed in. Explicit ?rule_kind=list still works
+# via the single-partition branch in _handle_list_rules, which validates
+# against ALLOWED_RULE_KINDS directly.
+_DEFAULT_RULE_LISTING_KINDS = {"signal", "correlation"}
+
+# Every op detection_engine.evaluate_condition actually implements. Kept in
+# sync by hand (INFORME-AUTOR-ES.md §3.1 found this had drifted from the
+# engine in both directions: wildcard/in_list/not_in_list were implemented
+# but rejected here, not_prefix/not_suffix were accepted here but not
+# implemented -- silently never matching, with no error either side).
 ALLOWED_CONDITION_OPS = {
     "equals",
     "not_equals",
     "in",
     "not_in",
+    "in_list",
+    "not_in_list",
     "exists",
     "not_exists",
     "matches",
@@ -73,7 +150,14 @@ ALLOWED_CONDITION_OPS = {
     "not_prefix",
     "suffix",
     "not_suffix",
+    "wildcard",
 }
+
+# Ops that don't take a "value" at all -- exists/not_exists check presence,
+# wildcard always matches.
+_NO_VALUE_CONDITION_OPS = {"exists", "not_exists", "wildcard"}
+# Ops that reference a rule_kind="list" rule by id instead of an inline value.
+_LIST_CONDITION_OPS = {"in_list", "not_in_list"}
 
 _REGEX_CONDITION_OPS = {"matches", "not_matches"}
 
@@ -85,6 +169,31 @@ MIN_THRESHOLD = 1
 MAX_THRESHOLD = 1000
 MIN_TIME_WINDOW_SECONDS = 1
 MAX_TIME_WINDOW_SECONDS = 86400  # 24h
+
+# ---------------------------------------------------------------------------
+# API key route scoping
+#
+# One API key used to control everything (read, rule mutation, settings,
+# IR-role assignment) -- see docs/api-reference.md's "API key scopes"
+# section. A key's scopes are encoded in its API Gateway key *name*
+# (serverless.yml), dash-suffixed: "<...>-api-key-settings" -> {"settings"}.
+# The bare, pre-existing key name ("<...>-api-key", no suffix) maps to all
+# scopes -- back-compat for the key already deployed/distributed before
+# scoping existed.
+# ---------------------------------------------------------------------------
+
+# "ir_roles"/"ir_actions" use an underscore, not a dash, deliberately:
+# key-name suffixes are dash-joined ("-settings-rules"), so a dash-containing
+# scope name would collide with the separator and never parse back out
+# correctly.
+ALL_SCOPES = frozenset({"read", "rules", "settings", "ir_roles", "ir_actions"})
+
+# Matches serverless.yml's `${self:service}-${self:provider.stage}-api-key`
+# ("opencdr" is a hardcoded literal in serverless.yml's top-level `service:`,
+# not parameterized -- STAGE is the only piece that varies at deploy time).
+_API_KEY_NAME_PREFIX = f"opencdr-{os.getenv('STAGE', 'dev')}-api-key"
+_KEY_SCOPE_CACHE_TTL_SECONDS = int(os.getenv("API_KEY_SCOPE_CACHE_TTL_SECONDS", "300"))
+_key_scope_cache: dict[str, tuple[frozenset[str], float]] = {}
 
 
 # ---------------------------------------------------------------------------
@@ -99,6 +208,10 @@ def lambda_handler(event, context):
     path = _get_path(event)
     qs = event.get("queryStringParameters") or {}
     path_params = event.get("pathParameters") or {}
+
+    required_scope = _required_scope_for(method, path)
+    if required_scope and required_scope not in _get_key_scopes(_get_api_key_id(event)):
+        return _response(403, {"message": f"API key missing required scope: {required_scope}", "request_id": request_id})
 
     try:
         # ------------------------------------------------------------------
@@ -136,6 +249,15 @@ def lambda_handler(event, context):
         if path == "/signals" and method == "GET":
             return _handle_list_signals(qs)
 
+        # Aggregate counts by severity for a date range -- a dashboard's
+        # "signals today / this week / this month" widget has no cheap way
+        # to get this from the paginated list endpoint above. An exact
+        # match, same as "/signals" itself, so it's not a prefix/ordering
+        # concern the way "/rules/{id}" is below -- placed here since it's
+        # a sibling concern of the route right above it.
+        if path == "/signals/stats" and method == "GET":
+            return _handle_signal_stats(qs)
+
         # ------------------------------------------------------------------
         # /logs (list) + optional GSI queries
         #
@@ -154,11 +276,12 @@ def lambda_handler(event, context):
         # /rules (list/create)
         #
         # Table:
-        #   PK: rule_kind (signal|correlation)
+        #   PK: rule_kind (signal|correlation|list)
         #   SK: rule_id
         #
-        # Your serverless.yml currently wires GET /rules only,
-        # but these handlers support POST/PUT/DELETE too (add routes if you want).
+        # serverless.yml wires GET/POST /rules and GET/PUT/DELETE
+        # /rules/{rule_id} -- every method these handlers support is a real,
+        # exposed route, not just a subset.
         # ------------------------------------------------------------------
         if path == "/rules" and method == "GET":
             return _handle_list_rules(qs)
@@ -239,6 +362,24 @@ def lambda_handler(event, context):
             if method == "DELETE":
                 return _handle_delete_ir_role(account_id)
 
+        # ------------------------------------------------------------------
+        # /ir-actions (executed IR actions + rollback)
+        # ------------------------------------------------------------------
+        if path == "/ir-actions" and method == "GET":
+            return _handle_list_ir_actions(qs)
+
+        if path.startswith("/ir-actions/"):
+            parts = path.split("/")
+            detection_id = path_params.get("detection_id") or (parts[2] if len(parts) > 2 else None)
+            if not detection_id:
+                return _response(400, {"message": "Missing detection_id in path"})
+            is_rollback_route = len(parts) > 3 and parts[3] == "rollback"
+
+            if method == "GET" and not is_rollback_route:
+                return _handle_get_ir_action(detection_id)
+            if method == "POST" and is_rollback_route:
+                return _handle_rollback_ir_action(detection_id)
+
         return _response(404, {"message": f"Route {method} {path} not found"})
 
     except ValueError as ve:
@@ -264,6 +405,58 @@ def _get_path(event: dict) -> str:
     if "path" in event:
         return str(event["path"])
     return str(event.get("rawPath", "/"))
+
+
+def _required_scope_for(method: str, path: str) -> str | None:
+    """Which scope a route needs, or None if any valid key may call it."""
+    if path in ("/status", "/help"):
+        return None
+    if path == "/rules" or path.startswith("/rules/"):
+        return "read" if method == "GET" else "rules"
+    if path == "/settings" or path.startswith("/settings/"):
+        return "read" if method == "GET" else "settings"
+    if path == "/ir-roles" or path.startswith("/ir-roles/"):
+        return "read" if method == "GET" else "ir_roles"
+    if path == "/ir-actions" or path.startswith("/ir-actions/"):
+        return "read" if method == "GET" else "ir_actions"
+    if path in ("/signals", "/signals/stats", "/logs"):
+        return "read"
+    return None  # unrecognized route -- falls through to the 404 below
+
+
+def _get_api_key_id(event: dict) -> str | None:
+    rc = event.get("requestContext") or {}
+    identity = rc.get("identity") or {}
+    return identity.get("apiKeyId") or None
+
+
+def _scopes_from_key_name(name: str) -> frozenset[str]:
+    if name == _API_KEY_NAME_PREFIX:
+        return ALL_SCOPES  # bare key, no suffix -- back-compat, full access
+    prefix = _API_KEY_NAME_PREFIX + "-"
+    if not name.startswith(prefix):
+        return frozenset()  # unrecognized key name -- fail closed
+    tokens = frozenset(name[len(prefix):].split("-"))
+    return tokens & ALL_SCOPES
+
+
+def _get_key_scopes(api_key_id: str | None) -> frozenset[str]:
+    if not api_key_id:
+        return frozenset()
+
+    now = time.time()
+    cached = _key_scope_cache.get(api_key_id)
+    if cached is not None and (now - cached[1]) < _KEY_SCOPE_CACHE_TTL_SECONDS:
+        return cached[0]
+
+    try:
+        name = apigateway.get_api_key(apiKey=api_key_id).get("name", "")
+    except Exception:
+        return frozenset()  # fail closed -- don't cache a transient failure
+
+    scopes = _scopes_from_key_name(name)
+    _key_scope_cache[api_key_id] = (scopes, now)
+    return scopes
 
 
 def _parse_json_body(event: dict) -> dict:
@@ -320,6 +513,123 @@ def _parse_limit(qs: dict[str, str], *, default: int = 20, max_limit: int = 200)
     return n
 
 
+def _parse_date_range(qs: dict[str, str]) -> tuple[str, str]:
+    """
+    (date_from, date_to) as "YYYY-MM-DD" strings, UTC, inclusive.
+    Defaults to the last 7 days if neither is given -- GET /signals and
+    GET /logs's severity/service selectors now query a day-bucketed key
+    (see src/infra/partition_keys.py) and can no longer browse unbounded
+    history. Raises ValueError on anything malformed, backwards, or
+    wider than MAX_DATE_RANGE_DAYS.
+    """
+
+    def _parse_day(raw: str):
+        try:
+            return datetime.strptime(raw, "%Y-%m-%d").date()
+        except (TypeError, ValueError):
+            raise ValueError(f"Invalid date (expected YYYY-MM-DD): {raw!r}") from None
+
+    today = datetime.now(UTC).date()
+    raw_from, raw_to = qs.get("date_from"), qs.get("date_to")
+
+    date_to = _parse_day(raw_to) if raw_to else today
+    date_from = _parse_day(raw_from) if raw_from else date_to - timedelta(days=6)
+
+    if date_from > date_to:
+        raise ValueError("date_from must be <= date_to")
+    if (date_to - date_from).days + 1 > MAX_DATE_RANGE_DAYS:
+        raise ValueError(f"date range too wide -- max {MAX_DATE_RANGE_DAYS} days")
+
+    return date_from.strftime("%Y-%m-%d"), date_to.strftime("%Y-%m-%d")
+
+
+def _date_range_days(date_from: str, date_to: str, *, descending: bool) -> list[str]:
+    """["YYYY-MM-DD", ...] for every day in [date_from, date_to], ordered
+    newest-first if descending else oldest-first -- matches the
+    requested `order` so merge-pagination renders in the right sequence.
+    Empty if date_from > date_to (e.g. after cutover-date clamping)."""
+    start = datetime.strptime(date_from, "%Y-%m-%d").date()
+    end = datetime.strptime(date_to, "%Y-%m-%d").date()
+    days = []
+    d = start
+    while d <= end:
+        days.append(d.strftime("%Y-%m-%d"))
+        d += timedelta(days=1)
+    if descending:
+        days.reverse()
+    return days
+
+
+def _query_bucketed_range(
+    table,
+    hash_attr: str,
+    hash_prefix: str,
+    days: list[str],
+    *,
+    scan_forward: bool,
+    limit: int,
+    cursor: dict[str, Any] | None,
+) -> tuple[list[Any], dict[str, Any], bool]:
+    """
+    Merge-paginate a day-bucketed base-table key (severity_bucket /
+    service_bucket) across `days` (already ordered to match the request's
+    `order`), draining day N before touching day N+1 within a single
+    page. Unlike _list_rules_all_partitions (which caps each partition
+    independently and concatenates in a fixed order -- fine for a
+    static, order-agnostic rules catalog), /signals and /logs are
+    chronological feeds: a burst spanning a UTC-midnight boundary must
+    still render in strict order under a strict page_size, not "up to
+    len(days) * page_size". Cursor semantics otherwise match
+    _list_rules_all_partitions's house style: a day mapped to None was
+    already exhausted on a prior page (skip, don't requery); a day
+    missing from the cursor hasn't been touched yet (start fresh).
+    """
+    incoming = cursor or {}
+    merged: list[Any] = []
+    outgoing: dict[str, Any] = {}
+    remaining = limit
+
+    for day in days:
+        if remaining <= 0:
+            if day in incoming:
+                outgoing[day] = incoming[day]  # preserve untouched state
+            continue
+        if day in incoming and incoming[day] is None:
+            outgoing[day] = None  # exhausted on a prior page
+            continue
+
+        kwargs: dict[str, Any] = {
+            "KeyConditionExpression": Key(hash_attr).eq(f"{hash_prefix}#{day}"),
+            "ScanIndexForward": scan_forward,
+            "Limit": remaining,
+        }
+        day_esk = incoming.get(day)
+        if day_esk:
+            kwargs["ExclusiveStartKey"] = day_esk
+
+        resp = table.query(**kwargs)
+        items = resp.get("Items", [])
+        merged.extend(items)
+        remaining -= len(items)
+        day_lek = resp.get("LastEvaluatedKey")
+        outgoing[day] = day_lek
+
+        if day_lek is not None:
+            # This day isn't exhausted (DynamoDB's own ~1MB per-response
+            # cap can return fewer than `Limit` items with a non-null
+            # LastEvaluatedKey) -- stop the page here rather than
+            # advancing to an older/newer day out of chronological
+            # order. One query call per day per page, same convention
+            # as this file's other per-partition queries (see
+            # _list_rules_all_partitions): a call might not fill the
+            # remaining budget; the client's next_token continues from
+            # here rather than looping server-side to force a full page.
+            break
+
+    has_next = any(v is not None for v in outgoing.values())
+    return merged, outgoing, has_next
+
+
 # ---------------------------------------------------------------------------
 # Responses
 # ---------------------------------------------------------------------------
@@ -369,8 +679,10 @@ def _handle_list_signals(qs: dict[str, str]) -> dict:
     GET /signals
 
     Supported query shapes (efficient queries with correct pagination):
-      1) By severity (base table):
-         ?severity=HIGH&order=desc&page_size=20&next_token=...
+      1) By severity (base table, day-bucketed under the hood):
+         ?severity=HIGH&date_from=2026-08-01&date_to=2026-08-12&order=desc&page_size=20&next_token=...
+         date_from/date_to default to the last 7 days if omitted, max
+         range MAX_DATE_RANGE_DAYS.
 
       2) By event_id (GSI: gsi_signal_event_id):
          ?event_id=...&order=desc&page_size=20&next_token=...
@@ -397,25 +709,23 @@ def _handle_list_signals(qs: dict[str, str]) -> dict:
         sev = str(severity).upper()
         if sev not in ALLOWED_SEVERITIES:
             raise ValueError(f"severity must be one of {sorted(ALLOWED_SEVERITIES)}")
-        kwargs: dict[str, Any] = {
-            "KeyConditionExpression": Key("severity").eq(sev),
-            "ScanIndexForward": scan_forward,
-            "Limit": limit,
-        }
-        if esk:
-            kwargs["ExclusiveStartKey"] = esk
-        resp = signals_table.query(**kwargs)
 
-        lek = resp.get("LastEvaluatedKey")
+        date_from, date_to = _parse_date_range(qs)
+        days = _date_range_days(date_from, date_to, descending=not scan_forward)
+        merged, outgoing, has_next = _query_bucketed_range(
+            signals_table, "severity_bucket", sev, days,
+            scan_forward=scan_forward, limit=limit, cursor=esk,
+        )
+
         return _response(
             200,
             {
-                "query": {"severity": sev},
+                "query": {"severity": sev, "date_from": date_from, "date_to": date_to},
                 "order": order,
                 "page_size": limit,
-                "items": resp.get("Items", []),
-                "next_token": _encode_next_token(lek),
-                "has_next": lek is not None,
+                "items": merged,
+                "next_token": _encode_next_token(outgoing) if has_next else None,
+                "has_next": has_next,
             },
         )
 
@@ -468,6 +778,67 @@ def _handle_list_signals(qs: dict[str, str]) -> dict:
     )
 
 
+def _count_signals_for_day(severity: str, day: str) -> int:
+    """
+    Select=COUNT against one severity_bucket partition ("SEVERITY#DAY").
+    Paginates on LastEvaluatedKey rather than trusting a single response's
+    Count -- DynamoDB caps a single Query response at ~1MB regardless of
+    Select=COUNT, so a genuinely high-volume day would otherwise silently
+    under-count instead of erroring, which is worse for a stats endpoint
+    than the extra round trips this costs on the rare day that needs them.
+    """
+    total = 0
+    kwargs: dict[str, Any] = {
+        "KeyConditionExpression": Key("severity_bucket").eq(f"{severity}#{day}"),
+        "Select": "COUNT",
+    }
+    while True:
+        resp = signals_table.query(**kwargs)
+        total += resp.get("Count", 0)
+        lek = resp.get("LastEvaluatedKey")
+        if not lek:
+            return total
+        kwargs["ExclusiveStartKey"] = lek
+
+
+def _handle_signal_stats(qs: dict[str, str]) -> dict:
+    """
+    GET /signals/stats
+
+    Signal counts by severity for a date range (defaults to the last 7
+    days, same as GET /signals -- see _parse_date_range). One
+    Select=COUNT query per (severity, day): severity_bucket's partition
+    key already encodes both severity and day together
+    ("CRITICAL#2026-08-17"), so there's no single key shape that could
+    answer "how many, across N days" in one call -- same day-fan-out
+    shape /signals' own severity queries already use (_query_bucketed_range),
+    just without a page-size cap since a count, unlike a page of items,
+    has no natural stopping point short of the full range. Sequential, not
+    threaded: the api Lambda's 25s timeout already has headroom sized for
+    a worst-case MAX_DATE_RANGE_DAYS fan-out (see serverless.yml), and
+    threaded boto3 calls from worker threads outside the main invocation's
+    X-Ray context would log spuriously (context_missing="LOG_ERROR" in
+    xray_setup.py) for every single one of up to 31*6=186 calls.
+    """
+    date_from, date_to = _parse_date_range(qs)
+    days = _date_range_days(date_from, date_to, descending=False)
+
+    counts = {sev: 0 for sev in ALLOWED_SEVERITIES}
+    for sev in ALLOWED_SEVERITIES:
+        for day in days:
+            counts[sev] += _count_signals_for_day(sev, day)
+
+    return _response(
+        200,
+        {
+            "date_from": date_from,
+            "date_to": date_to,
+            "counts": counts,
+            "total": sum(counts.values()),
+        },
+    )
+
+
 # ---------------------------------------------------------------------------
 # /logs
 # ---------------------------------------------------------------------------
@@ -478,8 +849,10 @@ def _handle_list_logs(qs: dict[str, str]) -> dict:
     GET /logs
 
     Supported query shapes (efficient queries with correct pagination):
-      1) By service (base table):
-         ?service=OPENCDR-API&order=desc&page_size=20&next_token=...
+      1) By service (base table, day-bucketed under the hood):
+         ?service=OPENCDR-API&date_from=2026-08-01&date_to=2026-08-12&order=desc&page_size=20&next_token=...
+         date_from/date_to default to the last 7 days if omitted, max
+         range MAX_DATE_RANGE_DAYS.
 
       2) By event_id (GSI: gsi_logs_event_id):
          ?event_id=...&order=desc&page_size=20&next_token=...
@@ -503,24 +876,22 @@ def _handle_list_logs(qs: dict[str, str]) -> dict:
     esk = _decode_next_token(qs.get("next_token"))
 
     if service_name:
-        kwargs: dict[str, Any] = {
-            "KeyConditionExpression": Key("service").eq(service_name),
-            "ScanIndexForward": scan_forward,
-            "Limit": limit,
-        }
-        if esk:
-            kwargs["ExclusiveStartKey"] = esk
-        resp = logs_table.query(**kwargs)
-        lek = resp.get("LastEvaluatedKey")
+        date_from, date_to = _parse_date_range(qs)
+        days = _date_range_days(date_from, date_to, descending=not scan_forward)
+        merged, outgoing, has_next = _query_bucketed_range(
+            logs_table, "service_bucket", service_name, days,
+            scan_forward=scan_forward, limit=limit, cursor=esk,
+        )
+
         return _response(
             200,
             {
-                "query": {"service": service_name},
+                "query": {"service": service_name, "date_from": date_from, "date_to": date_to},
                 "order": order,
                 "page_size": limit,
-                "items": resp.get("Items", []),
-                "next_token": _encode_next_token(lek),
-                "has_next": lek is not None,
+                "items": merged,
+                "next_token": _encode_next_token(outgoing) if has_next else None,
+                "has_next": has_next,
             },
         )
 
@@ -581,11 +952,12 @@ def _handle_list_rules(qs: dict[str, str]) -> dict:
     GET /rules
 
     Efficient listing is by rule_kind partition:
-      ?rule_kind=signal|correlation&order=asc|desc&page_size=50&next_token=...
+      ?rule_kind=signal|correlation|list&order=asc|desc&page_size=50&next_token=...
 
-    If rule_kind is omitted, every partition in ALLOWED_RULE_KINDS is
-    queried directly (never a Scan) and merged -- see
-    _list_rules_all_partitions.
+    If rule_kind is omitted, every partition in _DEFAULT_RULE_LISTING_KINDS
+    is queried directly (never a Scan) and merged -- see
+    _list_rules_all_partitions. This excludes "list" by default; pass
+    ?rule_kind=list explicitly to see those.
     """
     rule_kind = qs.get("rule_kind")
     order = _parse_order(qs)
@@ -614,7 +986,7 @@ def _handle_list_rules(qs: dict[str, str]) -> dict:
                 "query": {"rule_kind": rk},
                 "order": order,
                 "page_size": limit,
-                "items": resp.get("Items", []),
+                "items": [unpack_rule_body(item) for item in resp.get("Items", [])],
                 "next_token": _encode_next_token(lek),
                 "has_next": lek is not None,
                 "notes": "Ordered by rule_id (sort key). If you want time-ordering, add a timestamp GSI.",
@@ -630,24 +1002,24 @@ def _list_rules_all_partitions(
     """
     GET /rules with no rule_kind filter.
 
-    There are only as many partitions as ALLOWED_RULE_KINDS, so query each
-    directly instead of scanning the whole table. Paginates via a compound
-    cursor -- {rule_kind: ExclusiveStartKey_or_None} -- rather than a
-    single ExclusiveStartKey: None means that partition was already
+    There are only as many partitions as _DEFAULT_RULE_LISTING_KINDS, so
+    query each directly instead of scanning the whole table. Paginates via
+    a compound cursor -- {rule_kind: ExclusiveStartKey_or_None} -- rather
+    than a single ExclusiveStartKey: None means that partition was already
     exhausted on a previous page and is skipped; a missing key means start
     that partition from the beginning.
 
     Each queried partition is capped at `limit` independently, so the
-    merged response can return up to len(ALLOWED_RULE_KINDS) * limit items
-    -- not truncated to a single global page_size. Getting a strict global
-    cap exactly right across independently-paged partitions needs a
-    synthetic ExclusiveStartKey built from the last included item, not
-    just DynamoDB's own LastEvaluatedKey -- real extra complexity not
+    merged response can return up to len(_DEFAULT_RULE_LISTING_KINDS) *
+    limit items -- not truncated to a single global page_size. Getting a
+    strict global cap exactly right across independently-paged partitions
+    needs a synthetic ExclusiveStartKey built from the last included item,
+    not just DynamoDB's own LastEvaluatedKey -- real extra complexity not
     justified for a table that's realistically a few hundred rows at most,
     authored by hand rather than generated by traffic.
     """
     incoming_cursor = cursor or {}
-    partitions = sorted(ALLOWED_RULE_KINDS)
+    partitions = sorted(_DEFAULT_RULE_LISTING_KINDS)
 
     merged_items: list[Any] = []
     outgoing_cursor: dict[str, Any] = {}
@@ -668,7 +1040,7 @@ def _list_rules_all_partitions(
             kwargs["ExclusiveStartKey"] = partition_esk
 
         resp = detection_rules_table.query(**kwargs)
-        merged_items.extend(resp.get("Items", []))
+        merged_items.extend(unpack_rule_body(item) for item in resp.get("Items", []))
         outgoing_cursor[rk] = resp.get("LastEvaluatedKey")
 
     has_next = any(v is not None for v in outgoing_cursor.values())
@@ -710,7 +1082,7 @@ def _handle_get_rule(rule_id: str, qs: dict[str, str]) -> dict:
     item = resp.get("Item")
     if not item:
         return _response(404, {"message": "Rule not found", "rule_kind": rk, "rule_id": rule_id})
-    return _response(200, item)
+    return _response(200, unpack_rule_body(item))
 
 
 def _handle_create_rule(body: dict) -> dict:
@@ -775,7 +1147,7 @@ def _handle_delete_rule(rule_id: str, qs: dict[str, str]) -> dict:
         return _response(404, {"message": "Rule not found", "rule_kind": rk, "rule_id": rule_id})
 
     detection_rules_table.delete_item(Key={"rule_kind": rk, "rule_id": rule_id})
-    return _response(200, {"message": "Rule deleted", "rule": item})
+    return _response(200, {"message": "Rule deleted", "rule": unpack_rule_body(item)})
 
 
 def _normalize_rule_payload(payload: dict, *, force_rule_id: str | None) -> dict:
@@ -811,6 +1183,24 @@ def _normalize_rule_payload(payload: dict, *, force_rule_id: str | None) -> dict
     # timestamp is useful for audit (even if not key)
     data["timestamp"] = datetime.now(UTC).isoformat()
 
+    # rule_kind="list" is a different shape entirely -- a static value list
+    # referenced by other rules' in_list/not_in_list conditions (list_id ==
+    # this rule's rule_id), not a detection rule with conditions/severity/
+    # enabled semantics. Previously only loadable via load_rules.sh,
+    # bypassing this validation entirely (INFORME-AUTOR-ES.md §3.1).
+    if rk == "list":
+        values = data.get("values")
+        if not isinstance(values, list) or not values:
+            raise ValueError("values must be a non-empty list for rule_kind=list")
+        return {
+            "rule_kind": "list",
+            "rule_id": data["rule_id"],
+            "created_by": data["created_by"],
+            "updated_by": data["updated_by"],
+            "timestamp": data["timestamp"],
+            "values": [str(v) for v in values],
+        }
+
     # enabled / notify defaults
     if "enabled" not in data:
         data["enabled"] = True
@@ -828,6 +1218,17 @@ def _normalize_rule_payload(payload: dict, *, force_rule_id: str | None) -> dict
         if sev not in ALLOWED_SEVERITIES:
             raise ValueError(f"severity must be one of {sorted(ALLOWED_SEVERITIES)}")
         data["severity"] = sev
+
+    # response_module -- empty/absent is valid (visibility-only rule); a
+    # non-empty value must be a real, registered handler. Previously
+    # unvalidated: a typo was silently accepted here and only surfaced much
+    # later as IR_UNKNOWN_RESPONSE_MODULE in responder's logs, if anyone
+    # happened to notice -- exactly the kind of setup mistake this exists
+    # to catch immediately instead.
+    response_module = data.get("response_module")
+    if response_module:
+        if response_module not in ALLOWED_RESPONSE_MODULES:
+            raise ValueError(f"response_module must be one of {sorted(ALLOWED_RESPONSE_MODULES)} or empty")
 
     # conditions: accept either your newer list-of-conditions (field/op/value) or older formats
     conditions = data.get("conditions")
@@ -853,10 +1254,17 @@ def _normalize_rule_payload(payload: dict, *, force_rule_id: str | None) -> dict
             raise ValueError(f"conditions[{i}].op must be one of {sorted(ALLOWED_CONDITION_OPS)}")
 
         # value can be str/bool/number/list depending on op
+        list_id = c.get("list_id")
         if op in {"in", "not_in"}:
             if not isinstance(value, list) or not value:
                 raise ValueError(f"conditions[{i}].value must be a non-empty list for op={op}")
-        elif op in {"exists", "not_exists"}:
+        elif op in _LIST_CONDITION_OPS:
+            # References a rule_kind="list" rule by id rather than an
+            # inline value -- detection_engine.evaluate_condition looks it
+            # up as lists[list_id], not conditions[i].value.
+            if not isinstance(list_id, str) or not list_id.strip():
+                raise ValueError(f"conditions[{i}].list_id is required for op={op}")
+        elif op in _NO_VALUE_CONDITION_OPS:
             # allow value omitted or any
             pass
         else:
@@ -869,7 +1277,10 @@ def _normalize_rule_payload(payload: dict, *, force_rule_id: str | None) -> dict
             except (re.error, TypeError) as exc:
                 raise ValueError(f"conditions[{i}].value is not a valid regex: {exc}") from exc
 
-        norm_conditions.append({"field": field, "op": op, "value": value})
+        norm_condition = {"field": field, "op": op, "value": value}
+        if op in _LIST_CONDITION_OPS:
+            norm_condition["list_id"] = list_id
+        norm_conditions.append(norm_condition)
 
     data["conditions"] = norm_conditions
 
@@ -996,6 +1407,35 @@ def _handle_delete_settings(setting_id: str) -> dict:
     return _response(200, {"message": "Settings deleted", "settings": item})
 
 
+def _resolve_redacted_secrets(data: dict, *, setting_id: str) -> None:
+    """
+    GET always masks secrets to _REDACTED (_mask_secret above), so any
+    client that fetches settings, merges in a change, and writes the
+    whole document back (scripts/opencdr.py's settings set, and any
+    well-behaved UI) will resubmit that sentinel string for every
+    untouched secret field -- without this, _externalize_secrets would
+    treat "***REDACTED***" as a brand new real secret and write it to
+    SSM verbatim, silently corrupting a previously-configured
+    integration on any write that so much as touches a sibling field.
+    Treat _REDACTED as "leave unchanged": replace it with whatever's
+    actually stored today (almost always an existing ssm: ref, which
+    _externalize_secrets then correctly leaves alone) before
+    externalizing anything.
+    """
+    locations = iter_secret_locations(data.get("channels"))
+    if not any(container.get(key) == _REDACTED for container, key, _ in locations):
+        return  # avoid a GetItem when nothing needs resolving
+
+    existing_item = settings_table.get_item(Key={"setting_id": setting_id}).get("Item") or {}
+    existing_values = {
+        path_parts: container.get(key)
+        for container, key, path_parts in iter_secret_locations(existing_item.get("channels"))
+    }
+    for container, key, path_parts in locations:
+        if container.get(key) == _REDACTED:
+            container[key] = existing_values.get(path_parts, "")
+
+
 def _externalize_secrets(data: dict, *, setting_id: str) -> None:
     """
     Replaces real secret values under data["channels"] with `ssm:`
@@ -1057,6 +1497,7 @@ def _normalize_settings_payload(payload: dict, *, setting_id: str) -> dict:
             raise ValueError(f"channels.{name}.enabled must be boolean")
 
     data["channels"] = channels
+    _resolve_redacted_secrets(data, setting_id=setting_id)
     _externalize_secrets(data, setting_id=setting_id)
     return data
 
@@ -1170,6 +1611,96 @@ def _normalize_ir_role_payload(payload: dict, *, force_account_id: str | None) -
     return data
 
 
+def _handle_list_ir_actions(qs: dict[str, str]) -> dict:
+    """
+    GET /ir-actions
+
+    Same reasoning as _handle_list_ir_roles: admin-sized table (one row per
+    executed rollback-eligible IR action, 90-day TTL -- see responder.py's
+    ttl_expires_at usage), so an unfiltered Scan is fine here.
+    """
+    limit = _parse_limit(qs, default=20, max_limit=200)
+    esk = _decode_next_token(qs.get("next_token"))
+
+    scan_kwargs: dict[str, Any] = {"Limit": limit}
+    if esk:
+        scan_kwargs["ExclusiveStartKey"] = esk
+
+    resp = ir_actions_table.scan(**scan_kwargs)
+    lek = resp.get("LastEvaluatedKey")
+    return _response(
+        200,
+        {
+            "page_size": limit,
+            "items": resp.get("Items", []),
+            "next_token": _encode_next_token(lek),
+            "has_next": lek is not None,
+        },
+    )
+
+
+def _handle_get_ir_action(detection_id: str) -> dict:
+    resp = ir_actions_table.get_item(Key={"detection_id": detection_id})
+    item = resp.get("Item")
+    if not item:
+        return _response(404, {"message": f"No IR action recorded for detection {detection_id}"})
+    return _response(200, item)
+
+
+def _handle_rollback_ir_action(detection_id: str) -> dict:
+    """
+    POST /ir-actions/{detection_id}/rollback
+
+    Does not call dredge directly -- enqueues onto ir-rollback-queue and
+    lets rollbackHandler (src/handlers/ir_rollback.py) execute it, same
+    async/decoupled shape as the original action pipeline (processor ->
+    outbox -> responder), which gets the rate-limit/dry-run safety wiring
+    for free by going through the same kind of consumer instead of a
+    synchronous call from this Lambda.
+
+    Sets rollback_status="pending" here, before the message is even
+    consumed -- so a client polling GET /ir-actions/{id} right after this
+    202 sees "pending" immediately, not "not started" for however long the
+    queue takes to drain. rollbackHandler transitions pending ->
+    succeeded/failed once it actually runs. See docs/incident-response.md#rollback.
+    """
+    resp = ir_actions_table.get_item(Key={"detection_id": detection_id})
+    item = resp.get("Item")
+    if not item:
+        return _response(404, {"message": f"No IR action recorded for detection {detection_id}"})
+
+    if not item.get("rollback_supported"):
+        return _response(
+            400,
+            {"message": f"Rollback is not supported for this action (response_module={item.get('response_module')})"},
+        )
+
+    if item.get("rolled_back"):
+        return _response(409, {"message": "This action has already been rolled back"})
+
+    if item.get("rollback_status") == "pending":
+        return _response(409, {"message": "A rollback for this action is already in progress"})
+
+    if not IR_ROLLBACK_QUEUE_URL:
+        return _response(500, {"message": "IR_ROLLBACK_QUEUE_URL not configured"})
+
+    sqs.send_message(QueueUrl=IR_ROLLBACK_QUEUE_URL, MessageBody=json.dumps({"detection_id": detection_id}))
+
+    try:
+        ir_actions_table.update_item(
+            Key={"detection_id": detection_id},
+            UpdateExpression="SET rollback_status = :status, rollback_updated_at = :ts REMOVE rollback_error",
+            ExpressionAttributeValues={":status": "pending", ":ts": datetime.now(UTC).isoformat()},
+        )
+    except Exception:
+        # Best-effort -- the rollback is already enqueued and will run
+        # regardless; a client that polls before rollbackHandler picks it
+        # up just sees the pre-existing status for a bit longer.
+        pass
+
+    return _response(202, {"message": "Rollback enqueued", "detection_id": detection_id})
+
+
 # ---------------------------------------------------------------------------
 # Docs
 # ---------------------------------------------------------------------------
@@ -1186,27 +1717,40 @@ def _help_payload() -> dict:
                 "method": "GET",
                 "description": "List signals using base table or GSIs with cursor pagination.",
                 "query_params": {
-                    "severity": "Query base table by severity (PK). One of CRITICAL,HIGH,MEDIUM,LOW,INFO,INFORMATIONAL.",
+                    "severity": "Query base table by severity (day-bucketed PK). One of CRITICAL,HIGH,MEDIUM,LOW,INFO,INFORMATIONAL.",
                     "event_id": "Query GSI gsi_signal_event_id by event_id (PK).",
                     "category": "Query GSI gsi_signal_category_id by category (PK).",
+                    "date_from": "YYYY-MM-DD, UTC, inclusive. Only applies to the severity selector. Defaults to 6 days before date_to/today.",
+                    "date_to": "YYYY-MM-DD, UTC, inclusive. Only applies to the severity selector. Defaults to today.",
                     "order": "asc|desc (default desc). Orders by timestamp sort key.",
                     "page_size": "1..200 (default 20).",
-                    "next_token": "Opaque cursor from previous response (LastEvaluatedKey).",
+                    "next_token": "Opaque cursor from previous response.",
                 },
-                "notes": "Exactly one of severity|event_id|category is required.",
+                "notes": "Exactly one of severity|event_id|category is required. severity queries default to the last 7 days -- see date_from/date_to.",
+            },
+            "/signals/stats": {
+                "method": "GET",
+                "description": "Signal counts by severity for a date range -- for a dashboard widget, not a substitute for /signals' paginated item listing.",
+                "query_params": {
+                    "date_from": "YYYY-MM-DD, UTC, inclusive. Defaults to 6 days before date_to/today.",
+                    "date_to": "YYYY-MM-DD, UTC, inclusive. Defaults to today.",
+                },
+                "notes": f"Defaults to the last 7 days if neither date is given, max range {MAX_DATE_RANGE_DAYS} days (same bound as /signals). Response: {{date_from, date_to, counts: {{<severity>: <count>, ...}}, total}}.",
             },
             "/logs": {
                 "method": "GET",
                 "description": "List logs using base table or GSIs with cursor pagination.",
                 "query_params": {
-                    "service": "Query base table by service (PK).",
+                    "service": "Query base table by service (day-bucketed PK).",
                     "event_id": "Query GSI gsi_logs_event_id by event_id (PK).",
                     "event_name": "Query GSI gsi_activity_name by event_name (PK).",
+                    "date_from": "YYYY-MM-DD, UTC, inclusive. Only applies to the service selector. Defaults to 6 days before date_to/today.",
+                    "date_to": "YYYY-MM-DD, UTC, inclusive. Only applies to the service selector. Defaults to today.",
                     "order": "asc|desc (default desc). Orders by timestamp sort key.",
                     "page_size": "1..200 (default 20).",
-                    "next_token": "Opaque cursor from previous response (LastEvaluatedKey).",
+                    "next_token": "Opaque cursor from previous response.",
                 },
-                "notes": "Exactly one of service|event_id|event_name is required.",
+                "notes": "Exactly one of service|event_id|event_name is required. service queries default to the last 7 days -- see date_from/date_to.",
             },
             "/rules": {
                 "methods": ["GET", "POST"],
@@ -1237,6 +1781,25 @@ def _help_payload() -> dict:
                 "from that account. An account with no entry falls back to OPENCDR_IR_ROLE_ARN.",
             },
             "/ir-roles/{aws_account_id}": {"methods": ["GET", "PUT", "DELETE"]},
+            "/ir-actions": {
+                "methods": ["GET"],
+                "notes": "One row per executed, rollback-eligible IR action (see ROLLBACK_ELIGIBLE_MODULES). "
+                "rollback_supported=false means the action ran but its prior state couldn't be captured "
+                "(rollback not possible for that specific occurrence, still recorded for audit).",
+            },
+            "/ir-actions/{detection_id}": {
+                "methods": ["GET"],
+                "notes": "Once a rollback has been attempted, also carries rollback_status "
+                "(pending/succeeded/failed), rollback_error, and rollback_updated_at. "
+                "rolled_back mirrors rollback_status == succeeded for back-compat.",
+            },
+            "/ir-actions/{detection_id}/rollback": {
+                "methods": ["POST"],
+                "notes": "Enqueues the rollback for async execution (mirrors the original action's "
+                "processor -> outbox -> responder pipeline) -- returns 202, not the rollback result, "
+                "and sets rollback_status=pending. 400 if rollback_supported is false; 409 only if "
+                "already pending -- a previously failed rollback can be retried.",
+            },
         },
         "schema_notes": [
             "Signals table is time-ordered by timestamp sort key for base queries and GSIs.",

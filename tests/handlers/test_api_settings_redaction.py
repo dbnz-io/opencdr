@@ -206,6 +206,82 @@ class TestWriteSettingsEndpointsExternalizeSecretsToSsm:
         mock_ssm.put_parameter.assert_not_called()
 
 
+class TestRedactedRoundTripDoesNotCorruptSecrets:
+    """A client that GETs settings (secrets masked to _REDACTED), edits one
+    channel, and PUTs the whole document back -- exactly what
+    scripts/opencdr.py's settings set already does, and what a UI editing
+    one channel at a time must do too -- must not have untouched channels'
+    _REDACTED sentinel treated as a brand new real secret."""
+
+    def test_redacted_sentinel_preserves_existing_ssm_ref(self):
+        existing_ref = "ssm:/opencdr-dev/settings/team-a/slack/webhook_url"
+        stored = {"setting_id": "team-a", "channels": {"slack": {"enabled": True, "webhook_url": existing_ref}}}
+        payload = {"channels": {"slack": {"enabled": True, "webhook_url": api._REDACTED}}}
+        with patch.object(api, "settings_table") as mock_table, patch.object(api, "ssm") as mock_ssm:
+            mock_table.get_item.return_value = {"Item": stored}
+            resp = api.lambda_handler(
+                make_event(
+                    "PUT", "/settings/team-a", path_params={"setting_id": "team-a"}, body=json.dumps(payload)
+                ),
+                make_context(),
+            )
+        assert resp["statusCode"] == 200
+        assert body_of(resp)["channels"]["slack"]["webhook_url"] == existing_ref
+        mock_ssm.put_parameter.assert_not_called()
+
+    def test_untouched_channel_redacted_sentinel_preserved_while_editing_another(self):
+        """The realistic case: editing jira while slack, already configured,
+        is round-tripped untouched -- slack's real ssm ref must survive."""
+        slack_ref = "ssm:/opencdr-dev/settings/team-a/slack/webhook_url"
+        stored = {
+            "setting_id": "team-a",
+            "channels": {
+                "slack": {"enabled": True, "webhook_url": slack_ref},
+                "jira": {"enabled": True, "api_token": "ssm:/opencdr-dev/settings/team-a/jira/api_token"},
+            },
+        }
+        payload = {
+            "channels": {
+                "slack": {"enabled": True, "webhook_url": api._REDACTED},
+                "jira": {"enabled": True, "api_token": "brand-new-token"},
+            }
+        }
+        with patch.object(api, "settings_table") as mock_table, patch.object(api, "ssm") as mock_ssm:
+            mock_table.get_item.return_value = {"Item": stored}
+            resp = api.lambda_handler(
+                make_event(
+                    "PUT", "/settings/team-a", path_params={"setting_id": "team-a"}, body=json.dumps(payload)
+                ),
+                make_context(),
+            )
+        assert resp["statusCode"] == 200
+        body = body_of(resp)
+        assert body["channels"]["slack"]["webhook_url"] == slack_ref
+        assert body["channels"]["jira"]["api_token"].startswith("ssm:")
+        mock_ssm.put_parameter.assert_called_once()
+        assert mock_ssm.put_parameter.call_args.kwargs["Value"] == "brand-new-token"
+
+    def test_redacted_sentinel_with_no_existing_document_clears_to_empty(self):
+        payload = {"channels": {"slack": {"enabled": True, "webhook_url": api._REDACTED}}}
+        with patch.object(api, "settings_table") as mock_table, patch.object(api, "ssm") as mock_ssm:
+            mock_table.get_item.return_value = {}
+            resp = api.lambda_handler(
+                make_event("POST", "/settings", body=json.dumps(payload)), make_context()
+            )
+        assert resp["statusCode"] == 201
+        assert body_of(resp)["channels"]["slack"]["webhook_url"] == ""
+        mock_ssm.put_parameter.assert_not_called()
+
+    def test_no_redacted_sentinel_skips_the_extra_get_item(self):
+        payload = {"channels": {"slack": {"enabled": True, "webhook_url": "https://hooks.slack.com/new"}}}
+        with patch.object(api, "settings_table") as mock_table, patch.object(api, "ssm"):
+            resp = api.lambda_handler(
+                make_event("POST", "/settings", body=json.dumps(payload)), make_context()
+            )
+        assert resp["statusCode"] == 201
+        mock_table.get_item.assert_not_called()
+
+
 class TestDeleteSettingsCleansUpSsmRefs:
     def test_delete_removes_referenced_ssm_params(self):
         stored = {

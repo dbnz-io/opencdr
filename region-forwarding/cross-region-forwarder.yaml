@@ -18,9 +18,11 @@ Description: >
   scripts/setup_region_forwarding.sh, not manually region by region).
 
   The event pattern below must be kept in sync with processor's own
-  EventBridge rule in serverless.yml -- if you add a new event source
-  there, add it here too, or that source goes blind in every
-  non-deployment region.
+  EventBridge rule in serverless.yml AND with
+  org-forwarding/account-event-forwarder.yaml's copy -- if you add a new
+  event source to one and not the others, that source goes blind in
+  every non-deployment region or member account the other two cover. See
+  docs/org-forwarding.md.
 
 Parameters:
   ServiceName:

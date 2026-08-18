@@ -22,7 +22,11 @@
         "iam:DetachUserPolicy",
         "iam:ListUserPolicies",
         "iam:DeleteUserPolicy",
-        "iam:DeleteUser"
+        "iam:DeleteUser",
+        "iam:PutUserPolicy",
+        "iam:GetUserPolicy",
+        "iam:AttachUserPolicy",
+        "iam:AddUserToGroup"
       ],
       "Resource": "arn:aws:iam::*:user/*"
     },
@@ -34,26 +38,45 @@
         "iam:DetachRolePolicy",
         "iam:ListRolePolicies",
         "iam:DeleteRolePolicy",
-        "iam:UpdateAssumeRolePolicy"
+        "iam:GetRolePolicy",
+        "iam:AttachRolePolicy",
+        "iam:PutRolePolicy"
       ],
       "Resource": "arn:aws:iam::*:role/*"
     },
     {
       "Sid": "S3AccountPublicAccessBlock",
       "Effect": "Allow",
-      "Action": "s3control:PutPublicAccessBlock",
+      "Action": [
+        "s3control:PutPublicAccessBlock",
+        "s3control:GetPublicAccessBlock",
+        "s3control:DeletePublicAccessBlock"
+      ],
       "Resource": "*"
     },
     {
-      "Sid": "S3BucketAndObjectContainment",
+      "Sid": "S3BucketContainment",
       "Effect": "Allow",
       "Action": [
         "s3:PutBucketPublicAccessBlock",
         "s3:PutBucketAcl",
         "s3:DeleteBucketPolicy",
-        "s3:PutObjectAcl"
+        "s3:PutBucketPolicy",
+        "s3:GetPublicAccessBlock",
+        "s3:GetBucketAcl",
+        "s3:DeletePublicAccessBlock",
+        "s3:GetBucketPolicy"
       ],
-      "Resource": "*"
+      "Resource": "arn:aws:s3:::*"
+    },
+    {
+      "Sid": "S3ObjectContainment",
+      "Effect": "Allow",
+      "Action": [
+        "s3:PutObjectAcl",
+        "s3:GetObjectAcl"
+      ],
+      "Resource": "arn:aws:s3:::*/*"
     },
     {
       "Sid": "Ec2Isolation",
@@ -63,9 +86,31 @@
         "ec2:DescribeSecurityGroups",
         "ec2:CreateSecurityGroup",
         "ec2:RevokeSecurityGroupEgress",
-        "ec2:ModifyInstanceAttribute"
+        "ec2:RevokeSecurityGroupIngress",
+        "ec2:ModifyInstanceAttribute",
+        "ec2:AuthorizeSecurityGroupIngress",
+        "ec2:AuthorizeSecurityGroupEgress"
       ],
       "Resource": "*"
+    },
+    {
+      "Sid": "LambdaContainment",
+      "Effect": "Allow",
+      "Action": [
+        "lambda:PutFunctionConcurrency",
+        "lambda:GetFunctionConcurrency",
+        "lambda:DeleteFunctionConcurrency"
+      ],
+      "Resource": "arn:aws:lambda:*:*:function:*"
+    },
+    {
+      "Sid": "SecretsManagerContainment",
+      "Effect": "Allow",
+      "Action": [
+        "secretsmanager:DeleteSecret",
+        "secretsmanager:RestoreSecret"
+      ],
+      "Resource": "arn:aws:secretsmanager:*:*:secret:*"
     }
   ]
 }
