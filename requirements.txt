@@ -8,7 +8,7 @@ typing_extensions>=4.10.0
 # provider.tracing in serverless.yml only traces the Lambda invocation
 # boundary; this is what makes DynamoDB/SQS/SNS calls show up as their own
 # nodes in the X-Ray service map -- see src/infra/xray_setup.py.
-aws-xray-sdk>=2.12.0
+aws-xray-sdk>=2.15.0
 
 # Pinned to a commit, not a tag -- dbnz-io/dredge has no releases/tags yet.
 # Replaces the previously vendored, drifted copy at src/dredge/ (Phase 2).
