@@ -7,14 +7,13 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 os.environ.setdefault("LOGS_TABLE_NAME", "test-logs-table")
-os.environ.setdefault("SIGNALS_TABLE_NAME", "test-signals-table")
+os.environ.setdefault("SIGNALS_WRITE_QUEUE_URL", "https://sqs.us-east-1.amazonaws.com/123456789012/test-signals-write-queue")
 os.environ.setdefault("ALERTS_TABLE_NAME", "test-alerts-table")
 os.environ.setdefault("OUTBOX_TABLE_NAME", "test-outbox-table")
 os.environ.setdefault("AWS_DEFAULT_REGION", "us-east-1")
 
 from src.handlers import processor
 from src.handlers.processor import get_lists, get_rules, lambda_handler
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -74,10 +73,10 @@ def reset_module_caches():
     processor.LISTS_CACHE = None
 
 
-def patched_aws_handler(*, put_signal=True, put_alert=True):
+def patched_aws_handler(*, put_alert=True):
     """Patch AwsHandler so lambda_handler gets a controllable instance."""
     instance = MagicMock()
-    instance.put_signal_if_not_exists.return_value = put_signal
+    instance.sqs_send.return_value = "msg-id-1"
     instance.put_alert_if_not_exists.return_value = put_alert
     instance.put_outbox_record.return_value = "outbox-id-1"
     return patch("src.handlers.processor.AwsHandler", return_value=instance), instance
@@ -96,7 +95,7 @@ class TestUnsupportedEvent:
 
         assert result == {"status": "ignored"}
         load_rules.assert_not_called()
-        instance.put_signal_if_not_exists.assert_not_called()
+        instance.sqs_send.assert_not_called()
 
     def test_parser_exception_is_logged_and_reraised(self):
         patcher, instance = patched_aws_handler()
@@ -108,7 +107,7 @@ class TestUnsupportedEvent:
             with pytest.raises(ValueError, match="malformed event"):
                 lambda_handler(make_cloudtrail_event(), make_context())
 
-        instance.put_signal_if_not_exists.assert_not_called()
+        instance.sqs_send.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -123,7 +122,7 @@ class TestNoRules:
             result = lambda_handler(make_cloudtrail_event(), make_context())
 
         assert result == {"status": "no_rules"}
-        instance.put_signal_if_not_exists.assert_not_called()
+        instance.sqs_send.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -139,7 +138,7 @@ class TestNoDetection:
             result = lambda_handler(make_cloudtrail_event(event_name="CreateUser"), make_context())
 
         assert result == {"status": "no_detection"}
-        instance.put_signal_if_not_exists.assert_not_called()
+        instance.sqs_send.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -150,7 +149,7 @@ class TestNoDetection:
 class TestDetectionMatch:
     def test_matching_rule_stores_signal_and_alert_and_outbox(self):
         rules = [make_signal_rule(notify=True)]
-        patcher, instance = patched_aws_handler(put_signal=True, put_alert=True)
+        patcher, instance = patched_aws_handler(put_alert=True)
         with patcher, patch("src.handlers.processor.load_detection_rules", return_value=rules):
             result = lambda_handler(make_cloudtrail_event(), make_context())
 
@@ -158,10 +157,10 @@ class TestDetectionMatch:
         assert result["detections"] == 1
         assert result["stored"] == 1
 
-        instance.put_signal_if_not_exists.assert_called_once()
-        signal_kwargs = instance.put_signal_if_not_exists.call_args.kwargs
-        assert signal_kwargs["table_name"] == "test-signals-table"
-        assert signal_kwargs["signal_item"]["rule_id"] == "rule-001"
+        instance.sqs_send.assert_called_once()
+        signal_kwargs = instance.sqs_send.call_args.kwargs
+        assert signal_kwargs["queue_url"] == processor.SIGNALS_WRITE_QUEUE_URL
+        assert signal_kwargs["body"]["rule_id"] == "rule-001"
 
         instance.put_alert_if_not_exists.assert_called_once()
         alert_kwargs = instance.put_alert_if_not_exists.call_args.kwargs
@@ -181,7 +180,7 @@ class TestDetectionMatch:
             result = lambda_handler(make_cloudtrail_event(), make_context())
 
         assert result["stored"] == 1
-        instance.put_signal_if_not_exists.assert_called_once()
+        instance.sqs_send.assert_called_once()
         instance.put_alert_if_not_exists.assert_not_called()
         instance.put_outbox_record.assert_not_called()
 
@@ -196,26 +195,31 @@ class TestDetectionMatch:
 
         assert result["detections"] == 2
         assert result["stored"] == 2
-        assert instance.put_signal_if_not_exists.call_count == 2
+        assert instance.sqs_send.call_count == 2
         assert instance.put_alert_if_not_exists.call_count == 2
 
 
 # ---------------------------------------------------------------------------
-# Idempotency: duplicate signal
+# Optimistic proceed: processor no longer knows insert-vs-duplicate --
+# that outcome (and the real DynamoDB write) now happens downstream in
+# signal_writer.py, off the SQS buffer this enqueues to. A successful
+# enqueue alone is enough to proceed to alert/outbox; there is no longer
+# a "skip because it turned out to be a duplicate" path at this layer.
 # ---------------------------------------------------------------------------
 
 
-class TestDuplicateSignal:
-    def test_duplicate_signal_skips_alert_and_outbox_without_error(self):
+class TestOptimisticProceed:
+    def test_alert_and_outbox_proceed_on_successful_enqueue_alone(self):
         rules = [make_signal_rule()]
-        patcher, instance = patched_aws_handler(put_signal=False)
+        patcher, instance = patched_aws_handler(put_alert=True)
         with patcher, patch("src.handlers.processor.load_detection_rules", return_value=rules):
             result = lambda_handler(make_cloudtrail_event(), make_context())
 
         assert result["status"] == "processed"
-        assert result["stored"] == 0
-        instance.put_alert_if_not_exists.assert_not_called()
-        instance.put_outbox_record.assert_not_called()
+        assert result["stored"] == 1
+        instance.sqs_send.assert_called_once()
+        instance.put_alert_if_not_exists.assert_called_once()
+        instance.put_outbox_record.assert_called_once()
 
 
 # ---------------------------------------------------------------------------
@@ -223,17 +227,19 @@ class TestDuplicateSignal:
 # ---------------------------------------------------------------------------
 
 
-class TestSignalStoreError:
-    def test_signal_store_exception_propagates(self):
+class TestSignalEnqueueError:
+    def test_signal_enqueue_exception_propagates(self):
         rules = [make_signal_rule()]
         instance = MagicMock()
-        instance.put_signal_if_not_exists.side_effect = RuntimeError("dynamo unavailable")
+        instance.sqs_send.side_effect = RuntimeError("sqs unavailable")
         with (
             patch("src.handlers.processor.AwsHandler", return_value=instance),
             patch("src.handlers.processor.load_detection_rules", return_value=rules),
         ):
-            with pytest.raises(RuntimeError, match="dynamo unavailable"):
+            with pytest.raises(RuntimeError, match="sqs unavailable"):
                 lambda_handler(make_cloudtrail_event(), make_context())
+
+        instance.put_alert_if_not_exists.assert_not_called()
 
 
 class TestAlertsTableUnset:

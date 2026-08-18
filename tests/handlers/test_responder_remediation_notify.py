@@ -35,6 +35,10 @@ def ok_result(operation="disable_user", target="user=bob") -> OperationResult:
     return OperationResult(operation=operation, target=target, success=True, details={"ok": True})
 
 
+def dry_run_result(operation="disable_user", target="user=bob") -> OperationResult:
+    return OperationResult(operation=operation, target=target, success=True, details={"dry_run": True})
+
+
 @pytest.fixture()
 def mock_dredge(monkeypatch):
     dredge = MagicMock()
@@ -74,6 +78,32 @@ class TestNotifyRemediationSuccessDirect:
         assert payload["target"] == "user=alice,access_key_id=AKIA123"
         logger.error.assert_not_called()
 
+    def test_real_run_payload_carries_dry_run_false(self, mock_outbox_table):
+        responder._notify_remediation_success(
+            detection_event={"severity": "MEDIUM"},
+            detection_id="d-1",
+            rule_id="006_access_key_created",
+            response_module="disable_access_key",
+            account_id="123456789012",
+            result=ok_result("disable_access_key", "user=alice,access_key_id=AKIA123"),
+            logger=MagicMock(),
+        )
+        payload = json.loads(mock_outbox_table.put_item.call_args.kwargs["Item"]["payload"])
+        assert payload["dry_run"] is False
+
+    def test_dry_run_payload_carries_dry_run_true(self, mock_outbox_table):
+        responder._notify_remediation_success(
+            detection_event={"severity": "MEDIUM"},
+            detection_id="d-1",
+            rule_id="006_access_key_created",
+            response_module="disable_access_key",
+            account_id="123456789012",
+            result=dry_run_result("disable_access_key", "user=alice,access_key_id=AKIA123"),
+            logger=MagicMock(),
+        )
+        payload = json.loads(mock_outbox_table.put_item.call_args.kwargs["Item"]["payload"])
+        assert payload["dry_run"] is True
+
     def test_missing_severity_defaults_to_unknown(self, mock_outbox_table):
         responder._notify_remediation_success(
             detection_event={},
@@ -109,6 +139,16 @@ class TestProcessRecordWiresNotification:
         record = make_record({"response_module": "disable_user", "user_name": "bob", "detection_id": "d-1"})
         responder._process_record(record, "req-1", "rh-1", MagicMock())
         mock_outbox_table.put_item.assert_called_once()
+
+    def test_dry_run_success_still_triggers_outbox_write(self, mock_dredge, mock_outbox_table):
+        # The whole point: a dry-run "success" still notifies, so the user
+        # sees proof the pipeline works -- it's just labeled as simulated.
+        mock_dredge.aws_ir.response.disable_user.return_value = dry_run_result("disable_user", "user=bob")
+        record = make_record({"response_module": "disable_user", "user_name": "bob", "detection_id": "d-1"})
+        responder._process_record(record, "req-1", "rh-1", MagicMock())
+        mock_outbox_table.put_item.assert_called_once()
+        payload = json.loads(mock_outbox_table.put_item.call_args.kwargs["Item"]["payload"])
+        assert payload["dry_run"] is True
 
     def test_failure_does_not_trigger_outbox_write(self, mock_dredge, mock_outbox_table):
         mock_dredge.aws_ir.response.disable_user.return_value = OperationResult(

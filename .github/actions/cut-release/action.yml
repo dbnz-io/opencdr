@@ -1,0 +1,74 @@
+name: Cut release from CHANGELOG
+description: >
+  Reads CHANGELOG.md's top version, tags it if untagged, generates an SBOM,
+  and creates a GitHub Release. Idempotent -- a no-op if that version is
+  already tagged. Shared by ci.yml's automatic post-deploy release job and
+  release.yml's on-demand workflow_dispatch, so the tag/SBOM/release logic
+  exists in exactly one place.
+
+inputs:
+  dry-run:
+    description: "Print what would happen without tagging, pushing, or creating anything."
+    required: false
+    default: "false"
+  github-token:
+    description: "Token with contents:write, used for gh release create / dependency-graph SBOM."
+    required: true
+
+outputs:
+  tag:
+    description: "The tag that was cut (or would be cut, in dry-run), empty if nothing to do."
+    value: ${{ steps.cut.outputs.tag }}
+
+runs:
+  using: composite
+  steps:
+    # Idempotent by design: if the top CHANGELOG.md entry's version
+    # already has a matching tag, this is a no-op -- simpler than
+    # path-filtering the trigger, and correct either way.
+    - name: Cut tag + GitHub Release if CHANGELOG has an untagged version
+      id: cut
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+        DRY_RUN: ${{ inputs.dry-run }}
+      run: |
+        VERSION=$(grep -m1 -oE '^## \[[0-9]+\.[0-9]+\.[0-9]+\]' CHANGELOG.md | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')
+        if [[ -z "$VERSION" ]]; then
+          echo "No version header found at the top of CHANGELOG.md, skipping."
+          exit 0
+        fi
+        TAG="v${VERSION}"
+
+        if git rev-parse "$TAG" >/dev/null 2>&1; then
+          echo "Tag ${TAG} already exists, nothing to do."
+          exit 0
+        fi
+
+        NOTES=$(awk -v ver="$VERSION" '
+          $0 ~ "^## \\[" ver "\\]" { found=1; next }
+          found && /^## \[/ { exit }
+          found { print }
+        ' CHANGELOG.md)
+
+        if [[ "$DRY_RUN" == "true" ]]; then
+          echo "::notice::DRY RUN -- would tag ${TAG} and create a GitHub Release with these notes:"
+          echo "$NOTES"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+
+        git config user.name "github-actions[bot]"
+        git config user.email "github-actions[bot]@users.noreply.github.com"
+        git tag -a "$TAG" -m "Release ${TAG}"
+        git push origin "$TAG"
+
+        # Generated here, not in a standalone job on every push -- a
+        # rolling, 90-day artifact isn't tied to anything a consumer
+        # would actually reference. This one is: it reflects exactly
+        # the dependency state of the commit just tagged, and lives
+        # permanently as a release asset.
+        gh api "/repos/${{ github.repository }}/dependency-graph/sbom" > "sbom-${TAG}.json"
+
+        gh release create "$TAG" "sbom-${TAG}.json" --title "$TAG" --notes "$NOTES"
+        echo "tag=${TAG}" >> "$GITHUB_OUTPUT"

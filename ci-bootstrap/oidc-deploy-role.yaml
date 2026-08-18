@@ -195,7 +195,8 @@ Resources:
               # GetItem/Scan) added for Phase 5's CI steps that write/read
               # table data directly rather than through the app's own
               # Lambda roles: load_rules.sh seeds the detection-rules-table
-              # after every deploy, and post-deploy-check queries the
+              # after every deploy, and the post-deploy-cloudtrail-check/
+              # post-deploy-guardduty-check jobs each query the
               # signals-table's gsi_signal_event_id GSI.
               - Sid: DynamoDb
                 Effect: Allow
@@ -311,6 +312,13 @@ Resources:
                   - "arn:aws:apigateway:*::/usageplans*"
 
               # CloudWatch Logs (one log group per Lambda) + Alarms.
+              # FilterLogEvents/GetLogEvents added for the post-deploy
+              # check's archival-pipeline step (ci.yml) -- it greps
+              # archiver's recent logs for the canary detection_id in
+              # ARCHIVE_BATCH_COMPLETE's archived_ids field, a fast,
+              # deterministic proxy for "did this record actually reach
+              # archival" that doesn't require waiting on Firehose's own
+              # buffering delay before data lands in S3.
               - Sid: LogsAndAlarms
                 Effect: Allow
                 Action:
@@ -319,6 +327,8 @@ Resources:
                   - logs:DescribeLogGroups
                   - logs:PutRetentionPolicy
                   - logs:TagLogGroup
+                  - logs:FilterLogEvents
+                  - logs:GetLogEvents
                   - cloudwatch:PutMetricAlarm
                   - cloudwatch:DeleteAlarms
                   - cloudwatch:DescribeAlarms
@@ -326,17 +336,26 @@ Resources:
                   - !Sub "arn:aws:logs:*:${AWS::AccountId}:log-group:/aws/lambda/${ServiceName}-*"
                   - !Sub "arn:aws:cloudwatch:*:${AWS::AccountId}:alarm:${ServiceName}-*"
 
-              # SSM -- storing the deployed API Gateway key's real value as
-              # a SecureString after `serverless deploy`, so it never has
-              # to be pulled into a local file by hand (that's exactly how
-              # a real key ended up committed to this repo once already).
-              - Sid: SsmApiKeyStorage
+              # SSM -- storing the deployed API's connection details after
+              # `serverless deploy`, so neither ever has to be pulled into a
+              # local file or Postman by hand. api-key as a SecureString
+              # (that's exactly how a real key ended up committed to this
+              # repo once already); api-url as a plain String since the
+              # endpoint itself isn't sensitive -- knowing it alone grants
+              # nothing without the key. Two explicit resource entries,
+              # not a wildcard suffix, matching this file's existing
+              # least-privilege discipline elsewhere (see e.g.
+              # S3BucketAndObjectContainment's real ARN patterns instead
+              # of a bare Resource: "*").
+              - Sid: SsmApiConfigStorage
                 Effect: Allow
                 Action:
                   - ssm:PutParameter
                   - ssm:GetParameter
                 Resource:
                   - !Sub "arn:aws:ssm:*:${AWS::AccountId}:parameter/${ServiceName}-*/api-key"
+                  - !Sub "arn:aws:ssm:*:${AWS::AccountId}:parameter/${ServiceName}-*/api-key-mcp"
+                  - !Sub "arn:aws:ssm:*:${AWS::AccountId}:parameter/${ServiceName}-*/api-url"
 
               # KMS -- Phase 2's settings-secrets SSM indirection needs
               # deploy-time grants to exist, not just runtime ones (SSM
@@ -352,6 +371,64 @@ Resources:
                   - kms:Encrypt
                   - kms:GenerateDataKey
                 Resource: "*"
+
+              # Archive bucket (ArchiveBucket, serverless.yml) -- separate
+              # from DeploymentBucket above, which is scoped only to
+              # Serverless Framework's own artifact-staging bucket, not
+              # application resources. See docs/data-archival.md.
+              - Sid: ArchiveBucket
+                Effect: Allow
+                Action:
+                  - s3:CreateBucket
+                  - s3:DeleteBucket
+                  - s3:PutBucketPolicy
+                  - s3:PutBucketTagging
+                  - s3:PutEncryptionConfiguration
+                  - s3:PutBucketPublicAccessBlock
+                  - s3:GetBucketPolicy
+                  - s3:GetEncryptionConfiguration
+                  - s3:GetBucketPublicAccessBlock
+                Resource:
+                  - !Sub "arn:aws:s3:::${ServiceName}-*-archive-*"
+
+              # Glue Data Catalog -- schema definitions Firehose's
+              # DataFormatConversionConfiguration reads to convert
+              # archived records to Parquet (ArchiveGlueDatabase +
+              # ArchiveSignalsGlueTable/ArchiveAlertsGlueTable/
+              # ArchiveLogsGlueTable, serverless.yml).
+              - Sid: Glue
+                Effect: Allow
+                Action:
+                  - glue:CreateDatabase
+                  - glue:DeleteDatabase
+                  - glue:GetDatabase
+                  - glue:UpdateDatabase
+                  - glue:CreateTable
+                  - glue:DeleteTable
+                  - glue:GetTable
+                  - glue:GetTableVersion
+                  - glue:GetTableVersions
+                  - glue:UpdateTable
+                Resource:
+                  - !Sub "arn:aws:glue:*:${AWS::AccountId}:catalog"
+                  - !Sub "arn:aws:glue:*:${AWS::AccountId}:database/${ServiceName}_*_archive"
+                  - !Sub "arn:aws:glue:*:${AWS::AccountId}:table/${ServiceName}_*_archive/*"
+
+              # Kinesis Data Firehose -- the 3 delivery streams that
+              # convert archived signals/alerts/logs to Parquet and
+              # write them to ArchiveBucket (ArchiveSignalsFirehose/
+              # ArchiveAlertsFirehose/ArchiveLogsFirehose, serverless.yml).
+              - Sid: Firehose
+                Effect: Allow
+                Action:
+                  - firehose:CreateDeliveryStream
+                  - firehose:DeleteDeliveryStream
+                  - firehose:DescribeDeliveryStream
+                  - firehose:UpdateDestination
+                  - firehose:TagDeliveryStream
+                  - firehose:UntagDeliveryStream
+                Resource:
+                  - !Sub "arn:aws:firehose:*:${AWS::AccountId}:deliverystream/${ServiceName}-*"
 
 Outputs:
   RoleArn:

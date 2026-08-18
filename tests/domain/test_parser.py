@@ -422,13 +422,94 @@ class TestGuardDutyParser:
         result = self.parser.parse(GUARDDUTY_FINDING)
         assert result.raw_event == GUARDDUTY_FINDING
 
+    def test_gd_resource_type_extracted_from_finding_type(self):
+        # "Recon:IAMUser/MaliciousIPCaller" -> "IAMUser"
+        result = self.parser.parse(GUARDDUTY_FINDING)
+        assert result.gd_resource_type == "IAMUser"
+
+    def test_gd_resource_type_extracted_for_ec2_finding(self):
+        # "UnauthorizedAccess:EC2/SSHBruteForce" -> "EC2"
+        result = self.parser.parse(GUARDDUTY_EC2_FINDING)
+        assert result.gd_resource_type == "EC2"
+
+    def test_gd_resource_type_none_for_malformed_type(self):
+        event = {
+            **GUARDDUTY_FINDING,
+            "detail": {**GUARDDUTY_FINDING["detail"], "type": "NoColonHere"},
+        }
+        result = self.parser.parse(event)
+        assert result.gd_resource_type is None
+
+    def test_gd_resource_type_none_for_missing_type(self):
+        event = {
+            **GUARDDUTY_FINDING,
+            "detail": {k: v for k, v in GUARDDUTY_FINDING["detail"].items() if k != "type"},
+        }
+        result = self.parser.parse(event)
+        assert result.gd_resource_type is None
+
+    def test_gd_resource_type_none_for_cloudtrail_event(self):
+        result = CloudTrailEventBridgeParser().parse(CLOUDTRAIL_CREATE_USER)
+        assert result.gd_resource_type is None
+
+    def test_s3_bucket_resource_extracted(self):
+        event = {
+            **GUARDDUTY_FINDING,
+            "detail": {
+                **GUARDDUTY_FINDING["detail"],
+                "type": "Policy:S3/BucketPublicAccessGranted",
+                "resource": {
+                    "s3BucketDetails": [
+                        {
+                            "arn": "arn:aws:s3:::example-exposed-bucket",
+                            "name": "example-exposed-bucket",
+                            "type": "Destination",
+                            "owner": {"id": "123456789012"},
+                        }
+                    ]
+                },
+            },
+        }
+        result = self.parser.parse(event)
+        s3_refs = [r for r in result.resources if r.type == "AWS::S3::Bucket"]
+        assert len(s3_refs) == 1
+        assert s3_refs[0].id == "example-exposed-bucket"
+        assert s3_refs[0].name == "example-exposed-bucket"
+
+    def test_s3_bucket_resource_multiple_buckets(self):
+        event = {
+            **GUARDDUTY_FINDING,
+            "detail": {
+                **GUARDDUTY_FINDING["detail"],
+                "resource": {
+                    "s3BucketDetails": [
+                        {"name": "bucket-one"},
+                        {"name": "bucket-two"},
+                    ]
+                },
+            },
+        }
+        result = self.parser.parse(event)
+        ids = [r.id for r in result.resources if r.type == "AWS::S3::Bucket"]
+        assert ids == ["bucket-one", "bucket-two"]
+
+    def test_s3_bucket_resource_absent_does_not_crash(self):
+        result = self.parser.parse(GUARDDUTY_FINDING)  # no s3BucketDetails at all
+        assert not [r for r in result.resources if r.type == "AWS::S3::Bucket"]
+
 
 # ----------------------------
 # Severity normalization
 # ----------------------------
 
 
-class TestGuardDutyParser:
+class TestGuardDutyParserAdditional:
+    # Was a second `class TestGuardDutyParser:` -- Python's module
+    # namespace means the second definition of a class silently replaces
+    # the first for pytest's collection, so all 14 tests in the class
+    # above this one had never actually been running. Renamed here so
+    # both sets are collected; found and fixed as a drive-by while
+    # adding GuardDuty Detection Parity tests to this same file.
     def test_parses_finding_id_as_event_id(self):
         result = GuardDutyEventBridgeParser().parse(GUARDDUTY_FINDING)
         assert result.event_id == GUARDDUTY_FINDING["detail"]["id"]
@@ -541,12 +622,26 @@ class TestNormalizeSeverity:
     @pytest.mark.parametrize(
         "severity_value,expected",
         [
+            # AWS's real scale (docs.aws.amazon.com/guardduty/latest/ug/
+            # guardduty_findings-severity.html): Critical 9.0-10.0,
+            # High 7.0-8.9, Medium 4.0-6.9, Low 1.0-3.9. Previously
+            # bucketed >=8/>=5/>0 as HIGH/MEDIUM/LOW -- 7.9 (real AWS
+            # "High") was wrongly bucketed MEDIUM, 4.9 (real AWS
+            # "Medium") was wrongly bucketed LOW, and there was no
+            # CRITICAL bucket at all (Attack Sequence findings are 9.0).
+            (10.0, "CRITICAL"),
+            (9.5, "CRITICAL"),
+            (9.0, "CRITICAL"),  # lower boundary, inclusive
+            (8.9, "HIGH"),  # just under the CRITICAL boundary
             (8.0, "HIGH"),
-            (9.5, "HIGH"),
+            (7.9, "HIGH"),  # the actual pre-fix bug case
+            (7.0, "HIGH"),  # lower boundary, inclusive
+            (6.9, "MEDIUM"),  # just under the HIGH boundary
             (5.0, "MEDIUM"),
-            (7.9, "MEDIUM"),
+            (4.9, "MEDIUM"),  # the actual pre-fix bug case
+            (4.0, "MEDIUM"),  # lower boundary, inclusive
+            (3.9, "LOW"),  # just under the MEDIUM boundary
             (1.0, "LOW"),
-            (4.9, "LOW"),
             (0.0, "INFO"),
             ("HIGH", "HIGH"),
             ("MEDIUM", "MEDIUM"),

@@ -15,6 +15,8 @@ sys.path.insert(0, os.path.dirname(__file__))
 # (tests/handlers/test_responder_init.py) override it explicitly.
 os.environ.setdefault("OPENCDR_IR_ROLE_ARN", "arn:aws:iam::123456789012:role/test-ir-role")
 os.environ.setdefault("LOGS_TABLE_NAME", "test-logs-table")
+os.environ.setdefault("SIGNALS_TABLE_NAME", "test-signals-table-v2")
+os.environ.setdefault("SIGNALS_WRITE_QUEUE_URL", "https://sqs.us-east-1.amazonaws.com/123456789012/test-signals-write-queue")
 os.environ.setdefault("IR_ACCOUNT_ROLES_TABLE_NAME", "test-ir-account-roles-table")
 os.environ.setdefault("AWS_DEFAULT_REGION", "us-east-1")
 

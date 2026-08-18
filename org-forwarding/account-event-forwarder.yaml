@@ -1,0 +1,116 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  Standalone template forwarding one AWS Organizations member account's
+  CloudTrail/GuardDuty EventBridge events to a central security account
+  running OpenCDR.
+
+  Why this exists, and why it's not just an `aws events put-permission`
+  one-liner on the central bus: the central account's OrgForwarderBusPolicy
+  (serverless.yml, only created when `orgId` is set at deploy time) trusts
+  events:PutEvents *only* from a principal whose ARN matches
+  arn:aws:iam::*:role/${ServiceName}-${Stage}-account-forwarder-role --
+  not "any principal in the org" the way a bare aws:PrincipalOrgID
+  condition alone would. That's a real difference, not pedantry: a naive
+  org-wide grant lets any compromised or over-permissioned credential
+  anywhere in the org call PutEvents directly with a hand-crafted,
+  CloudTrail-shaped event and have OpenCDR's processor treat it as real.
+
+  This template is the other half: it creates that exact role, in this
+  member account, trusted only by events.amazonaws.com -- no human or
+  application credential can assume it directly -- and a local
+  EventBridge rule that uses it to forward this account's own real
+  CloudTrail/GuardDuty events (matched by EventBridge locally first, not
+  forwarded blind) to the central bus.
+
+  Deliberately kept separate from opencdr-internal's own serverless.yml,
+  same reasoning as ci-bootstrap/ and region-forwarding/ -- this is
+  account-bootstrap infrastructure for an *account OpenCDR isn't even
+  deployed in*, applied independently once per member account you want
+  covered (via scripts/setup_org_forwarding.sh, not manually account by
+  account). Unlike region-forwarding's RegionForwarderRole (one role,
+  reused across all regions in the same account -- IAM roles aren't
+  region-scoped), this role can't be created once and reused: IAM roles
+  ARE account-scoped, so every member account needs its own.
+
+  The event pattern below must be kept in sync with processor's own
+  EventBridge rule in serverless.yml (and with
+  region-forwarding/cross-region-forwarder.yaml's copy of the same
+  pattern) -- if you add a new event source there, add it here too, or
+  that source goes blind for every member account.
+
+Parameters:
+  ServiceName:
+    Type: String
+    Default: opencdr
+  Stage:
+    Type: String
+    Default: dev
+  CentralEventBusArn:
+    Type: String
+    Description: >
+      The central security account's default event bus ARN -- the
+      `DefaultEventBusArn` output from that account's serverless.yml
+      stack (deployed there with a non-empty `orgId` param).
+
+Resources:
+  AccountForwarderRole:
+    Type: AWS::IAM::Role
+    Properties:
+      # Must match exactly what the central account's OrgForwarderBusPolicy
+      # trusts (arn:aws:iam::*:role/${ServiceName}-${Stage}-account-forwarder-role)
+      # -- this is the whole mechanism, not just a naming convention.
+      RoleName: !Sub "${ServiceName}-${Stage}-account-forwarder-role"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: events.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: put-events-to-central-bus
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - events:PutEvents
+                Resource:
+                  - !Ref CentralEventBusArn
+
+  ForwardingRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub "${ServiceName}-${Stage}-account-forwarder"
+      Description: !Sub "Forwards this account's CloudTrail/GuardDuty events to ${CentralEventBusArn}"
+      EventBusName: default
+      State: ENABLED
+      EventPattern:
+        source:
+          - "aws.guardduty"
+          - "aws.signin"
+          - "aws.iam"
+          - "aws.sts"
+          - "aws.lambda"
+          - "aws.ec2"
+          - "aws.cloudtrail"
+          - "aws.config"
+          - "aws.securityhub"
+          - "aws.secretsmanager"
+          - "aws.ssm"
+          - "aws.s3"
+          - "aws.rds"
+        detail-type:
+          - "GuardDuty Finding"
+          - "AWS API Call via CloudTrail"
+          - "AWS Console Sign In via CloudTrail"
+      Targets:
+        - Id: CentralSecurityAccountBus
+          Arn: !Ref CentralEventBusArn
+          RoleArn: !GetAtt AccountForwarderRole.Arn
+
+Outputs:
+  AccountForwarderRoleArn:
+    Value: !GetAtt AccountForwarderRole.Arn
+  ForwardingRuleArn:
+    Value: !GetAtt ForwardingRule.Arn

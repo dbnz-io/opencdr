@@ -14,21 +14,32 @@ from .logger import Logger
 _deser = TypeDeserializer()
 
 
-def _unmarshal_item(item: dict[str, Any]) -> dict[str, Any]:
-    # DynamoDB AttributeValue map -> plain python dict
-    raw = {k: _deser.deserialize(v) for k, v in (item or {}).items()}
+def unpack_rule_body(raw: dict[str, Any]) -> dict[str, Any]:
+    """
+    Expand a stored rule item that carries its real content as a JSON
+    string under rule_body rather than as top-level attributes.
 
-    # Current schema (scripts/load_rules.sh, PK=rule_kind/SK=rule_id) stores
-    # the actual rule content as a JSON string under rule_body -- everything
-    # a caller needs (conditions, enabled, severity, ...) lives in there, not
-    # at this top level. Parse it back out rather than returning the raw
-    # item wrapper: previously nothing did, so every rule's conditions
-    # silently evaluated as [] and no rule could ever match (found via the
-    # post-deploy integrity check, Phase 5 -- no existing unit test caught
-    # this because none of them mock a rule_body field at all, they predate
-    # this schema). rule_kind/rule_id from the actual table keys win over
-    # any copy embedded in rule_body, since those are structurally
-    # guaranteed correct.
+    scripts/load_rules.sh (PK=rule_kind/SK=rule_id) writes rules this way --
+    everything a caller needs (conditions, enabled, severity, ...) lives
+    inside rule_body, not at this top level. Parse it back out rather than
+    returning the item as-is: this is the exact class of bug already found
+    once for the detection engine's own read path (every rule's conditions
+    silently evaluated as [] and no rule could ever match, found via the
+    post-deploy integrity check, Phase 5) -- src/handlers/api.py's /rules
+    endpoints read the same table directly via a boto3 resource Table
+    (already-plain dicts, not DynamoDB's low-level AttributeValue map, so
+    this takes a plain dict rather than doing TypeDeserializer's job) and
+    had the identical gap: nothing unpacked rule_body there either, so
+    GET /rules on a load_rules.sh-loaded rule returned just
+    {rule_kind, rule_id, rule_body: "<json>"} -- blank description/severity/
+    conditions/enabled to every caller (CLI, MCP, any UI), even though the
+    engine itself matched the rule correctly the whole time.
+
+    rule_kind/rule_id from the actual table keys win over any copy embedded
+    in rule_body, since those are structurally guaranteed correct. A rule
+    with no rule_body (created/edited through this API's own POST/PUT,
+    which write flat) passes through unchanged.
+    """
     rule_body = raw.get("rule_body")
     if isinstance(rule_body, str):
         try:
@@ -39,6 +50,12 @@ def _unmarshal_item(item: dict[str, Any]) -> dict[str, Any]:
             return {**parsed, "rule_kind": raw.get("rule_kind"), "rule_id": raw.get("rule_id")}
 
     return raw
+
+
+def _unmarshal_item(item: dict[str, Any]) -> dict[str, Any]:
+    # DynamoDB AttributeValue map -> plain python dict
+    raw = {k: _deser.deserialize(v) for k, v in (item or {}).items()}
+    return unpack_rule_body(raw)
 
 
 def load_detection_rules(

@@ -90,6 +90,16 @@ A distinct notification type from everything above: when [an automated response 
 
 Routing still applies (the item carries the triggering detection's severity, defaulting to `UNKNOWN` if none), but there's no separate settings toggle for this notification type today — if a channel is enabled and selected by routing, it receives both alerts and remediation-success notifications.
 
+**Dry-run runs (`DREDGE_DRY_RUN=true` — opt-in via CI's "Dry run" checkbox; [live is CI's default](incident-response.md#how-the-responder-authorizes-itself)) notify too, styled distinctly.** Dredge returns `success=True` in dry-run mode without making the real AWS call, so `responder` forwards `dry_run: true` on the outbox payload and `notifier` renders it in **blue-grey** ("DRY RUN — SIMULATED") instead of green, with a note that no AWS API call was made. This exists so a dry-run test still confirms the pipeline works end-to-end without ever being mistaken for a real fix — see [Remediation notifications](incident-response.md#remediation-notifications) for the (still-written, still-rollback-eligible-where-applicable) IR Action record dry-run successes also produce.
+
+## Rollback success notifications
+
+A rolled-back action gets the same treatment, in a deliberately different color: when [a rollback succeeds](incident-response.md#remediation-notifications), `rollbackHandler` queues its own notifications-only item (`type: rollback_success`), separate from both the original alert and the remediation-success notification the original action itself triggered.
+
+`notifier` routes it to **purple**-styled Slack/Discord/email builders — not remediation-success's green (a rollback is the opposite state; green would misleadingly read as "still contained"), and not any of the CRITICAL/HIGH/MEDIUM/LOW alert colors either (a rollback isn't a new detection at some severity). Same channel scope as remediation-success: Slack, Discord, and email only — Security Hub, Jira, and the custom webhook channel are skipped for the same reason (those builders expect the full alert shape this item doesn't have).
+
+Rollback-success items don't carry the original detection's severity (`rollbackHandler` only has what's stored in `irActionsTable`, which doesn't include it) — routing falls back to `UNKNOWN` for these, same auto-fan-out behavior as any other unrouted severity.
+
 ## Per-severity routing
 
 ```json
@@ -102,6 +112,38 @@ Routing still applies (the item carries the triggering detection's severity, def
 ```
 
 If no routing entry matches a given severity, every enabled channel with sufficient configuration receives the alert. A full example settings document is in `support_files/settings/settings.json`.
+
+`routing` is not validated server-side — unknown severities or channel names pass straight through to `notifier`, which falls back to auto-fan-out for anything it doesn't recognize rather than rejecting the write. A malformed `PUT /settings` isn't an error, just silently ignored at read time.
+
+## GuardDuty notifications
+
+GuardDuty findings are matched and written to the alerts table like any other detection (see [GuardDuty rules](https://github.com/dbnz-io/opencdr-detection-rules#guardduty-rules)), but **default to sending no notification at all**, independent of `routing` — `routing` only picks *which channel* an already-eligible item goes to; `guardduty_notify` decides whether a GuardDuty item is eligible to send in the first place. This is deliberate: GuardDuty's own finding volume (especially at Low/Medium severity) would otherwise flood every configured channel with findings nobody curated.
+
+```json
+"guardduty_notify": {
+  "default": false,
+  "by_severity": { "CRITICAL": true },
+  "by_service": { "IAMUser": true },
+  "by_severity_and_service": { "HIGH:EC2": true }
+}
+```
+
+Lookup precedence, most specific wins: `by_severity_and_service["{SEVERITY}:{gd_resource_type}"]` → `by_service[gd_resource_type]` → `by_severity[severity]` → `default`. `gd_resource_type` is the value normalized by the parser (e.g. `IAMUser`, `EC2`, `S3`) — see the [normalized fields table](https://github.com/dbnz-io/opencdr-detection-rules#signal-rules).
+
+Set it via the CLI rather than hand-editing JSON — each flag merges key-by-key into whatever `guardduty_notify` already has (setting one severity doesn't clobber others configured earlier):
+
+```bash
+python3 scripts/opencdr.py settings set --guardduty-notify-default false
+python3 scripts/opencdr.py settings set --guardduty-notify-severity CRITICAL=true --guardduty-notify-severity HIGH=true
+python3 scripts/opencdr.py settings set --guardduty-notify-service IAMUser=true
+python3 scripts/opencdr.py settings set --guardduty-notify-severity-service HIGH:EC2=true
+```
+
+All four flags are repeatable and combine freely with the existing channel flags (`--slack-webhook`, etc.) in a single call.
+
+**If `guardduty_notify` is absent from settings entirely, every GuardDuty item is skipped — including CRITICAL/Attack Sequence findings.** No settings write is required for this off-by-default behavior; it falls out of empty-dict lookups resolving to `default: false`. Like `routing`, this key is not validated server-side.
+
+This only gates the *notification*. The underlying signal is still written to the alerts table and visible via the API/UI regardless of `guardduty_notify` — all 5 GuardDuty rules set `notify: true` for exactly this reason (see [rule_matches / notify semantics](https://github.com/dbnz-io/opencdr-detection-rules#guardduty-rules)).
 
 ## Channel isolation
 
