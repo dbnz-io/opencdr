@@ -21,11 +21,15 @@ Usage:
   opencdr.py lists delete <list_id>
 
   opencdr.py settings get    [<setting_id>]
-  opencdr.py settings set    [<setting_id>] (--file <json> | --slack-webhook <url> | --discord-webhook <url> | --email-topic-arn <arn> | --enable-securityhub | --jira-url <url> --jira-project <key> --jira-email <email> --jira-token <token> | --webhook-url <url> [--webhook-name <name>] [--webhook-header key=value]...)
+  opencdr.py settings set    [<setting_id>] (--file <json> | --slack-webhook <url> | --discord-webhook <url> | --email-topic-arn <arn> | --enable-securityhub | --jira-url <url> --jira-project <key> --jira-email <email> --jira-token <token> | --webhook-url <url> [--webhook-name <name>] [--webhook-header key=value]... | --guardduty-notify-default <true|false> | --guardduty-notify-severity <SEVERITY=true|false>... | --guardduty-notify-service <SERVICE=true|false>... | --guardduty-notify-severity-service <SEVERITY:SERVICE=true|false>...)
   opencdr.py settings delete [<setting_id>]
 
   opencdr.py signals list  --severity <sev> | --event-id <id> | --category <cat>
   opencdr.py logs    list  --service  <svc> | --event-id <id> | --event-name  <name>
+
+  opencdr.py ir-actions list     [--page-size N]
+  opencdr.py ir-actions get      <detection_id>
+  opencdr.py ir-actions rollback <detection_id>
 
   opencdr.py test local    [--event <filter>] [--rule <filter>]
   opencdr.py test deployed [--stage <stage>] [--region <region>] [--event <filter>]
@@ -214,7 +218,11 @@ def cmd_rules_load(args: argparse.Namespace) -> None:
     url, key = _require_api(cfg)
     _banner("Load Detection Rules")
 
-    files = sorted(RULES_DIR.glob("*.json"))
+    # Recursive: rule files live in per-source subfolders (cloudtrail/,
+    # guardduty/, and any future source folder added the same way -- see
+    # docs/detection-rules.md#authoring-testing-and-loading) rather than
+    # flat in RULES_DIR itself.
+    files = sorted(RULES_DIR.rglob("*.json"))
     if not files:
         print(warn(f"  No rule files found in {RULES_DIR.relative_to(ROOT)}"))
         return
@@ -222,27 +230,28 @@ def cmd_rules_load(args: argparse.Namespace) -> None:
     loaded = skipped = failed = 0
 
     for path in files:
+        label = path.relative_to(RULES_DIR)
         if path.name in _SKIP_RULE_FILES:
-            print(f"  {warn('[SKIP]')}  {path.name} (test stub)")
+            print(f"  {warn('[SKIP]')}  {label} (test stub)")
             skipped += 1
             continue
 
         try:
             rule = json.loads(path.read_text())
         except json.JSONDecodeError as e:
-            print(f"  {err('[ERROR]')} {path.name} — invalid JSON: {e}")
+            print(f"  {err('[ERROR]')} {label} — invalid JSON: {e}")
             failed += 1
             continue
 
         rule_id = rule.get("rule_id") or ""
         rule_kind = rule.get("rule_kind") or ""
         if not rule_id or not rule_kind:
-            print(f"  {err('[ERROR]')} {path.name} — missing rule_id or rule_kind")
+            print(f"  {err('[ERROR]')} {label} — missing rule_id or rule_kind")
             failed += 1
             continue
 
         if args.dry_run:
-            print(f"  {info('[DRY]')}   {path.name}  ({rule_kind} / {rule_id})")
+            print(f"  {info('[DRY]')}   {label}  ({rule_kind} / {rule_id})")
             loaded += 1
             continue
 
@@ -251,11 +260,11 @@ def cmd_rules_load(args: argparse.Namespace) -> None:
             "PUT", f"/rules/{rule_id}?rule_kind={rule_kind}", url, key, json=rule
         )
         if status in (200, 201):
-            print(f"  {ok('[OK]')}    {path.name}  ({rule_kind} / {rule_id})")
+            print(f"  {ok('[OK]')}    {label}  ({rule_kind} / {rule_id})")
             loaded += 1
         else:
             msg = body.get("message", body) if isinstance(body, dict) else body
-            print(f"  {err('[ERROR]')} {path.name} — HTTP {status}: {msg}")
+            print(f"  {err('[ERROR]')} {label} — HTTP {status}: {msg}")
             failed += 1
 
     print()
@@ -416,6 +425,71 @@ def _build_channels_from_args(args: argparse.Namespace) -> dict:
     return channels
 
 
+def _parse_bool_flag(value: str, flag_name: str) -> bool:
+    v = value.strip().lower()
+    if v in ("true", "1", "yes"):
+        return True
+    if v in ("false", "0", "no"):
+        return False
+    print(err(f"  Invalid value for {flag_name}: '{value}' — expected true or false"))
+    sys.exit(1)
+
+
+def _parse_key_bool_pairs(pairs: list[str] | None, flag_name: str) -> dict:
+    """Parse repeated `<key>=<true|false>` flags (e.g. --guardduty-notify-severity CRITICAL=true)."""
+    out: dict = {}
+    for pair in pairs or []:
+        if "=" not in pair:
+            print(err(f"  Invalid format '{pair}' for {flag_name} — expected key=true|false"))
+            sys.exit(1)
+        k, _, v = pair.partition("=")
+        out[k.strip()] = _parse_bool_flag(v, flag_name)
+    return out
+
+
+def _build_guardduty_notify_from_args(args: argparse.Namespace) -> dict:
+    """
+    Turn --guardduty-notify-* flags into a partial guardduty_notify dict
+    (only the fields explicitly provided). See docs/notifications.md#guardduty-notifications
+    for the schema and lookup precedence (by_severity_and_service > by_service >
+    by_severity > default).
+    """
+    gd: dict = {}
+    if args.guardduty_notify_default is not None:
+        gd["default"] = _parse_bool_flag(args.guardduty_notify_default, "--guardduty-notify-default")
+    by_severity = _parse_key_bool_pairs(args.guardduty_notify_severity, "--guardduty-notify-severity")
+    if by_severity:
+        gd["by_severity"] = by_severity
+    by_service = _parse_key_bool_pairs(args.guardduty_notify_service, "--guardduty-notify-service")
+    if by_service:
+        gd["by_service"] = by_service
+    by_severity_and_service = _parse_key_bool_pairs(
+        args.guardduty_notify_severity_service, "--guardduty-notify-severity-service"
+    )
+    if by_severity_and_service:
+        gd["by_severity_and_service"] = by_severity_and_service
+    return gd
+
+
+def _merge_guardduty_notify(existing: dict, new: dict) -> dict:
+    """
+    Merge new guardduty_notify fields into the existing config.
+
+    Rules:
+    - default: new value replaces if provided.
+    - by_severity / by_service / by_severity_and_service: merged key-by-key
+      (same philosophy as _merge_channels's webhook.targets) so setting one
+      severity/service doesn't wipe out others configured earlier.
+    """
+    merged = dict(existing)
+    if "default" in new:
+        merged["default"] = new["default"]
+    for sub_key in ("by_severity", "by_service", "by_severity_and_service"):
+        if sub_key in new:
+            merged[sub_key] = {**(existing.get(sub_key) or {}), **new[sub_key]}
+    return merged
+
+
 def _fetch_existing_settings(url: str, key: str, setting_id: str) -> tuple[dict, dict]:
     """
     GET current settings and return (base_payload, existing_channels).
@@ -445,13 +519,23 @@ def cmd_settings_set(args: argparse.Namespace) -> None:
         return
 
     new_channels = _build_channels_from_args(args)
-    if not new_channels:
-        print(err("  Provide --file, --slack-webhook, --discord-webhook, --email-topic-arn, --enable-securityhub, --jira-url/--jira-project/--jira-email/--jira-token, or --webhook-url"))
+    new_guardduty_notify = _build_guardduty_notify_from_args(args)
+    if not new_channels and not new_guardduty_notify:
+        print(err(
+            "  Provide --file, --slack-webhook, --discord-webhook, --email-topic-arn, --enable-securityhub, "
+            "--jira-url/--jira-project/--jira-email/--jira-token, --webhook-url, or one of "
+            "--guardduty-notify-default/--guardduty-notify-severity/--guardduty-notify-service/"
+            "--guardduty-notify-severity-service"
+        ))
         sys.exit(1)
 
     base_payload, existing_channels = _fetch_existing_settings(url, key, args.setting_id)
     merged_channels = _merge_channels(existing_channels, new_channels)
     payload = {**base_payload, "channels": merged_channels}
+    if new_guardduty_notify:
+        payload["guardduty_notify"] = _merge_guardduty_notify(
+            base_payload.get("guardduty_notify") or {}, new_guardduty_notify
+        )
 
     status, body = _request("PUT", f"/settings/{args.setting_id}", url, key, json=payload)
     _die_on_error(status, body)
@@ -680,6 +764,84 @@ def cmd_lists_delete(args: argparse.Namespace) -> None:
 
 
 # ---------------------------------------------------------------------------
+# ir-actions list / get / rollback
+# ---------------------------------------------------------------------------
+
+def cmd_ir_actions_list(args: argparse.Namespace) -> None:
+    cfg = _load_config()
+    url, key = _require_api(cfg)
+
+    qs: dict[str, Any] = {"page_size": args.page_size}
+    if args.next_token:
+        qs["next_token"] = args.next_token
+    query = "&".join(f"{k}={v}" for k, v in qs.items())
+
+    status, body = _request("GET", f"/ir-actions?{query}", url, key)
+    _die_on_error(status, body, "ir-actions list")
+
+    items = body.get("items", [])
+    if not items:
+        print(warn("  No IR actions recorded."))
+        return
+
+    print(f"\n  {'DETECTION_ID':<38} {'RESPONSE_MODULE':<32} {'ROLLBACK':<10} STATUS")
+    print("  " + "─" * 96)
+    for a in items:
+        rollback_label = ok("yes") if a.get("rollback_supported") else dim("no")
+        # rollback_status is absent until a rollback is first attempted --
+        # "succeeded" mirrors rolled_back=true (both set together);
+        # "pending"/"failed" have no rolled_back equivalent and previously
+        # both collapsed into this same "active" label.
+        rb_status = a.get("rollback_status")
+        if rb_status == "pending":
+            status_label = warn("pending")
+        elif rb_status == "failed":
+            status_label = err("failed")
+        elif rb_status == "succeeded" or a.get("rolled_back"):
+            status_label = ok("rolled back")
+        else:
+            status_label = dim("active")
+        print(
+            f"  {a.get('detection_id', ''):<38} "
+            f"{a.get('response_module', ''):<32} "
+            f"{rollback_label:<10} "
+            f"{status_label}"
+        )
+
+    if body.get("has_next"):
+        print(f"\n  {dim('More pages — use --next-token ' + str(body.get('next_token')))}")
+    print()
+
+
+def cmd_ir_actions_get(args: argparse.Namespace) -> None:
+    cfg = _load_config()
+    url, key = _require_api(cfg)
+    status, body = _request("GET", f"/ir-actions/{args.detection_id}", url, key)
+    if status == 404:
+        print(warn(f"  No IR action recorded for detection: {args.detection_id}"))
+        sys.exit(1)
+    _die_on_error(status, body)
+    print(json.dumps(body, indent=2, default=str))
+
+
+def cmd_ir_actions_rollback(args: argparse.Namespace) -> None:
+    cfg = _load_config()
+    url, key = _require_api(cfg)
+    status, body = _request("POST", f"/ir-actions/{args.detection_id}/rollback", url, key)
+    if status == 404:
+        print(warn(f"  No IR action recorded for detection: {args.detection_id}"))
+        sys.exit(1)
+    if status == 400:
+        print(err(f"  {body.get('message', body) if isinstance(body, dict) else body}"))
+        sys.exit(1)
+    if status == 409:
+        print(warn(f"  {body.get('message', body) if isinstance(body, dict) else body}"))
+        sys.exit(1)
+    _die_on_error(status, body, "ir-actions rollback")
+    print(ok(f"  Rollback enqueued for detection: {args.detection_id}"))
+
+
+# ---------------------------------------------------------------------------
 # test local
 # ---------------------------------------------------------------------------
 
@@ -697,7 +859,7 @@ def cmd_test_local(args: argparse.Namespace) -> None:
 
     all_rules = []
     all_lists: dict[str, list] = {}
-    for p in sorted(RULES_DIR.glob("*.json")):
+    for p in sorted(RULES_DIR.rglob("*.json")):
         try:
             r = json.loads(p.read_text())
             if r.get("rule_kind") == "signal":
@@ -786,7 +948,11 @@ def cmd_test_deployed(args: argparse.Namespace) -> None:
     stage = args.stage
     region = args.region
     fn_name = f"opencdr-{stage}-processor"
-    table_name = f"opencdr-{stage}-signals-table"
+    # -v2: signals-table's own low-cardinality `severity` HASH key was
+    # replaced by a day-bucketed severity_bucket key -- see
+    # docs/architecture.md#dynamodb-tables. Nothing writes to the legacy
+    # signals-table anymore.
+    table_name = f"opencdr-{stage}-signals-table-v2"
 
     _banner(f"Integration Test — {stage} / {region}")
     print(f"  Function : {fn_name}")
@@ -816,9 +982,16 @@ def cmd_test_deployed(args: argparse.Namespace) -> None:
             skipped += 1
             continue
 
-        event_id = (event_data.get("detail") or {}).get("eventID")
+        # CloudTrail fixtures carry their id at detail.eventID; GuardDuty
+        # Finding fixtures use detail.id instead (GuardDutyEventBridgeParser's
+        # own convention -- finding_id becomes the normalized event_id, the
+        # same field signals_table is queried by below regardless of
+        # source). Without this fallback every GuardDuty fixture silently
+        # hit this skip branch instead of actually being tested.
+        detail = event_data.get("detail") or {}
+        event_id = detail.get("eventID") or detail.get("id")
         if not event_id:
-            print(f"  {warn('[SKIP]')}  {path.name} — no eventID in detail")
+            print(f"  {warn('[SKIP]')}  {path.name} — no eventID/id in detail")
             skipped += 1
             continue
 
@@ -864,15 +1037,23 @@ def cmd_test_deployed(args: argparse.Namespace) -> None:
             failed += 1
             continue
 
-        time.sleep(0.5)  # allow DynamoDB eventual consistency
-
+        # processor enqueues to signalWriter (SQS) rather than writing
+        # signals-table-v2 directly (see docs/architecture.md#dynamodb-tables)
+        # -- a single short sleep isn't enough headroom for that extra
+        # SQS-trigger + Lambda-invoke hop, especially a cold one. Retry
+        # briefly instead of a single fixed wait.
+        count = 0
         try:
-            result = signals_table.query(
-                IndexName="gsi_signal_event_id",
-                KeyConditionExpression=DDBKey("event_id").eq(event_id),
-                Select="COUNT",
-            )
-            count = result.get("Count", 0)
+            for _ in range(5):
+                time.sleep(1)
+                result = signals_table.query(
+                    IndexName="gsi_signal_event_id",
+                    KeyConditionExpression=DDBKey("event_id").eq(event_id),
+                    Select="COUNT",
+                )
+                count = result.get("Count", 0)
+                if count:
+                    break
         except Exception as e:
             print(f"  {warn('[WARN]')}  {path.name} — could not query signals: {e}")
             skipped += 1
@@ -998,7 +1179,7 @@ def _run_setup_wizard() -> None:  # noqa: C901
     _step(3, "Detection Rules")
 
     rule_files = [
-        p for p in sorted(RULES_DIR.glob("*.json"))
+        p for p in sorted(RULES_DIR.rglob("*.json"))
         if p.name not in _SKIP_RULE_FILES
     ]
     print(f"  Found {len(rule_files)} rule file(s) in {dim(str(RULES_DIR.relative_to(ROOT)))}")
@@ -1008,27 +1189,28 @@ def _run_setup_wizard() -> None:  # noqa: C901
         print()
         loaded = skipped = failed = 0
         for path in rule_files:
+            label = path.relative_to(RULES_DIR)
             try:
                 rule = json.loads(path.read_text())
             except json.JSONDecodeError:
-                print(f"    {err('[ERROR]')} {path.name} — invalid JSON")
+                print(f"    {err('[ERROR]')} {label} — invalid JSON")
                 failed += 1
                 continue
 
             rule_id = rule.get("rule_id") or ""
             rule_kind = rule.get("rule_kind") or ""
             if not rule_id or not rule_kind:
-                print(f"    {err('[ERROR]')} {path.name} — missing rule_id or rule_kind")
+                print(f"    {err('[ERROR]')} {label} — missing rule_id or rule_kind")
                 failed += 1
                 continue
 
             s, b = _request("PUT", f"/rules/{rule_id}?rule_kind={rule_kind}", url, key, json=rule)
             if s in (200, 201):
-                print(f"    {ok('[OK]')}  {path.name}")
+                print(f"    {ok('[OK]')}  {label}")
                 loaded += 1
             else:
                 msg = b.get("message", b) if isinstance(b, dict) else b
-                print(f"    {err('[ERROR]')} {path.name} — {msg}")
+                print(f"    {err('[ERROR]')} {label} — {msg}")
                 failed += 1
 
         print()
@@ -1256,6 +1438,10 @@ def _build_parser() -> argparse.ArgumentParser:
     sgs.add_argument("--webhook-url", dest="webhook_url", metavar="<url>", help="Custom webhook URL (HTTPS)")
     sgs.add_argument("--webhook-name", dest="webhook_name", metavar="<name>", default="", help="Name for the webhook target (default: default)")
     sgs.add_argument("--webhook-header", dest="webhook_headers", metavar="<key=value>", action="append", help="Extra request header (repeatable, e.g. Authorization=Bearer token)")
+    sgs.add_argument("--guardduty-notify-default", dest="guardduty_notify_default", metavar="<true|false>", help="Default GuardDuty notify eligibility when nothing more specific matches (default: false / off)")
+    sgs.add_argument("--guardduty-notify-severity", dest="guardduty_notify_severity", metavar="<SEVERITY=true|false>", action="append", help="Notify eligibility for a GuardDuty severity (repeatable, e.g. CRITICAL=true)")
+    sgs.add_argument("--guardduty-notify-service", dest="guardduty_notify_service", metavar="<SERVICE=true|false>", action="append", help="Notify eligibility for a GuardDuty gd_resource_type (repeatable, e.g. IAMUser=true)")
+    sgs.add_argument("--guardduty-notify-severity-service", dest="guardduty_notify_severity_service", metavar="<SEVERITY:SERVICE=true|false>", action="append", help="Notify eligibility for a specific severity+service combo (repeatable, e.g. HIGH:EC2=true) -- takes precedence over the other --guardduty-notify-* flags")
     sgs.set_defaults(func=cmd_settings_set)
 
     sgd = sg_sub.add_parser("delete", help="Delete settings")
@@ -1321,6 +1507,24 @@ def _build_parser() -> argparse.ArgumentParser:
     lsd = ls_sub.add_parser("delete", help="Delete a list")
     lsd.add_argument("list_id", metavar="<list_id>")
     lsd.set_defaults(func=cmd_lists_delete)
+
+    # ── ir-actions ─────────────────────────────────────────────────────────
+    ira_p = sub.add_parser("ir-actions", help="Executed IR actions + rollback")
+    ira_sub = ira_p.add_subparsers(dest="subcommand", metavar="<subcommand>")
+    ira_sub.required = True
+
+    ical = ira_sub.add_parser("list", help="List executed, rollback-eligible IR actions")
+    ical.add_argument("--page-size", type=int, default=20, dest="page_size", metavar="N")
+    ical.add_argument("--next-token", dest="next_token", metavar="TOKEN")
+    ical.set_defaults(func=cmd_ir_actions_list)
+
+    icag = ira_sub.add_parser("get", help="Get a specific IR action")
+    icag.add_argument("detection_id", metavar="<detection_id>")
+    icag.set_defaults(func=cmd_ir_actions_get)
+
+    icar = ira_sub.add_parser("rollback", help="Enqueue rollback of a specific IR action")
+    icar.add_argument("detection_id", metavar="<detection_id>")
+    icar.set_defaults(func=cmd_ir_actions_rollback)
 
     # ── test ────────────────────────────────────────────────────────────────
     ts_p = sub.add_parser("test", help="Test detection rules")

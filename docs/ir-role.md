@@ -49,12 +49,21 @@ role to assume for that account in the `irAccountRolesTable` DynamoDB table
 provision an IAM role in a *different* AWS account, so additional accounts
 need two manual steps:
 
-**1. Create the role in the target account.** Trust policy — allow the
-responder Lambda's own execution role to assume it (find the exact
-principal ARN with `aws lambda get-function-configuration --function-name
-opencdr-<stage>-responder --query Role` against the OpenCDR account, or use
-the pattern
-`${self:service}-${self:provider.stage}-responder-${self:provider.region}-lambdaRole`):
+**1. Create the role in the target account.** Trust policy — allow **both**
+the responder Lambda's own execution role (the original action) **and**
+the rollbackHandler Lambda's own execution role (the undo — a separate
+Lambda, `src/handlers/ir_rollback.py`, with its own execution role,
+independent of responder's) to assume it. Missing either one doesn't fail
+loudly at deploy time — it fails silently later, the first time someone
+actually clicks "Roll back" (or, for responder's principal, the first time
+a matching detection fires), with a plain `AccessDenied` on
+`sts:AssumeRole` that's easy to mistake for a broken IAM policy on the
+*caller* side instead of a trust-policy gap on this role. Find the exact
+principal ARNs with `aws lambda get-function-configuration --function-name
+opencdr-<stage>-responder --query Role` / `--function-name
+opencdr-<stage>-rollbackHandler --query Role` against the OpenCDR account,
+or use the pattern
+`${self:service}-${self:provider.stage}-<responder|rollbackHandler>-${self:provider.region}-lambdaRole`:
 
 ```json
 {
@@ -63,7 +72,10 @@ the pattern
     {
       "Effect": "Allow",
       "Principal": {
-        "AWS": "arn:aws:iam::<OPENCDR_ACCOUNT_ID>:role/opencdr-<stage>-responder-<region>-lambdaRole"
+        "AWS": [
+          "arn:aws:iam::<OPENCDR_ACCOUNT_ID>:role/opencdr-<stage>-responder-<region>-lambdaRole",
+          "arn:aws:iam::<OPENCDR_ACCOUNT_ID>:role/opencdr-<stage>-rollbackHandler-<region>-lambdaRole"
+        ]
       },
       "Action": "sts:AssumeRole"
     }
@@ -83,9 +95,10 @@ aws iam put-role-policy \
 ```
 
 The role name **must** be `${self:service}-${self:provider.stage}-ir-role`
-(e.g. `opencdr-dev-ir-role`) — that's the naming convention the responder's
-own `sts:AssumeRole` grant is scoped to. A role under any other name will
-never be assumable by responder, regardless of what's in the table below.
+(e.g. `opencdr-dev-ir-role`) — that's the naming convention both
+responder's and rollbackHandler's own `sts:AssumeRole` grants are scoped
+to. A role under any other name will never be assumable by either,
+regardless of what's in the table below.
 
 **2. Add a row to `irAccountRolesTable`**, via the API (`POST /ir-roles`):
 
@@ -135,10 +148,22 @@ secrets.
 ## Keeping the permissions policy in sync
 
 `docs/ir-role-permissions.json` and the `OpencdrIrRole` CFN resource in
-`serverless.yml` (the home-account role) both hardcode the same 6 IAM
+`serverless.yml` (the home-account role) both hardcode the same 7 IAM
 statements — CloudFormation has no clean way to include an external JSON
 policy file, so this is duplicated by necessity. If you change what the 8
 response modules in `dredge.aws_ir.response` can do, update both.
+
+**Deliberately not granted: `iam:UpdateAssumeRolePolicy`.** `dredge`'s
+`disable_role` calls it to clear a role's trust policy as its last step, but
+the permission itself is a full account-wide privilege-escalation primitive
+— on `role/*`, it lets the holder rewrite *any* role's trust policy, not
+just the one being contained, which is a much bigger blast radius than
+"disable a compromised role" needs. `disable_role` already detaches every
+managed policy and deletes every inline policy first (both still granted,
+via `IamRoles` above), which alone leaves the role assumable but harmless —
+a policy-stripped role can't do anything even if reassumed. The trade-off:
+the trust-policy-clear step will fail with `AccessDenied` and get logged as
+a non-fatal error on the `OperationResult`, not silently skipped.
 
 ## Rate limiting
 

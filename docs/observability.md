@@ -10,7 +10,7 @@ Every `serverless deploy` provisions all of the following. There is nothing to t
 
 ### CloudWatch Dashboard
 
-One dashboard per stage, named `opencdr-<stage>-ops`. Fastest way to find it: the stack's `DashboardUrl` CloudFormation output, printed at the end of every deploy (or `aws cloudformation describe-stacks --stack-name opencdr-<stage> --query "Stacks[0].Outputs"`). It has five widgets: Lambda errors across all 7 functions, Lambda p99 duration, Lambda invocations, depth across all three queues (`notifications-dlq`, `responses-dlq`, `stream-failures`), and the five custom metrics below via CloudWatch `SEARCH` expressions (needed because their dimensions — `rule_id`, `destination`, etc. — aren't knowable at template-write time).
+One dashboard per stage, named `opencdr-<stage>-ops`. Fastest way to find it: the stack's `DashboardUrl` CloudFormation output, printed at the end of every deploy (or `aws cloudformation describe-stacks --stack-name opencdr-<stage> --query "Stacks[0].Outputs"`). It has five widgets: Lambda errors across all 9 functions, Lambda p99 duration, Lambda invocations, depth across all four queues (`notifications-dlq`, `responses-dlq`, `stream-failures` — the last one now also catches `archiver`'s own stream-processing failures, see [`data-archival.md`](data-archival.md) — and `signals-write-dlq`), and the five custom metrics below via CloudWatch `SEARCH` expressions (needed because their dimensions — `rule_id`, `destination`, etc. — aren't knowable at template-write time).
 
 ### Custom metrics
 
@@ -28,13 +28,13 @@ This is the layer that answers the question Lambda's own built-in metrics can't:
 
 ### X-Ray tracing
 
-`provider.tracing: {lambda: true, apiGateway: true}` in `serverless.yml` — every invocation across all 7 Lambdas and every API Gateway request is traced, viewable in the X-Ray console for the deployed account.
+`provider.tracing: {lambda: true, apiGateway: true}` in `serverless.yml` — every invocation across all 9 Lambdas and every API Gateway request is traced, viewable in the X-Ray console for the deployed account.
 
 That setting alone only traces the *invocation boundary* — it doesn't instrument what a handler's code does internally, so without more, the service map would show Lambda nodes but never DynamoDB or SQS. Closed with a small amount of application code after all: `src/infra/xray_setup.py` calls `aws_xray_sdk`'s `patch(["boto3"])` (AWS's own SDK, deliberately narrower than `patch_all()` — this codebase doesn't use `requests`/sqlite3/mysql for anything that needs tracing) once per handler at cold start, so every DynamoDB/SQS/SNS call shows up as its own node too. Worth being explicit that this walks back the "zero application code" framing this page used to have — but it's a different risk than the OTel instrumentor bug described below: that library wrapped Lambda invocation and API Gateway event parsing and crashed before the handler ever ran, where this only wraps outgoing `boto3` calls and never touches event handling.
 
 ## Alarms exist automatically — delivery is the one-time step
 
-11 CloudWatch Alarms are created on every deploy: one per-function `AWS/Lambda` Errors alarm for 6 of the 7 functions (`processor`, `alerter`, `publisher`, `notifier`, `responder`, `api` — `alarmNotifier` itself doesn't have one), three SQS DLQ/queue-depth alarms, and two DynamoDB-stream `IteratorAge` alarms (`alerter`, `publisher`). All of them fire into `AlarmsSnsTopic` (`opencdr-<stage>-alarms`) — but a topic with no subscription doesn't notify anyone. Two ways to fix that, both zero application code:
+16 CloudWatch Alarms are created on every deploy: one per-function `AWS/Lambda` Errors alarm for 8 of the 9 functions (`processor`, `signalWriter`, `alerter`, `publisher`, `notifier`, `responder`, `api`, `archiver` — `alarmNotifier` itself doesn't have one), four SQS DLQ/queue-depth alarms (`notifications-dlq`, `responses-dlq`, `stream-failures`, `signals-write-dlq`), three DynamoDB-stream `IteratorAge` alarms (`alerter`, `publisher`, `archiver` — the last one covers all three of `archiver`'s own streams, not individually attributed, since `AWS/Lambda IteratorAge` is dimensioned by function name only), and one DynamoDB `ThrottledRequests` alarm on `logs-table-v2` (the tripwire for whether that table's day-bucketed partition key alone is holding up under load, without the SQS write-buffer `signals-table-v2` has — see [Architecture](architecture.md#dynamodb-tables)). All of them fire into `AlarmsSnsTopic` (`opencdr-<stage>-alarms`) — but a topic with no subscription doesn't notify anyone. Two ways to fix that, both zero application code:
 
 ### Option 1 — email (fastest, no Lambda involved)
 
@@ -65,7 +65,23 @@ Nothing here is client-specific in code — every stage gets its own SSM paramet
 
 ### The monthly cost budget reuses this same path
 
-`CostBudget` (an `AWS::Budgets::Budget`, scoped to this stack's own tagged spend, not the whole account) alerts at 80%/100% actual and 100% forecasted spend into the same `AlarmsSnsTopic` above — so once alarm delivery is set up (email or Slack), cost alerts arrive the same way with no separate configuration. See [Cost tracking](../README.md#cost-tracking) for the two one-time AWS-account steps (enabling Cost Explorer, activating the cost-allocation tags) this needs before it reports real numbers.
+`CostBudget` (an `AWS::Budgets::Budget`, scoped to this stack's own tagged spend, not the whole account) alerts at 80%/100% actual and 100% forecasted spend into the same `AlarmsSnsTopic` above — so once alarm delivery is set up (email or Slack), cost alerts arrive the same way with no separate configuration. Pass `--param="monthlyBudgetUsd=<amount>"` at deploy time to set the threshold (default `50`).
+
+## Cost tracking
+
+Every resource this stack creates is tagged `Project=opencdr` / `Stage=<stage>` — that tagging is what scopes `CostBudget` above to just this stack's spend instead of the whole account.
+
+Two one-time steps in the AWS account are required before any of this reports real numbers — neither is something CloudFormation can do for you:
+
+1. Enable Cost Explorer once (Billing console → Cost Explorer).
+2. Activate the `Project`/`Stage` tags as cost allocation tags (Billing console → Cost allocation tags) — takes up to 24h to start appearing, and only covers spend from activation forward, not retroactively.
+
+Once both are done, get a spend breakdown for a stage with:
+
+```bash
+./scripts/cost_report.sh --stage dev
+./scripts/cost_report.sh --stage prod --granularity MONTHLY --start 2026-07-01 --end 2026-08-01
+```
 
 ## Portability — the honest tradeoff
 
@@ -75,5 +91,4 @@ This entire layer — X-Ray, EMF metrics, CloudWatch Alarms and Dashboard — is
 
 - [Architecture](architecture.md) — the pipeline these metrics/alarms describe
 - [Notifications](notifications.md) — the separate, security-alert delivery pipeline (`AlertsSnsTopic`, not `AlarmsSnsTopic`)
-- [Deployment](deployment.md) — where `alarmEmail` fits into the deploy flow
-- [Cost tracking](../README.md#cost-tracking) — the budget alert that reuses this page's alarm delivery path
+- [Deployment](deployment.md) — where `alarmEmail` and `monthlyBudgetUsd` fit into the deploy flow

@@ -71,6 +71,21 @@ def _coalesce(*vals):
     return None
 
 
+def _gd_resource_type(finding_type: str | None) -> str | None:
+    """
+    The ResourceType segment of a GuardDuty finding's own
+    "Namespace:ResourceType/ThreatPurpose" type string, e.g.
+    "UnauthorizedAccess:IAMUser/TorIPCaller" -> "IAMUser",
+    "Backdoor:EC2/C&CActivity.B" -> "EC2". None on anything malformed
+    rather than raising -- this feeds rule conditions and settings
+    lookups, neither of which should break on an unexpected shape.
+    """
+    if not finding_type or ":" not in finding_type:
+        return None
+    after_colon = finding_type.split(":", 1)[1]
+    return after_colon.split("/", 1)[0] or None
+
+
 def _normalize_severity(sev: Any) -> str:
     """
     Return one of: CRITICAL/HIGH/MEDIUM/LOW/INFO/UNKNOWN.
@@ -90,10 +105,16 @@ def _normalize_severity(sev: Any) -> str:
         except Exception:
             return "UNKNOWN"
     if isinstance(sev, (int, float)):
-        # Simple numeric bucketing (optional; adjust later)
-        if sev >= 8:
+        # GuardDuty's own severity scale (docs.aws.amazon.com/guardduty/latest/ug/guardduty_findings-severity.html):
+        # Critical 9.0-10.0, High 7.0-8.9, Medium 4.0-6.9, Low 1.0-3.9.
+        # Previously bucketed >=8/>=5/>0 as HIGH/MEDIUM/LOW -- misclassified
+        # real AWS "High" findings (7.0-7.9) as MEDIUM, and had no CRITICAL
+        # bucket at all (Attack Sequence findings are fixed at 9.0).
+        if sev >= 9.0:
+            return "CRITICAL"
+        if sev >= 7.0:
             return "HIGH"
-        if sev >= 5:
+        if sev >= 4.0:
             return "MEDIUM"
         if sev > 0:
             return "LOW"
@@ -172,6 +193,13 @@ class NormalizedEvent:
     cloud_provider: str = "aws"
     cloud_account_id: str | None = None
     cloud_region: str | None = None
+
+    # GuardDuty-only: the ResourceType segment of a finding's own
+    # "Namespace:ResourceType/ThreatPurpose" type string (e.g. "IAMUser",
+    # "EC2", "S3") -- populated only by GuardDutyEventBridgeParser, always
+    # None for CloudTrail events. Lets rules/settings match "by service"
+    # without re-parsing activity_name themselves.
+    gd_resource_type: str | None = None
 
     # Raw payload (keep fidelity)
     raw_event: dict[str, Any] = field(default_factory=dict)
@@ -419,6 +447,17 @@ class GuardDutyEventBridgeParser:
             uname = _safe_get(r, "accessKeyDetails", "userName")
             if uname:
                 resources.append(ResourceRef(type="AWS::IAM::User", id=uname, name=uname))
+            # s3BucketDetails is a list (S3 Protection findings can name
+            # more than one bucket); field names per AWS's S3BucketDetail
+            # API reference (arn/name/type/owner/publicAccess/tags/...).
+            s3_buckets = _safe_get(r, "s3BucketDetails", default=[]) or []
+            if isinstance(s3_buckets, list):
+                for b in s3_buckets:
+                    if not isinstance(b, dict):
+                        continue
+                    bname = b.get("name")
+                    if bname:
+                        resources.append(ResourceRef(type="AWS::S3::Bucket", id=bname, name=bname))
 
         # OCSF-ish classification
         class_name = "security_finding"
@@ -468,6 +507,7 @@ class GuardDutyEventBridgeParser:
             resources=resources,
             cloud_account_id=account_id,
             cloud_region=region,
+            gd_resource_type=_gd_resource_type(finding_type),
             raw_event=event,
         )
 

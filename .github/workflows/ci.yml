@@ -27,7 +27,12 @@ jobs:
     name: Validate Detection Rules
     runs-on: ubuntu-latest
     steps:
+      # support_files/detection_rules is a submodule (dbnz-io/opencdr-detection-
+      # rules, public) -- without submodules: true this checks out empty and
+      # the step below would silently validate zero rules.
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          submodules: true
 
       - name: Validate JSON syntax and required fields
         run: |
@@ -125,7 +130,13 @@ jobs:
       matrix:
         python-version: ["3.11", "3.12"]
     steps:
+      # tests/domain/test_guardduty_rules.py and
+      # tests/integration/test_golden_path_pipeline.py read real rule JSON
+      # from the detection-rules submodule -- without submodules: true it
+      # checks out empty and both suites fail on missing rules.
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          submodules: true
 
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:

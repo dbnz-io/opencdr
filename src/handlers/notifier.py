@@ -23,6 +23,17 @@ patch_boto3()
 # Env
 # ----------------------------
 
+# Previously hardcoded as "OCDR-NOTIFIER"/"ocdr.notifier" directly in
+# lambda_handler below -- a typo'd, non-env-driven value inconsistent with
+# every other handler's SERVICE_NAME/LAMBDA_NAME convention (responder.py,
+# ir_rollback.py, etc.), meaning every log/entry this Lambda ever wrote
+# used a service name ("OCDR-NOTIFIER") that GET /logs?service=... and the
+# UI's Logs page could never actually match against
+# ("OPENCDR-NOTIFIER", what serverless.yml's SERVICE_NAME env var and
+# every other Lambda's own service name both use).
+_SERVICE = os.getenv("SERVICE_NAME", "OPENCDR")
+LAMBDA_NAME = os.getenv("LAMBDA_NAME", "unknown")
+
 SETTINGS_TABLE_NAME = os.getenv("SETTINGS_TABLE_NAME", "")
 DEFAULT_SETTING_ID = os.getenv("NOTIFIER_SETTINGS_ID", "global")
 
@@ -133,8 +144,21 @@ def load_global_settings(*, aws: AwsHandler, logger: Logger) -> dict[str, Any]:
         "HIGH": "slack",
         "MEDIUM": "discord",
         "LOW": "discord"
+      },
+      "guardduty_notify": {
+        "default": false,
+        "by_severity": {"CRITICAL": true},
+        "by_service": {"IAMUser": true},
+        "by_severity_and_service": {"HIGH:EC2": true}
       }
     }
+
+    guardduty_notify controls whether a GuardDuty-sourced item is
+    eligible to send at all (see _guardduty_should_notify below) --
+    independent of routing, which only decides *which channels* an
+    already-eligible item goes to. Absent entirely (the out-of-the-box
+    state) means every GuardDuty item defaults to not-notify -- see
+    docs/notifications.md#guardduty-notifications.
     """
     global _cached_settings, _cached_settings_loaded_at
 
@@ -148,6 +172,7 @@ def load_global_settings(*, aws: AwsHandler, logger: Logger) -> dict[str, Any]:
         "notifications_enabled": False,
         "channels": {},
         "routing": {},
+        "guardduty_notify": {},
     }
 
     if not SETTINGS_TABLE_NAME:
@@ -184,6 +209,7 @@ def load_global_settings(*, aws: AwsHandler, logger: Logger) -> dict[str, Any]:
     # normalize
     settings["channels"] = _safe_dict(settings.get("channels"))
     settings["routing"] = _safe_dict(settings.get("routing"))
+    settings["guardduty_notify"] = _safe_dict(settings.get("guardduty_notify"))
 
     _resolve_secret_refs(settings, aws=aws)
 
@@ -452,11 +478,27 @@ def build_email_message(item: dict[str, Any]) -> tuple[str, str]:
 
 # ----------------------------
 # Remediation-success payload builders (responder's outbox item, not an
-# alert -- distinct "type": "remediation_success" shape, green everywhere)
+# alert -- distinct "type": "remediation_success" shape, green everywhere).
+#
+# `item["dry_run"]` (set by responder.py when DREDGE_DRY_RUN is on) switches
+# these to a distinct blue-grey "simulated" rendering instead. Dredge
+# reports success=True in dry-run mode too (no AWS API call was made, just
+# no error either), so without this distinction a simulated run and a real
+# one are indistinguishable to whoever reads the notification -- exactly
+# backwards, since dry-run is the one case where "nothing was actually
+# fixed" is the important thing to communicate.
 # ----------------------------
 
 _REMEDIATION_COLOR_SLACK = "#2e7d32"
 _REMEDIATION_COLOR_DISCORD = 3066993  # discord.js GREEN constant, matches the palette severity_colors/color_map already use
+_REMEDIATION_DRY_RUN_COLOR_SLACK = "#607d8b"
+_REMEDIATION_DRY_RUN_COLOR_DISCORD = 6323595  # 0x607d8b -- Material Blue Grey 500, not used anywhere else in this palette
+
+_DRY_RUN_NOTE = (
+    "DREDGE_DRY_RUN is on for this deployment — no AWS API call was made. "
+    "This confirms detection + response routing work end-to-end; set "
+    "DREDGE_DRY_RUN=false on the responder/rollback functions to enable real remediation."
+)
 
 
 def build_remediation_success_slack_payload(item: dict[str, Any]) -> dict[str, Any]:
@@ -464,11 +506,13 @@ def build_remediation_success_slack_payload(item: dict[str, Any]) -> dict[str, A
     response_module = _s(item.get("response_module"), "-")
     target = _s(item.get("target"), "-")
     detection_id = _s(item.get("detection_id"), "")
+    dry_run = bool(item.get("dry_run"))
 
+    header = "*DRY RUN — REMEDIATION SIMULATED*" if dry_run else "*REMEDIATED*"
     blocks = [
         {
             "type": "section",
-            "text": {"type": "mrkdwn", "text": f"*REMEDIATED*\n*{rule_id}*"},
+            "text": {"type": "mrkdwn", "text": f"{header}\n*{rule_id}*"},
         },
         {"type": "divider"},
         {
@@ -479,26 +523,34 @@ def build_remediation_success_slack_payload(item: dict[str, Any]) -> dict[str, A
             ],
         },
     ]
+    if dry_run:
+        blocks.append({"type": "context", "elements": [{"type": "mrkdwn", "text": _DRY_RUN_NOTE}]})
     if detection_id:
         blocks.append(
             {"type": "context", "elements": [{"type": "mrkdwn", "text": f"detection_id `{detection_id}`"}]}
         )
 
-    return {"attachments": [{"color": _REMEDIATION_COLOR_SLACK, "blocks": blocks}]}
+    color = _REMEDIATION_DRY_RUN_COLOR_SLACK if dry_run else _REMEDIATION_COLOR_SLACK
+    return {"attachments": [{"color": color, "blocks": blocks}]}
 
 
 def build_remediation_success_discord_payload(item: dict[str, Any]) -> dict[str, Any]:
     rule_id = _s(item.get("rule_id"), "unknown_rule")
+    dry_run = bool(item.get("dry_run"))
+
+    fields = [
+        {"name": "Action", "value": _s(item.get("response_module"), "-"), "inline": True},
+        {"name": "Target", "value": _s(item.get("target"), "-"), "inline": True},
+    ]
+    if dry_run:
+        fields.append({"name": "Note", "value": _DRY_RUN_NOTE, "inline": False})
 
     return {
         "embeds": [
             {
-                "title": f"REMEDIATED — {rule_id}",
-                "color": _REMEDIATION_COLOR_DISCORD,
-                "fields": [
-                    {"name": "Action", "value": _s(item.get("response_module"), "-"), "inline": True},
-                    {"name": "Target", "value": _s(item.get("target"), "-"), "inline": True},
-                ],
+                "title": f"DRY RUN — SIMULATED REMEDIATION — {rule_id}" if dry_run else f"REMEDIATED — {rule_id}",
+                "color": _REMEDIATION_DRY_RUN_COLOR_DISCORD if dry_run else _REMEDIATION_COLOR_DISCORD,
+                "fields": fields,
                 "footer": {"text": f"detection_id: {item.get('detection_id')}" if item.get("detection_id") else "OpenCDR"},
             }
         ]
@@ -507,12 +559,93 @@ def build_remediation_success_discord_payload(item: dict[str, Any]) -> dict[str,
 
 def build_remediation_success_email_message(item: dict[str, Any]) -> tuple[str, str]:
     rule_id = _s(item.get("rule_id"), "unknown_rule")
-    subject = f"[OpenCDR] Remediated – {rule_id}"
+    dry_run = bool(item.get("dry_run"))
+    subject = f"[OpenCDR] {'Dry run — remediation simulated' if dry_run else 'Remediated'} – {rule_id}"
     lines = [
-        "Status:    REMEDIATED",
+        f"Status:    {'DRY RUN (SIMULATED)' if dry_run else 'REMEDIATED'}",
         f"Rule:      {rule_id}",
         f"Action:    {_s(item.get('response_module'), '-')}",
         f"Target:    {_s(item.get('target'), '-')}",
+    ]
+    if dry_run:
+        lines += ["", _DRY_RUN_NOTE]
+    if item.get("detection_id"):
+        lines += ["", f"Detection ID: {item.get('detection_id')}"]
+    return subject, "\n".join(lines)
+
+
+# ----------------------------
+# Rollback-success payload builders (rollbackHandler's outbox item --
+# distinct "type": "rollback_success" shape, purple everywhere. Deliberately
+# not the remediation-success green (a rolled-back action is the opposite
+# state -- reading it as "still contained" would be actively misleading) and
+# not any of the CRITICAL/HIGH/MEDIUM/LOW alert colors either (a rollback
+# isn't a new detection at some severity, it's a reversal of a prior one) --
+# purple is unused elsewhere in this palette.
+# ----------------------------
+
+_ROLLBACK_COLOR_SLACK = "#7b1fa2"
+_ROLLBACK_COLOR_DISCORD = 8069026  # matches _ROLLBACK_COLOR_SLACK (#7b1fa2)
+
+
+def build_rollback_success_slack_payload(item: dict[str, Any]) -> dict[str, Any]:
+    rule_id = _s(item.get("rule_id"), "unknown_rule")
+    response_module = _s(item.get("response_module"), "-")
+    undo_module = _s(item.get("undo_module"), "-")
+    target = _s(item.get("target"), "-")
+    detection_id = _s(item.get("detection_id"), "")
+
+    blocks = [
+        {
+            "type": "section",
+            "text": {"type": "mrkdwn", "text": f"*ROLLED BACK*\n*{rule_id}*"},
+        },
+        {"type": "divider"},
+        {
+            "type": "section",
+            "fields": [
+                {"type": "mrkdwn", "text": f"*Original action*\n`{response_module}`"},
+                {"type": "mrkdwn", "text": f"*Undo*\n`{undo_module}`"},
+                {"type": "mrkdwn", "text": f"*Target*\n`{target}`"},
+            ],
+        },
+    ]
+    if detection_id:
+        blocks.append(
+            {"type": "context", "elements": [{"type": "mrkdwn", "text": f"detection_id `{detection_id}`"}]}
+        )
+
+    return {"attachments": [{"color": _ROLLBACK_COLOR_SLACK, "blocks": blocks}]}
+
+
+def build_rollback_success_discord_payload(item: dict[str, Any]) -> dict[str, Any]:
+    rule_id = _s(item.get("rule_id"), "unknown_rule")
+
+    return {
+        "embeds": [
+            {
+                "title": f"ROLLED BACK — {rule_id}",
+                "color": _ROLLBACK_COLOR_DISCORD,
+                "fields": [
+                    {"name": "Original action", "value": _s(item.get("response_module"), "-"), "inline": True},
+                    {"name": "Undo", "value": _s(item.get("undo_module"), "-"), "inline": True},
+                    {"name": "Target", "value": _s(item.get("target"), "-"), "inline": True},
+                ],
+                "footer": {"text": f"detection_id: {item.get('detection_id')}" if item.get("detection_id") else "OpenCDR"},
+            }
+        ]
+    }
+
+
+def build_rollback_success_email_message(item: dict[str, Any]) -> tuple[str, str]:
+    rule_id = _s(item.get("rule_id"), "unknown_rule")
+    subject = f"[OpenCDR] Rolled back – {rule_id}"
+    lines = [
+        "Status:          ROLLED BACK",
+        f"Rule:            {rule_id}",
+        f"Original action: {_s(item.get('response_module'), '-')}",
+        f"Undo:            {_s(item.get('undo_module'), '-')}",
+        f"Target:          {_s(item.get('target'), '-')}",
     ]
     if item.get("detection_id"):
         lines += ["", f"Detection ID: {item.get('detection_id')}"]
@@ -806,6 +939,33 @@ def _route_channels(item: dict[str, Any], settings: dict[str, Any]) -> list[str]
     return out
 
 
+def _guardduty_should_notify(item: dict[str, Any], settings: dict[str, Any]) -> bool:
+    """
+    GuardDuty items default to no notification; settings.guardduty_notify opts specific
+    severities/services back in. Most-specific match wins: by_severity_and_service ->
+    by_service -> by_severity -> default. An absent/empty guardduty_notify means every
+    GuardDuty item is skipped, including CRITICAL/Attack Sequence findings.
+    """
+    gd = _safe_dict(settings.get("guardduty_notify"))
+    severity = _s(item.get("severity", "UNKNOWN")).upper()
+    service = _s(item.get("gd_resource_type", ""))
+    combo = f"{severity}:{service}" if service else None
+
+    by_combo = _safe_dict(gd.get("by_severity_and_service"))
+    if combo and combo in by_combo:
+        return bool(by_combo[combo])
+
+    by_service = _safe_dict(gd.get("by_service"))
+    if service and service in by_service:
+        return bool(by_service[service])
+
+    by_severity = _safe_dict(gd.get("by_severity"))
+    if severity in by_severity:
+        return bool(by_severity[severity])
+
+    return bool(gd.get("default", False))
+
+
 # ----------------------------
 # Lambda handler
 # ----------------------------
@@ -815,8 +975,8 @@ def lambda_handler(event, context):
     request_id = context.aws_request_id if context else None
 
     base_logger = Logger(
-        service="OCDR-NOTIFIER",
-        source="ocdr.notifier",
+        service=_SERVICE,
+        source=LAMBDA_NAME,
         request_id=request_id,
     )
 
@@ -891,6 +1051,21 @@ def lambda_handler(event, context):
             )
             continue
 
+        # GuardDuty items default to no notification unless settings.guardduty_notify opts them in
+        if item.get("source") == "guardduty" and not _guardduty_should_notify(item, settings):
+            skipped += 1
+            logger.info(
+                event_name="NOTIFIER_SKIP_GUARDDUTY_NOT_CONFIGURED",
+                event_type="PROCESSING",
+                message="GuardDuty item not eligible for notification per guardduty_notify settings",
+                details={
+                    "rule_id": item.get("rule_id"),
+                    "severity": item.get("severity"),
+                    "gd_resource_type": item.get("gd_resource_type"),
+                },
+            )
+            continue
+
         # global toggle
         if not global_enabled:
             skipped += 1
@@ -920,17 +1095,19 @@ def lambda_handler(event, context):
             continue
 
         is_remediation = item.get("type") == "remediation_success"
+        is_rollback = item.get("type") == "rollback_success"
 
         for channel in channels_to_send:
             try:
-                if is_remediation and channel in ("securityhub", "jira", "webhook"):
+                if (is_remediation or is_rollback) and channel in ("securityhub", "jira", "webhook"):
                     # These builders assume the full alert shape (severity,
-                    # primary_signal, etc.) that a remediation-success item
-                    # doesn't have -- scoped to slack/discord/email for now.
+                    # primary_signal, etc.) that a remediation-success/
+                    # rollback-success item doesn't have -- scoped to
+                    # slack/discord/email for now.
                     logger.info(
                         event_name="NOTIFIER_SKIP_REMEDIATION_UNSUPPORTED_CHANNEL",
                         event_type="PROCESSING",
-                        message="Remediation-success notifications aren't supported on this channel yet",
+                        message="Remediation/rollback notifications aren't supported on this channel yet",
                         details={"channel": channel, "rule_id": item.get("rule_id")},
                     )
                     continue
@@ -941,7 +1118,9 @@ def lambda_handler(event, context):
                         raise RuntimeError("Slack selected but not enabled or webhook_url missing")
 
                     payload = (
-                        build_remediation_success_slack_payload(item)
+                        build_rollback_success_slack_payload(item)
+                        if is_rollback
+                        else build_remediation_success_slack_payload(item)
                         if is_remediation
                         else build_slack_payload(item)
                     )
@@ -965,7 +1144,9 @@ def lambda_handler(event, context):
                         )
 
                     payload = (
-                        build_remediation_success_discord_payload(item)
+                        build_rollback_success_discord_payload(item)
+                        if is_rollback
+                        else build_remediation_success_discord_payload(item)
                         if is_remediation
                         else build_discord_payload(item)
                     )
@@ -989,7 +1170,9 @@ def lambda_handler(event, context):
                         )
 
                     subject, body = (
-                        build_remediation_success_email_message(item)
+                        build_rollback_success_email_message(item)
+                        if is_rollback
+                        else build_remediation_success_email_message(item)
                         if is_remediation
                         else build_email_message(item)
                     )
