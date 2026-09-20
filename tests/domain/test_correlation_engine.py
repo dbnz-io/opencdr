@@ -298,6 +298,27 @@ class TestAlertKey:
 
         assert alerts_1[0]["alert_key"] == alerts_2[0]["alert_key"]
 
+    def test_retry_across_processing_window_boundary_keeps_alert_key(self):
+        """Retries use source event time, so wall-clock rollover cannot duplicate an alert."""
+        trigger_time = ts(-1)
+        signals = [make_signal(timestamp=ts(-i * 10)) for i in range(3)]
+        rule = make_rule(threshold=3)
+        new_signal = make_signal(timestamp=trigger_time)
+
+        eng = engine_with(signals)
+        before_boundary = eng.correlate(
+            new_signal=new_signal,
+            rules=[rule],
+            now=NOW - timedelta(seconds=1),
+        )
+        after_boundary = eng.correlate(
+            new_signal=new_signal,
+            rules=[rule],
+            now=NOW + timedelta(seconds=1),
+        )
+
+        assert before_boundary[0]["alert_key"] == after_boundary[0]["alert_key"]
+
     def test_different_group_values_produce_different_alert_keys(self):
         alice_signals = [make_signal(user_name="alice", timestamp=ts(-i * 10)) for i in range(3)]
         bob_signals = [make_signal(user_name="bob", timestamp=ts(-i * 10)) for i in range(3)]

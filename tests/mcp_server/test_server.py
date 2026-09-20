@@ -228,10 +228,26 @@ class TestRulesUpsert:
         rule = {"severity": "HIGH", "conditions": []}
         with patch.object(opencdr, "_request", return_value=(200, {**rule, "rule_id": "x"})) as mock_req:
             result = server.opencdr_rules_upsert("x", "signal", rule)
+        # Explicit rule_id/rule_kind are injected into the payload.
         mock_req.assert_called_once_with(
-            "PUT", "/rules/x?rule_kind=signal", "https://api.example.com", "test-key", json=rule
+            "PUT",
+            "/rules/x?rule_kind=signal",
+            "https://api.example.com",
+            "test-key",
+            json={"severity": "HIGH", "conditions": [], "rule_id": "x", "rule_kind": "signal"},
         )
         assert result["rule_id"] == "x"
+
+    def test_explicit_id_and_kind_override_body(self, api_env):
+        # A rule object carrying a contradictory rule_id/rule_kind must NOT
+        # reach the API -- the explicit function args win.
+        rule = {"rule_id": "SPOOFED", "rule_kind": "correlation", "severity": "LOW"}
+        with patch.object(opencdr, "_request", return_value=(200, {})) as mock_req:
+            server.opencdr_rules_upsert("real-id", "signal", rule)
+        sent = mock_req.call_args.kwargs["json"]
+        assert sent["rule_id"] == "real-id"
+        assert sent["rule_kind"] == "signal"
+        assert mock_req.call_args.args[1] == "/rules/real-id?rule_kind=signal"
 
     def test_error_status_raises(self, api_env):
         with patch.object(opencdr, "_request", return_value=(400, {"message": "bad conditions"})):
@@ -275,10 +291,10 @@ class TestListsShow:
                 server.opencdr_lists_show("missing")
 
 
-class TestListsCreate:
+class TestListsReplace:
     def test_builds_correct_payload(self, api_env):
         with patch.object(opencdr, "_request", return_value=(200, {"ok": True})) as mock_req:
-            server.opencdr_lists_create("automation-identities", "CI identities", ["ci-deploy-role"])
+            server.opencdr_lists_replace("automation-identities", "CI identities", ["ci-deploy-role"])
         mock_req.assert_called_once_with(
             "PUT",
             "/rules/automation-identities?rule_kind=list",
@@ -294,7 +310,7 @@ class TestListsCreate:
 
     def test_defaults_to_empty_description_and_values(self, api_env):
         with patch.object(opencdr, "_request", return_value=(200, {"ok": True})) as mock_req:
-            server.opencdr_lists_create("x")
+            server.opencdr_lists_replace("x")
         assert mock_req.call_args.kwargs["json"]["description"] == ""
         assert mock_req.call_args.kwargs["json"]["values"] == []
 
@@ -311,6 +327,8 @@ class TestListsAdd:
         assert result["values"] == ["existing", "new-value"]
 
     def test_duplicate_value_is_a_no_op(self, api_env):
+        # codeql[py/mixed-returns] -- pytest.fail() is NoReturn (it always
+        # raises); the PUT branch never actually falls through to None.
         def fake_request(method, path, url, key, **kwargs):
             if method == "GET":
                 return 200, {"rule_id": "x", "values": ["existing"]}
@@ -338,6 +356,8 @@ class TestListsRemove:
         assert result["values"] == ["keep"]
 
     def test_value_not_present_is_a_no_op(self, api_env):
+        # codeql[py/mixed-returns] -- see the comment on the same pattern
+        # earlier in this file.
         def fake_request(method, path, url, key, **kwargs):
             if method == "GET":
                 return 200, {"rule_id": "x", "values": ["keep"]}
@@ -366,31 +386,31 @@ class TestListsDelete:
 class TestSignalsList:
     def test_no_filter_raises(self, api_env):
         with pytest.raises(ValueError, match="exactly one"):
-            server.opencdr_signals_list()
+            server.opencdr_signals_search()
 
     def test_two_filters_raises(self, api_env):
         with pytest.raises(ValueError, match="exactly one"):
-            server.opencdr_signals_list(severity="HIGH", event_id="e1")
+            server.opencdr_signals_search(severity="HIGH", event_id="e1")
 
     def test_severity_uppercased_in_qs(self, api_env):
         with patch.object(opencdr, "_request", return_value=(200, {"items": []})) as mock_req:
-            server.opencdr_signals_list(severity="high")
+            server.opencdr_signals_search(severity="high")
         assert "severity=HIGH" in mock_req.call_args.args[1]
 
     def test_event_id_only_is_valid(self, api_env):
         with patch.object(opencdr, "_request", return_value=(200, {"items": []})) as mock_req:
-            server.opencdr_signals_list(event_id="e1")
+            server.opencdr_signals_search(event_id="e1")
         assert "event_id=e1" in mock_req.call_args.args[1]
 
     def test_category_only_is_valid(self, api_env):
         with patch.object(opencdr, "_request", return_value=(200, {"items": []})) as mock_req:
-            server.opencdr_signals_list(category="iam")
+            server.opencdr_signals_search(category="iam")
         assert "category=iam" in mock_req.call_args.args[1]
 
     def test_error_status_raises(self, api_env):
         with patch.object(opencdr, "_request", return_value=(500, {"message": "boom"})):
             with pytest.raises(RuntimeError, match="boom"):
-                server.opencdr_signals_list(severity="HIGH")
+                server.opencdr_signals_search(severity="HIGH")
 
 
 class TestSignalsStats:
@@ -421,26 +441,26 @@ class TestSignalsStats:
 class TestLogsList:
     def test_no_filter_raises(self, api_env):
         with pytest.raises(ValueError, match="exactly one"):
-            server.opencdr_logs_list()
+            server.opencdr_logs_search()
 
     def test_two_filters_raises(self, api_env):
         with pytest.raises(ValueError, match="exactly one"):
-            server.opencdr_logs_list(service="x", event_id="e1")
+            server.opencdr_logs_search(service="x", event_id="e1")
 
     def test_service_only_is_valid(self, api_env):
         with patch.object(opencdr, "_request", return_value=(200, {"items": []})) as mock_req:
-            server.opencdr_logs_list(service="OPENCDR-SIGNAL-WRITER")
+            server.opencdr_logs_search(service="OPENCDR-SIGNAL-WRITER")
         assert "service=OPENCDR-SIGNAL-WRITER" in mock_req.call_args.args[1]
 
     def test_event_name_only_is_valid(self, api_env):
         with patch.object(opencdr, "_request", return_value=(200, {"items": []})) as mock_req:
-            server.opencdr_logs_list(event_name="SIGNAL_INSERTED")
+            server.opencdr_logs_search(event_name="SIGNAL_INSERTED")
         assert "event_name=SIGNAL_INSERTED" in mock_req.call_args.args[1]
 
     def test_error_status_raises(self, api_env):
         with patch.object(opencdr, "_request", return_value=(500, {"message": "boom"})):
             with pytest.raises(RuntimeError, match="boom"):
-                server.opencdr_logs_list(service="x")
+                server.opencdr_logs_search(service="x")
 
 
 class TestIrRolesList:
@@ -495,9 +515,11 @@ class TestIrRolesUpsert:
         assert mock_req.call_args.kwargs["json"]["enabled"] is False
 
     def test_error_status_raises(self, api_env):
+        # A syntactically valid, account-matching ARN still lets a backend
+        # rejection propagate as a RuntimeError (client validation passes).
         with patch.object(opencdr, "_request", return_value=(400, {"message": "bad role_arn"})):
             with pytest.raises(RuntimeError, match="bad role_arn"):
-                server.opencdr_ir_roles_upsert("123456789012", "not-an-arn")
+                server.opencdr_ir_roles_upsert("123456789012", "arn:aws:iam::123456789012:role/IR")
 
 
 class TestIrRolesDelete:
@@ -548,7 +570,11 @@ class TestIrActionsRollback:
         with patch.object(opencdr, "_request", return_value=(202, {"detection_id": "d-1"})) as mock_req:
             server.opencdr_ir_actions_rollback("d-1")
         mock_req.assert_called_once_with(
-            "POST", "/ir-actions/d-1/rollback", "https://api.example.com", "test-key"
+            "POST",
+            "/ir-actions/d-1/rollback",
+            "https://api.example.com",
+            "test-key",
+            json={"interface": "mcp"},
         )
 
     def test_success_returns_body(self, api_env):

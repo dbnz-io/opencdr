@@ -122,7 +122,8 @@ def _save_config(data: dict) -> None:
     # (open(..., "w") on an existing file preserves its current mode,
     # it doesn't reset to the process umask).
     CONFIG_FILE.write_text(json.dumps(data, indent=2) + "\n")
-    os.chmod(CONFIG_FILE, 0o600)  # lgtm[py/clear-text-storage-sensitive-data]
+    # codeql[py/clear-text-storage-sensitive-data]
+    os.chmod(CONFIG_FILE, 0o600)
 
 
 def _require_api(cfg: dict) -> tuple[str, str]:
@@ -168,7 +169,8 @@ def _die_on_error(status: int, body: Any, context: str = "") -> None:
         # field X") -- grep-confirmed none of them ever echo back a raw
         # submitted value, so there's nothing secret for this shared
         # error helper to leak regardless of which endpoint called it.
-        msg = body.get("message", body) if isinstance(body, dict) else body  # lgtm[py/clear-text-logging-sensitive-data]
+        # codeql[py/clear-text-logging-sensitive-data]
+        msg = body.get("message", body) if isinstance(body, dict) else body
         prefix = f"  {context}: " if context else "  "
         print(err(f"{prefix}HTTP {status} — {msg}"))
         sys.exit(1)
@@ -214,7 +216,7 @@ def cmd_status(args: argparse.Namespace) -> None:
     url, key = _require_api(cfg)
     status, body = _request("GET", "/status", url, key)
     _die_on_error(status, body, "status")
-    print(ok(f"  API online"))
+    print(ok("  API online"))
     print(f"  Service    : {body.get('service', '')}")
     print(f"  Time       : {body.get('time', '')}")
     print(f"  Request ID : {body.get('request_id', '')}")
@@ -283,7 +285,8 @@ def cmd_rules_load(args: argparse.Namespace) -> None:
         else:
             # See _die_on_error's comment above -- rule JSON has no secret
             # fields, and api.py's /rules error text is always generic.
-            msg = body.get("message", body) if isinstance(body, dict) else body  # lgtm[py/clear-text-logging-sensitive-data]
+            # codeql[py/clear-text-logging-sensitive-data]
+            msg = body.get("message", body) if isinstance(body, dict) else body
             print(f"  {err('[ERROR]')} {label} — HTTP {status}: {msg}")
             failed += 1
 
@@ -445,6 +448,9 @@ def _build_channels_from_args(args: argparse.Namespace) -> dict:
     return channels
 
 
+# codeql[py/mixed-returns] -- sys.exit() is NoReturn (it always raises
+# SystemExit); the third path never actually falls through to an implicit
+# None, this checker just doesn't model sys.exit as terminating.
 def _parse_bool_flag(value: str, flag_name: str) -> bool:
     v = value.strip().lower()
     if v in ("true", "1", "yes"):
@@ -582,9 +588,10 @@ def cmd_signals_list(args: argparse.Namespace) -> None:
     cfg = _load_config()
     url, key = _require_api(cfg)
 
-    provided = [x for x in (args.severity, args.event_id, args.category) if x]
+    integration_id = getattr(args, "integration_id", None)
+    provided = [x for x in (args.severity, args.event_id, args.category, integration_id) if x]
     if len(provided) != 1:
-        print(err("  Provide exactly one of --severity, --event-id, or --category"))
+        print(err("  Provide exactly one of --severity, --event-id, --category, or --integration-id"))
         sys.exit(1)
 
     qs: dict[str, Any] = {"page_size": args.page_size, "order": args.order}
@@ -594,6 +601,8 @@ def cmd_signals_list(args: argparse.Namespace) -> None:
         qs["event_id"] = args.event_id
     elif args.category:
         qs["category"] = args.category
+    elif integration_id:
+        qs["integration_id"] = integration_id
     if args.next_token:
         qs["next_token"] = args.next_token
     query = "&".join(f"{k}={v}" for k, v in qs.items())
@@ -855,10 +864,12 @@ def cmd_ir_actions_rollback(args: argparse.Namespace) -> None:
         # See _die_on_error's comment above -- api.py's rollback error
         # text ("rollback not supported for this module", etc.) is
         # always generic, never an echo of submitted data.
-        print(err(f"  {body.get('message', body) if isinstance(body, dict) else body}"))  # lgtm[py/clear-text-logging-sensitive-data]
+        # codeql[py/clear-text-logging-sensitive-data]
+        print(err(f"  {body.get('message', body) if isinstance(body, dict) else body}"))
         sys.exit(1)
     if status == 409:
-        print(warn(f"  {body.get('message', body) if isinstance(body, dict) else body}"))  # lgtm[py/clear-text-logging-sensitive-data]
+        # codeql[py/clear-text-logging-sensitive-data]
+        print(warn(f"  {body.get('message', body) if isinstance(body, dict) else body}"))
         sys.exit(1)
     _die_on_error(status, body, "ir-actions rollback")
     print(ok(f"  Rollback enqueued for detection: {args.detection_id}"))
@@ -875,7 +886,7 @@ def cmd_test_local(args: argparse.Namespace) -> None:
         from src.domain.ocsf_min_parser import build_default_router
     except ImportError as e:
         print(err(f"  Cannot import src modules: {e}"))
-        print(f"  Run from the project root directory.")
+        print("  Run from the project root directory.")
         sys.exit(1)
 
     _banner("Local Rule Tester")
@@ -889,15 +900,15 @@ def cmd_test_local(args: argparse.Namespace) -> None:
                 all_rules.append(r)
             elif r.get("rule_kind") == "list":
                 all_lists[r["rule_id"]] = r.get("values", [])
-        except json.JSONDecodeError:
-            pass
+        except json.JSONDecodeError as e:
+            print(warn(f"  {p.relative_to(RULES_DIR)}: invalid JSON, skipped ({e})"))
 
     all_events = []
     for p in sorted(EVENTS_DIR.glob("*.json")):
         try:
             all_events.append({"_filename": p.name, **json.loads(p.read_text())})
-        except json.JSONDecodeError:
-            pass
+        except json.JSONDecodeError as e:
+            print(warn(f"  {p.name}: invalid JSON, skipped ({e})"))
 
     rules = [r for r in all_rules if not args.rule or args.rule in r.get("rule_id", "")]
     events = [e for e in all_events if not args.event or args.event in e["_filename"]]
@@ -1175,7 +1186,7 @@ def _run_setup_wizard() -> None:  # noqa: C901
         else:
             url, key = _prompt_api_credentials(cfg)
     else:
-        print(f"  You can find your API URL and key after running:")
+        print("  You can find your API URL and key after running:")
         print(f"  {dim('serverless deploy')}  (look for the endpoint and API key output)\n")
         url, key = _prompt_api_credentials(cfg)
 
@@ -1187,7 +1198,7 @@ def _run_setup_wizard() -> None:  # noqa: C901
         status, body = _request("GET", "/status", url, key)
     except Exception as e:
         print(err(f"  Connection failed: {e}"))
-        print(f"  Check the URL and key and try again.\n")
+        print("  Check the URL and key and try again.\n")
         sys.exit(1)
 
     if status != 200:
@@ -1196,7 +1207,8 @@ def _run_setup_wizard() -> None:  # noqa: C901
             # See _die_on_error's comment above -- /status's own error
             # text is an auth/scope message, never an echo of the key
             # or url just used to connect.
-            print(f"  {body.get('message', body)}")  # lgtm[py/clear-text-logging-sensitive-data]
+            # codeql[py/clear-text-logging-sensitive-data]
+            print(f"  {body.get('message', body)}")
         sys.exit(1)
 
     print(ok(f"  Connected!  Service: {body.get('service', '')}"))
@@ -1213,7 +1225,10 @@ def _run_setup_wizard() -> None:  # noqa: C901
 
     if rule_files and _confirm("Load rules into your deployment now?", default=True):
         print()
-        loaded = skipped = failed = 0
+        # No skipped counter here (unlike cmd_rules_load's own copy of this
+        # loop) -- rule_files above is already pre-filtered against
+        # _SKIP_RULE_FILES, so there's no skip branch left inside this loop.
+        loaded = failed = 0
         for path in rule_files:
             label = path.relative_to(RULES_DIR)
             try:
@@ -1242,7 +1257,8 @@ def _run_setup_wizard() -> None:  # noqa: C901
                 # rule schema (rule_id/rule_kind/severity/conditions/
                 # response_module/playbook) has no secret field for this
                 # message to ever echo back.
-                msg = b.get("message", b) if isinstance(b, dict) else b  # lgtm[py/clear-text-logging-sensitive-data]
+                # codeql[py/clear-text-logging-sensitive-data]
+                msg = b.get("message", b) if isinstance(b, dict) else b
                 print(f"    {err('[ERROR]')} {label} — {msg}")
                 failed += 1
 
@@ -1346,7 +1362,8 @@ def _run_setup_wizard() -> None:  # noqa: C901
             # -- every one is a static structural message naming a field
             # ("channels.slack must be an object"), never an echo of the
             # submitted value. Nothing secret for this print to leak.
-            msg = b.get("message", b) if isinstance(b, dict) else b  # lgtm[py/clear-text-logging-sensitive-data]
+            # codeql[py/clear-text-logging-sensitive-data]
+            msg = b.get("message", b) if isinstance(b, dict) else b
             print(warn(f"\n  Could not save notification settings: {msg}"))
     else:
         print(f"  {dim('Skipped. Configure later with:')}  opencdr.py settings set --slack-webhook <url> / --enable-securityhub")
@@ -1399,6 +1416,31 @@ def _prompt_api_credentials(cfg: dict) -> tuple[str, str]:
 # Argument parser
 # ---------------------------------------------------------------------------
 
+def cmd_integrations(args: argparse.Namespace) -> None:
+    """Manage S3 integration bindings and executable parser previews."""
+    from urllib.parse import quote
+    url, key = _require_api(_load_config())
+    path = "/integrations"
+    if getattr(args, "integration_id", None):
+        path += "/" + quote(args.integration_id, safe="")
+    action = args.integration_action
+    method = "GET"
+    kwargs = {}
+    if action in {"put", "preview"}:
+        with open(args.file) as stream:
+            kwargs["json"] = json.load(stream)
+        method = "PUT" if action == "put" else "POST"
+        if action == "preview":
+            path += "/preview"
+    if action == "jobs":
+        path += "/jobs"
+        if args.job_id:
+            path += "/" + quote(args.job_id, safe="")
+    status, body = _request(method, path, url, key, **kwargs)
+    _die_on_error(status, body, "integrations")
+    print(json.dumps(body, indent=2))
+
+
 def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="opencdr.py",
@@ -1407,6 +1449,18 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     sub = p.add_subparsers(dest="command", metavar="<command>")
     sub.required = False  # no-arg invocation launches the wizard
+
+    integrations = sub.add_parser("integrations", help="S3/Falco integrations and executable parsers")
+    actions = integrations.add_subparsers(dest="integration_action", required=True)
+    for action in ("catalog", "get", "put", "preview", "jobs"):
+        command = actions.add_parser(action)
+        if action != "catalog":
+            command.add_argument("integration_id")
+        if action in {"put", "preview"}:
+            command.add_argument("file", help="JSON request file")
+        if action == "jobs":
+            command.add_argument("--job-id")
+        command.set_defaults(func=cmd_integrations)
 
     # ── setup (wizard) ────────────────────────────────────────────────────
     sw = sub.add_parser("setup", help="Interactive setup wizard")
@@ -1494,7 +1548,8 @@ def _build_parser() -> argparse.ArgumentParser:
     si_sub.required = True
 
     sil = si_sub.add_parser("list", help="List signals")
-    sil.add_argument("--severity", choices=["CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO", "INFORMATIONAL"])
+    sil.add_argument("--integration-id")
+    sil.add_argument("--severity", choices=["CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO", "INFORMATIONAL", "UNKNOWN"])
     sil.add_argument("--event-id", dest="event_id", metavar="<id>")
     sil.add_argument("--category", metavar="<cat>")
     sil.add_argument("--order", choices=["asc", "desc"], default="desc")

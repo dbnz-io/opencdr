@@ -173,6 +173,8 @@ class TestListsAdd:
     def test_duplicate_value_skips_put(self, capsys):
         args = SimpleNamespace(list_id="x", value="existing")
 
+        # codeql[py/mixed-returns] -- pytest.fail() is NoReturn (it always
+        # raises); the PUT branch never actually falls through to None.
         def fake_request(method, path, url, key, **kwargs):
             if method == "GET":
                 return 200, {"rule_id": "x", "values": ["existing"]}
@@ -184,6 +186,8 @@ class TestListsAdd:
     def test_get_list_404_exits_before_put(self):
         args = SimpleNamespace(list_id="missing", value="v")
 
+        # codeql[py/mixed-returns] -- see the comment on the same pattern
+        # earlier in this file.
         def fake_request(method, path, url, key, **kwargs):
             if method == "GET":
                 return 404, {}
@@ -230,6 +234,8 @@ class TestListsRemove:
     def test_value_not_present_skips_put(self, capsys):
         args = SimpleNamespace(list_id="x", value="not-there")
 
+        # codeql[py/mixed-returns] -- see the comment on the same pattern
+        # earlier in this file.
         def fake_request(method, path, url, key, **kwargs):
             if method == "GET":
                 return 200, {"rule_id": "x", "values": ["keep"]}
@@ -241,6 +247,8 @@ class TestListsRemove:
     def test_get_list_404_exits_before_put(self):
         args = SimpleNamespace(list_id="missing", value="v")
 
+        # codeql[py/mixed-returns] -- see the comment on the same pattern
+        # earlier in this file.
         def fake_request(method, path, url, key, **kwargs):
             if method == "GET":
                 return 404, {}

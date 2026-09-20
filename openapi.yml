@@ -1,8 +1,12 @@
 openapi: 3.0.3
 info:
   title: OpenCDR API
-  version: "1.0.0"
-  description: OpenCDR management API (signals, logs, rules, settings)
+  version: "1.1.0"
+  description: >-
+    OpenCDR management API: signals, logs, detection rules, detection lists,
+    notification settings, IR-role mappings, and executed IR actions. All
+    routes require an x-api-key whose name encodes its scopes (see
+    docs/api-reference.md#api-key-scopes).
 
 servers:
   - url: https://{api_id}.execute-api.{region}.amazonaws.com/{stage}
@@ -11,6 +15,9 @@ servers:
       region: { default: "us-east-1" }
       stage: { default: "dev" }
 
+security:
+  - ApiKeyAuth: []
+
 components:
   securitySchemes:
     ApiKeyAuth:
@@ -18,109 +25,831 @@ components:
       in: header
       name: x-api-key
 
-security:
-  - ApiKeyAuth: []
+  schemas:
+    IntegrationBinding:
+      type: object
+      properties:
+        integration_id: &id001
+          type: string
+        kind:
+          type: string
+          enum:
+          - falco
+          - custom
+        bucket: *id001
+        prefix: *id001
+        format: *id001
+        compression: *id001
+        enabled:
+          type: boolean
+        rev:
+          type: integer
+        parser:
+          type: object
+      required:
+      - integration_id
+      - kind
+      - bucket
+      - prefix
+      - rev
+      - parser
+    IngestionJob:
+      type: object
+      properties:
+        object_id: *id001
+        status:
+          type: string
+          enum:
+          - PROCESSING
+          - DISPATCHED
+          - PARTIAL
+          - QUARANTINED
+        created_at: *id001
+        mode:
+          type: string
+          enum:
+          - live
+          - analysis
+        record_count:
+          type: integer
+        invalid_count:
+          type: integer
+        dropped_count:
+          type: integer
+        signal_count:
+          type: integer
+        error_code: *id001
+        bucket: *id001
+        key: *id001
+        version_id: *id001
+        records:
+          type: array
+          items:
+            type: object
+            properties:
+              sk: *id001
+              status: *id001
+              code: *id001
+      required:
+      - object_id
+      - status
+    ParserPreview:
+      type: object
+      properties:
+        status:
+          type: string
+          enum:
+          - parsed
+          - dropped
+        event:
+          type: object
+          nullable: true
+        code:
+          type: string
+          nullable: true
+      required:
+      - status
+    ParserCatalog:
+      type: object
+      properties:
+        bucket: *id001
+        prefix_template: *id001
+        parsers:
+          type: array
+          items:
+            type: object
+        stock_falco_rules:
+          type: array
+          items:
+            type: object
+      required:
+      - bucket
+      - parsers
+    IngestionJobs:
+      type: object
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/IngestionJob'
+        next_token:
+          type: string
+          nullable: true
+      required:
+      - items
+    IngestionReplay:
+      type: object
+      properties:
+        run_id: *id001
+        mode:
+          type: string
+          enum:
+          - analysis
+        object_id: *id001
+      required:
+      - run_id
+      - mode
+      - object_id
+    IntegrationConfiguration:
+      type: object
+      required:
+      - kind
+      - format
+      - parser
+      - expected_rev
+      additionalProperties: false
+      properties:
+        kind:
+          type: string
+          enum:
+          - falco
+          - custom
+        format:
+          type: string
+          enum:
+          - json
+          - ndjson
+          - lines
+        compression:
+          type: string
+          enum:
+          - none
+          - gzip
+          default: none
+        enabled:
+          type: boolean
+          default: false
+        expected_rev:
+          type: integer
+          minimum: 0
+          description: 0 creates; updates require current rev.
+        parser:
+          oneOf:
+          - type: object
+            required:
+            - kind
+            - id
+            - version
+            additionalProperties: false
+            properties:
+              kind:
+                type: string
+                enum:
+                - builtin
+              id:
+                type: string
+                enum:
+                - falco.json
+              version:
+                type: string
+                enum:
+                - 1.0.0
+          - type: object
+            required:
+            - kind
+            - version_arn
+            - contract_version
+            additionalProperties: false
+            properties:
+              kind:
+                type: string
+                enum:
+                - lambda
+              version_arn:
+                type: string
+                description: Deployment-allowlisted immutable numeric version ARN.
+              contract_version:
+                type: string
+                enum:
+                - '1'
+    Error:
+      type: object
+      description: 4xx/5xx error body. `message` is surfaced verbatim to operators.
+      properties:
+        message: { type: string }
+        request_id: { type: string, nullable: true }
+      required: [message]
+
+    Condition:
+      type: object
+      description: One detection condition. See docs/detection-rules.md.
+      properties:
+        field:
+          type: string
+          description: >-
+            Dotted event path. The first segment must be an allowed field root
+            (GET /help -> /rules.condition_field_roots).
+        op:
+          type: string
+          enum:
+            [exists, not_exists, equals, not_equals, in, not_in, in_list,
+             not_in_list, contains, not_contains, prefix, not_prefix, suffix,
+             not_suffix, matches, not_matches, wildcard]
+        value:
+          description: Scalar or list, depending on op. Omitted for exists/not_exists/wildcard.
+          nullable: true
+        list_id:
+          type: string
+          description: Required for in_list/not_in_list; references a rule_kind=list rule.
+      required: [field, op]
+
+    Rule:
+      type: object
+      description: A signal or correlation detection rule (PK rule_kind, SK rule_id).
+      additionalProperties: true
+      properties:
+        rule_kind: { type: string, enum: [signal, correlation] }
+        rule_id: { type: string }
+        enabled: { type: boolean }
+        notify: { type: boolean }
+        severity:
+          type: string
+          enum: [CRITICAL, HIGH, MEDIUM, LOW, INFO, INFORMATIONAL, UNKNOWN]
+        response_module:
+          type: string
+          nullable: true
+          description: Empty/absent = visibility-only. A non-empty value must be a registered handler.
+        conditions:
+          type: array
+          items: { $ref: "#/components/schemas/Condition" }
+        threshold:
+          type: integer
+          description: Correlation rules only.
+        time_window_seconds:
+          type: integer
+          description: Correlation rules only.
+        created_by: { type: string }
+        updated_by:
+          type: string
+          description: Server-set from the authenticated API-key id; body values are ignored.
+        timestamp: { type: string }
+        rev:
+          type: integer
+          description: Monotonic version for optimistic concurrency (see expected_rev).
+      required: [rule_kind, rule_id]
+
+    RuleWrite:
+      type: object
+      description: Body for POST /rules or PUT /rules/{rule_id}.
+      allOf:
+        - $ref: "#/components/schemas/Rule"
+      properties:
+        expected_rev:
+          type: integer
+          description: >-
+            Optional optimistic-concurrency guard. If supplied, the write is
+            conditional on the stored rev still equalling it (409 on mismatch);
+            omit for an unconditional upsert. Never persisted.
+
+    ListRule:
+      type: object
+      description: A detection list (rule_kind=list) referenced by in_list/not_in_list.
+      additionalProperties: true
+      properties:
+        rule_kind: { type: string, enum: [list] }
+        rule_id: { type: string }
+        description: { type: string }
+        values:
+          type: array
+          items: { type: string }
+        created_by: { type: string }
+        updated_by: { type: string }
+        timestamp: { type: string }
+        rev: { type: integer }
+      required: [rule_kind, rule_id, values]
+
+    RuleListResponse:
+      type: object
+      properties:
+        order: { type: string, enum: [asc, desc] }
+        page_size: { type: integer }
+        items:
+          type: array
+          items:
+            oneOf:
+              - $ref: "#/components/schemas/Rule"
+              - $ref: "#/components/schemas/ListRule"
+        next_token: { type: string, nullable: true }
+        has_next: { type: boolean }
+        notes: { type: string }
+
+    Signal:
+      type: object
+      description: A detection signal. Event-derived; only stable keys are enumerated.
+      additionalProperties: true
+      properties:
+        detection_id: { type: string }
+        event_id: { type: string }
+        severity: { type: string }
+        category: { type: string }
+        timestamp: { type: string }
+
+    SignalListResponse:
+      type: object
+      properties:
+        query: { type: object, additionalProperties: true }
+        order: { type: string, enum: [asc, desc] }
+        page_size: { type: integer }
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/Signal" }
+        next_token: { type: string, nullable: true }
+        has_next: { type: boolean }
+
+    SignalStatsResponse:
+      type: object
+      properties:
+        date_from: { type: string }
+        date_to: { type: string }
+        counts:
+          type: object
+          additionalProperties: { type: integer }
+        total: { type: integer }
+
+    LogEvent:
+      type: object
+      description: An audit/CloudTrail log row. Event-derived; only stable keys are enumerated.
+      additionalProperties: true
+      properties:
+        event_id: { type: string }
+        service: { type: string }
+        event_name: { type: string }
+        timestamp: { type: string }
+
+    LogListResponse:
+      type: object
+      properties:
+        query: { type: object, additionalProperties: true }
+        order: { type: string, enum: [asc, desc] }
+        page_size: { type: integer }
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/LogEvent" }
+        next_token: { type: string, nullable: true }
+        has_next: { type: boolean }
+
+    Settings:
+      type: object
+      description: A settings document. Secret-shaped fields are returned as ***REDACTED***.
+      additionalProperties: true
+      properties:
+        setting_id: { type: string }
+        notifications_enabled: { type: boolean }
+        channels:
+          type: object
+          additionalProperties: true
+        guardduty_notify:
+          type: object
+          additionalProperties: true
+        updated_by: { type: string }
+        timestamp: { type: string }
+        rev: { type: integer }
+      required: [setting_id]
+
+    SettingsWrite:
+      type: object
+      description: Body for POST /settings or PUT /settings/{setting_id}.
+      allOf:
+        - $ref: "#/components/schemas/Settings"
+      properties:
+        expected_rev:
+          type: integer
+          description: Optional optimistic-concurrency guard (409 on mismatch). Never persisted.
+
+    IRRole:
+      type: object
+      description: Maps an AWS account to the IAM role the responder assumes there.
+      additionalProperties: true
+      properties:
+        aws_account_id:
+          type: string
+          pattern: "^[0-9]{12}$"
+        role_arn:
+          type: string
+          description: >-
+            arn:aws:iam::<account>:role/<name>. The embedded account must equal
+            aws_account_id (cross-account mappings are refused).
+        enabled: { type: boolean }
+        updated_by: { type: string }
+        updated_at: { type: string }
+      required: [aws_account_id, role_arn]
+
+    IRRoleListResponse:
+      type: object
+      properties:
+        page_size: { type: integer }
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/IRRole" }
+        next_token: { type: string, nullable: true }
+        has_next: { type: boolean }
+
+    IRAction:
+      type: object
+      description: An executed, rollback-eligible IR action.
+      additionalProperties: true
+      properties:
+        detection_id: { type: string }
+        response_module: { type: string }
+        rollback_supported: { type: boolean }
+        rollback_status:
+          type: string
+          enum: [pending, succeeded, failed]
+          description: Absent until a rollback has been attempted.
+        rollback_error: { type: string, nullable: true }
+        rollback_updated_at: { type: string }
+        rolled_back:
+          type: boolean
+          description: Mirrors rollback_status == "succeeded" (back-compat).
+        rollback_requested_by:
+          type: string
+          description: Server-set from the authenticated API-key id.
+        rollback_reason: { type: string }
+      required: [detection_id]
+
+    IRActionListResponse:
+      type: object
+      properties:
+        page_size: { type: integer }
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/IRAction" }
+        next_token: { type: string, nullable: true }
+        has_next: { type: boolean }
+
+    RollbackRequest:
+      type: object
+      properties:
+        reason:
+          type: string
+          description: Optional human-readable justification, recorded on the action's audit trail.
+        interface:
+          type: string
+          description: Optional caller-interface tag (e.g. "mcp").
+
+  responses:
+    BadRequest:
+      description: Validation error (message is operator-readable)
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    NotFound:
+      description: Resource not found
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Conflict:
+      description: Conflict (e.g. optimistic-concurrency rev mismatch, or already exists)
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Forbidden:
+      description: API key missing the required scope
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+
+  parameters:
+    Order:
+      in: query
+      name: order
+      schema: { type: string, enum: [asc, desc], default: desc }
+    PageSize:
+      in: query
+      name: page_size
+      schema: { type: integer, minimum: 1, maximum: 200, default: 20 }
+    NextToken:
+      in: query
+      name: next_token
+      schema: { type: string }
+      description: Opaque cursor from the previous response.
 
 paths:
+  /integrations:
+    get:
+      summary: Parser catalog and managed bucket
+      tags:
+      - Integrations
+      responses:
+        '200':
+          description: Success
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ParserCatalog'
+        '400':
+          description: Invalid request or parser output
+        '403':
+          description: Missing API key scope
+        '404':
+          description: Not found
+        '409':
+          description: Revision conflict
+        '502':
+          description: Parser invocation or registration failed
+  /integrations/{integration_id}:
+    get:
+      summary: Read integration binding
+      tags:
+      - Integrations
+      responses:
+        '200':
+          description: Success
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/IntegrationBinding'
+        '400':
+          description: Invalid request or parser output
+        '403':
+          description: Missing API key scope
+        '404':
+          description: Not found
+        '409':
+          description: Revision conflict
+        '502':
+          description: Parser invocation or registration failed
+      parameters:
+      - name: integration_id
+        in: path
+        required: true
+        schema:
+          type: string
+    put:
+      summary: Create or replace binding using expected_rev; settings scope
+      tags:
+      - Integrations
+      responses:
+        '200':
+          description: Success
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/IntegrationBinding'
+        '400':
+          description: Invalid request or parser output
+        '403':
+          description: Missing API key scope
+        '404':
+          description: Not found
+        '409':
+          description: Revision conflict
+        '502':
+          description: Parser invocation or registration failed
+      parameters:
+      - name: integration_id
+        in: path
+        required: true
+        schema:
+          type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/IntegrationConfiguration'
+  /integrations/{integration_id}/preview:
+    post:
+      summary: Execute parser on sample without delivery; settings scope
+      tags:
+      - Integrations
+      responses:
+        '200':
+          description: Success
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ParserPreview'
+        '400':
+          description: Invalid request or parser output
+        '403':
+          description: Missing API key scope
+        '404':
+          description: Not found
+        '409':
+          description: Revision conflict
+        '502':
+          description: Parser invocation or registration failed
+      parameters:
+      - name: integration_id
+        in: path
+        required: true
+        schema:
+          type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+              - config
+              - record
+              properties:
+                config:
+                  $ref: '#/components/schemas/IntegrationConfiguration'
+                record:
+                  oneOf:
+                  - type: object
+                    additionalProperties: true
+                  - type: string
+  /integrations/{integration_id}/jobs:
+    get:
+      summary: List ingestion jobs with cursor pagination
+      tags:
+      - Integrations
+      responses:
+        '200':
+          description: Success
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/IngestionJobs'
+        '400':
+          description: Invalid request or parser output
+        '403':
+          description: Missing API key scope
+        '404':
+          description: Not found
+        '409':
+          description: Revision conflict
+        '502':
+          description: Parser invocation or registration failed
+      parameters:
+      - name: integration_id
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: next_token
+        in: query
+        schema:
+          type: string
+  /integrations/{integration_id}/jobs/{job_id}:
+    get:
+      summary: Job status and per-record diagnostics
+      tags:
+      - Integrations
+      responses:
+        '200':
+          description: Success
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/IngestionJob'
+        '400':
+          description: Invalid request or parser output
+        '403':
+          description: Missing API key scope
+        '404':
+          description: Not found
+        '409':
+          description: Revision conflict
+        '502':
+          description: Parser invocation or registration failed
+      parameters:
+      - name: integration_id
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: job_id
+        in: path
+        required: true
+        schema:
+          type: string
+  /integrations/{integration_id}/jobs/{job_id}/replay:
+    post:
+      summary: Analysis-only replay using current binding/rules; settings scope
+      tags:
+      - Integrations
+      responses:
+        '202':
+          description: Success
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/IngestionReplay'
+        '400':
+          description: Invalid request or parser output
+        '403':
+          description: Missing API key scope
+        '404':
+          description: Not found
+        '409':
+          description: Revision conflict
+        '502':
+          description: Parser invocation or registration failed
+      parameters:
+      - name: integration_id
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: job_id
+        in: path
+        required: true
+        schema:
+          type: string
   /status:
     get:
       summary: Health check
+      security: []
       responses:
         "200":
           description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string }
+                  service: { type: string }
+                  time: { type: string }
 
   /help:
     get:
-      summary: API help
+      summary: API help (endpoints, query params, condition field roots)
+      security: []
       responses:
         "200":
           description: OK
-
-  /swagger.json:
-    get:
-      summary: OpenAPI JSON spec
-      responses:
-        "200":
-          description: OK
-
-  /docs:
-    get:
-      summary: Swagger UI
-      responses:
-        "200":
-          description: OK
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
 
   /signals:
     get:
-      summary: List signals (table or GSI)
-      description: Provide exactly one of severity, event_id, category.
+      summary: List signals (base table or GSI)
+      description: Provide exactly one of severity, event_id, category, integration_id.
       parameters:
+        - { in: query, name: integration_id, schema: { type: string } }
         - in: query
           name: severity
           schema:
             type: string
-            enum: [CRITICAL, HIGH, MEDIUM, LOW, INFO, INFORMATIONAL]
-        - in: query
-          name: event_id
-          schema: { type: string }
-        - in: query
-          name: category
-          schema: { type: string }
+            enum: [CRITICAL, HIGH, MEDIUM, LOW, INFO, INFORMATIONAL, UNKNOWN]
+        - { in: query, name: event_id, schema: { type: string } }
+        - { in: query, name: category, schema: { type: string } }
         - in: query
           name: date_from
-          description: "Only applies to the severity selector. YYYY-MM-DD, UTC, inclusive. Defaults to 6 days before date_to/today."
+          description: "Severity selector only. YYYY-MM-DD, UTC, inclusive. Defaults to 6 days before date_to."
           schema: { type: string, format: date }
         - in: query
           name: date_to
-          description: "Only applies to the severity selector. YYYY-MM-DD, UTC, inclusive. Defaults to today."
+          description: "Severity selector only. YYYY-MM-DD, UTC, inclusive. Defaults to today."
           schema: { type: string, format: date }
-        - in: query
-          name: order
-          schema: { type: string, enum: [asc, desc], default: desc }
-        - in: query
-          name: page_size
-          schema: { type: integer, minimum: 1, maximum: 200, default: 20 }
-        - in: query
-          name: next_token
-          schema: { type: string }
+        - { $ref: "#/components/parameters/Order" }
+        - { $ref: "#/components/parameters/PageSize" }
+        - { $ref: "#/components/parameters/NextToken" }
       responses:
         "200":
           description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SignalListResponse" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+
+  /signals/stats:
+    get:
+      summary: Signal counts by severity for a date range
+      parameters:
+        - { in: query, name: date_from, schema: { type: string, format: date } }
+        - { in: query, name: date_to, schema: { type: string, format: date } }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SignalStatsResponse" }
+        "400": { $ref: "#/components/responses/BadRequest" }
 
   /logs:
     get:
-      summary: List logs (table or GSI)
+      summary: List logs (base table or GSI)
       description: Provide exactly one of service, event_id, event_name.
       parameters:
-        - in: query
-          name: service
-          schema: { type: string }
-        - in: query
-          name: event_id
-          schema: { type: string }
-        - in: query
-          name: event_name
-          schema: { type: string }
+        - { in: query, name: service, schema: { type: string } }
+        - { in: query, name: event_id, schema: { type: string } }
+        - { in: query, name: event_name, schema: { type: string } }
         - in: query
           name: date_from
-          description: "Only applies to the service selector. YYYY-MM-DD, UTC, inclusive. Defaults to 6 days before date_to/today."
+          description: "Service selector only. YYYY-MM-DD, UTC, inclusive."
           schema: { type: string, format: date }
         - in: query
           name: date_to
-          description: "Only applies to the service selector. YYYY-MM-DD, UTC, inclusive. Defaults to today."
+          description: "Service selector only. YYYY-MM-DD, UTC, inclusive."
           schema: { type: string, format: date }
-        - in: query
-          name: order
-          schema: { type: string, enum: [asc, desc], default: desc }
-        - in: query
-          name: page_size
-          schema: { type: integer, minimum: 1, maximum: 200, default: 20 }
-        - in: query
-          name: next_token
-          schema: { type: string }
+        - { $ref: "#/components/parameters/Order" }
+        - { $ref: "#/components/parameters/PageSize" }
+        - { $ref: "#/components/parameters/NextToken" }
       responses:
         "200":
           description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/LogListResponse" }
+        "400": { $ref: "#/components/responses/BadRequest" }
 
   /rules:
     get:
@@ -128,23 +857,273 @@ paths:
       parameters:
         - in: query
           name: rule_kind
-          schema: { type: string, enum: [signal, correlation] }
-        - in: query
-          name: order
-          schema: { type: string, enum: [asc, desc], default: desc }
-        - in: query
-          name: page_size
-          schema: { type: integer, minimum: 1, maximum: 200, default: 20 }
-        - in: query
-          name: next_token
-          schema: { type: string }
+          description: Omit to merge signal+correlation. Pass list explicitly for detection lists.
+          schema: { type: string, enum: [signal, correlation, list] }
+        - { $ref: "#/components/parameters/Order" }
+        - { $ref: "#/components/parameters/PageSize" }
+        - { $ref: "#/components/parameters/NextToken" }
       responses:
         "200":
           description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/RuleListResponse" }
+    post:
+      summary: Create a rule (conditional -- 409 if it already exists)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/RuleWrite" }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Rule" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/Conflict" }
+
+  /rules/{rule_id}:
+    parameters:
+      - { in: path, name: rule_id, required: true, schema: { type: string } }
+    get:
+      summary: Get a rule
+      parameters:
+        - in: query
+          name: rule_kind
+          required: true
+          schema: { type: string, enum: [signal, correlation, list] }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/Rule"
+                  - $ref: "#/components/schemas/ListRule"
+        "404": { $ref: "#/components/responses/NotFound" }
+    put:
+      summary: Upsert a rule (optional optimistic concurrency via expected_rev)
+      parameters:
+        - in: query
+          name: rule_kind
+          required: true
+          schema: { type: string, enum: [signal, correlation, list] }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/RuleWrite" }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Rule" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/Conflict" }
+    delete:
+      summary: Delete a rule
+      parameters:
+        - in: query
+          name: rule_kind
+          required: true
+          schema: { type: string, enum: [signal, correlation, list] }
+      responses:
+        "200":
+          description: Deleted
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        "404": { $ref: "#/components/responses/NotFound" }
 
   /settings:
     get:
-      summary: Get global settings
+      summary: Get global settings (secrets masked)
       responses:
         "200":
           description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Settings" }
+    post:
+      summary: Create the global settings document
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/SettingsWrite" }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Settings" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/Conflict" }
+
+  /settings/{setting_id}:
+    parameters:
+      - { in: path, name: setting_id, required: true, schema: { type: string } }
+    get:
+      summary: Get a settings document by id
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Settings" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    put:
+      summary: Upsert a settings document (optional optimistic concurrency)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/SettingsWrite" }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Settings" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/Conflict" }
+    delete:
+      summary: Delete a settings document
+      responses:
+        "200":
+          description: Deleted
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /ir-roles:
+    get:
+      summary: List IR-role mappings
+      parameters:
+        - { $ref: "#/components/parameters/PageSize" }
+        - { $ref: "#/components/parameters/NextToken" }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/IRRoleListResponse" }
+    post:
+      summary: Create an IR-role mapping (conditional -- 409 if it exists)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/IRRole" }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/IRRole" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/Conflict" }
+
+  /ir-roles/{aws_account_id}:
+    parameters:
+      - in: path
+        name: aws_account_id
+        required: true
+        schema: { type: string, pattern: "^[0-9]{12}$" }
+    get:
+      summary: Get the IR-role mapping for an account
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/IRRole" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    put:
+      summary: Upsert the IR-role mapping for an account
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/IRRole" }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/IRRole" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    delete:
+      summary: Delete the IR-role mapping for an account
+      responses:
+        "200":
+          description: Deleted
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /ir-actions:
+    get:
+      summary: List executed, rollback-eligible IR actions
+      parameters:
+        - { $ref: "#/components/parameters/PageSize" }
+        - { $ref: "#/components/parameters/NextToken" }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/IRActionListResponse" }
+
+  /ir-actions/{detection_id}:
+    parameters:
+      - { in: path, name: detection_id, required: true, schema: { type: string } }
+    get:
+      summary: Get a specific executed IR action
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/IRAction" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /ir-actions/{detection_id}/rollback:
+    parameters:
+      - { in: path, name: detection_id, required: true, schema: { type: string } }
+    post:
+      summary: Enqueue the rollback of an IR action (async; returns 202)
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/RollbackRequest" }
+      responses:
+        "202":
+          description: Rollback enqueued (poll GET /ir-actions/{detection_id} for the outcome)
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        "400":
+          description: Rollback not supported for this action
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409":
+          description: A rollback for this action is already pending
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }

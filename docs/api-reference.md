@@ -29,8 +29,8 @@ A key presenting a scope it doesn't have gets a `403` with `{"message": "API key
 |---|---|
 | Status | `opencdr_status` |
 | Rules | `opencdr_rules_list/get/upsert/delete` |
-| Lists | `opencdr_lists_list/show/create/add/remove/delete` |
-| Signals / Logs | `opencdr_signals_list`, `opencdr_signals_stats`, `opencdr_logs_list` |
+| Lists | `opencdr_lists_list/show/replace/add/remove/delete` |
+| Signals / Logs | `opencdr_signals_search`, `opencdr_signals_stats`, `opencdr_logs_search` |
 | Settings | `opencdr_settings_get/set/delete` |
 | IR roles | `opencdr_ir_roles_list/get/upsert/delete` |
 | IR actions | `opencdr_ir_actions_list/get/rollback` |
@@ -125,6 +125,12 @@ curl -X POST "$OPENCDR_API_URL/rules" -H "x-api-key: $OPENCDR_API_KEY" \
 ```
 
 See [Detection Rules](detection-rules.md) for the full rule schema.
+
+#### Optimistic concurrency & audit attribution
+
+Rule and settings writes are read-modify-write from clients (edit locally, `PUT` the whole item), so two writers can clobber each other. To make that safe, every stored rule/settings document carries a monotonic integer `rev`, and a `PUT` may include an `expected_rev` field: the write is then **conditional** on the stored `rev` still equalling it and returns `409` on a mismatch instead of silently overwriting a concurrent change (the item is stored with `rev = expected_rev + 1`). Omit `expected_rev` for an unconditional upsert (the previous behavior — used by bulk `load_rules.sh` and deliberate replaces). The OpenCDR MCP server's `opencdr_lists_add`/`opencdr_lists_remove`/`opencdr_settings_set` set `expected_rev` automatically and retry on `409` (bounded compare-and-set, not a lock).
+
+Every mutation also stamps `updated_by` from the **server-authenticated API-key id**, never from the request body — a client (or LLM) cannot forge who made a change. A body-supplied `updated_by` is discarded. `POST .../rollback` records the same server-side actor plus an optional `reason` and `interface` tag on the action's audit fields.
 
 ### Settings
 

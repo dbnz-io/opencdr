@@ -17,6 +17,7 @@ from dredge.auth import AwsAuthConfig
 from dredge.aws_ir.models import OperationResult
 
 from ..infra.aws_handler import ttl_expires_at
+from ..infra.delivery_state import AlreadyDelivered, DeliveryBusy, DeliveryState, delivery_id
 from ..infra.logger import Logger
 from ..infra.metrics import emit_metric
 from ..infra.partition_keys import day_bucket_key
@@ -281,6 +282,14 @@ def _process_record(
     # If the event is wrapped, unwrap it:
     detection_event = payload.get("detection_event", payload)
 
+    # Only AWS-native sources may reach the AWS response executor. Correlation
+    # alerts inherit the same restriction from their contributing primary signal.
+    primary = detection_event.get("primary_signal") or {}
+    if (detection_event.get("source") in {"falco", "custom"}
+            or detection_event.get("integration_id") or primary.get("source") in {"falco", "custom"}):
+        logger.warning(event_name="IR_UNSUPPORTED_SOURCE", message="Runtime/custom source is not eligible for AWS response")
+        return
+
     response_module = detection_event.get("response_module")
     detection_id = detection_event.get("detection_id")
     rule_id = detection_event.get("rule_id")
@@ -435,7 +444,22 @@ def _process_record(
 
     # Execute the IR action using dredge
     try:
-        result = handler(dredge, detection_event)
+        # Reserve before the external action. An uncertain outcome is never
+        # replayed automatically, even when the publisher sends a duplicate.
+        with DeliveryState().delivery(delivery_id(record, detection_event),
+                                      "response:" + response_module, replay=False):
+            result = handler(dredge, detection_event)
+    except AlreadyDelivered:
+        return
+    except DeliveryBusy:
+        logger.error(
+            event_name="IR_ACTION_REPLAY_BLOCKED",
+            event_type="ERROR",
+            message="Action is already claimed; inspect its outcome before any manual replay",
+            details={"delivery_id": delivery_id(record, detection_event),
+                     "detection_id": detection_id, "response_module": response_module},
+        )
+        return
     except Exception as e:
         logger.error(
             event_name="IR_ACTION_EXCEPTION",
@@ -554,6 +578,7 @@ def _notify_remediation_success(
         _outbox_table.put_item(
             Item={
                 "outbox_id": str(uuid.uuid4()),
+                "updated_at": datetime.now(UTC).isoformat(),
                 "timestamp": datetime.now(UTC).isoformat(),
                 "status": "PENDING",
                 "payload": json.dumps(payload),

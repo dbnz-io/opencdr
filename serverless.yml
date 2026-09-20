@@ -3,6 +3,7 @@ frameworkVersion: "4"
 
 params:
   default:
+    customParserArns: ""  # comma-separated immutable Lambda version ARNs; empty disables executable parsers
     alarmEmail: ""
     alertEmail: ""  # email for security detection alerts; can match alarmEmail
     monthlyBudgetUsd: "50"  # threshold for the AWS Budgets cost alert -- override with --param="monthlyBudgetUsd=<amount>"
@@ -72,6 +73,13 @@ provider:
       - opencdrPlan:
           - ${self:service}-${self:provider.stage}-api-key
           - ${self:service}-${self:provider.stage}-api-key-read-rules-settings-ir_roles-ir_actions
+          # Discriminated key for the DBNZ control plane. Carries the same five
+          # scopes as the bare key (the `console` token is ignored by
+          # _scopes_from_key_name's `tokens & ALL_SCOPES`), but is a separate,
+          # independently revocable and attributable credential. Issue this to
+          # the console and retire the bare `-api-key` above (see its
+          # deprecation warning in api.py) -- tracked for a future major.
+          - ${self:service}-${self:provider.stage}-api-key-console-read-rules-settings-ir_roles-ir_actions
     usagePlan:
       - opencdrPlan:
           quota:
@@ -83,6 +91,9 @@ provider:
 
   environment:
     STAGE: "${self:provider.stage}"
+    INGESTION_TABLE_NAME: "${self:service}-${self:provider.stage}-ingestion"
+    INGESTION_BUCKET: !Sub "${self:service}-${self:provider.stage}-ingestion-${AWS::AccountId}-${AWS::Region}"
+    CUSTOM_PARSER_ARNS: "${param:customParserArns}"
 
     # Tables
     # SIGNALS_TABLE_NAME/LOGS_TABLE_NAME point at the -v2, composite-key
@@ -119,6 +130,20 @@ provider:
 
 
 functions:
+  s3Ingestion:
+    handler: src.handlers.s3_ingestion.lambda_handler
+    timeout: 120
+    memorySize: 512
+    role: !GetAtt IngestionWorkerRole.Arn
+    environment:
+      SIGNALS_WRITE_QUEUE_URL: !Ref SignalsWriteQueue
+    events:
+      - sqs:
+          arn: !GetAtt IngestionQueue.Arn
+          batchSize: 1
+          maximumConcurrency: 2
+          functionResponseType: ReportBatchItemFailures
+
 
   # -------------------------
   # Processor → parses + detects → writes signals
@@ -229,6 +254,11 @@ functions:
       SIGNALS_TABLE_NAME: "${self:service}-${self:provider.stage}-signals-table-v2"
     iamRoleStatements:
       - Effect: Allow
+        Action: [dynamodb:PutItem]
+        Resource:
+          - !GetAtt alerts.Arn
+          - !GetAtt OutboxTable.Arn
+      - Effect: Allow
         Action:
           - dynamodb:PutItem
         Resource:
@@ -337,6 +367,7 @@ functions:
     timeout: 30
     memorySize: 256
     environment:
+      SIGNALS_WRITE_QUEUE_URL: !Ref SignalsWriteQueue
       SERVICE_NAME: "OPENCDR-PUBLISHER"
       LAMBDA_NAME: "${self:service}-${self:provider.stage}-publisher"
       OUTBOX_TABLE_NAME: "${self:service}-${self:provider.stage}-outbox-table"
@@ -346,6 +377,16 @@ functions:
       RESPONSES_QUEUE_URL:
         Ref: ResponsesQueue
     iamRoleStatements:
+      - Effect: Allow
+        Action:
+          - dynamodb:Query
+        Resource:
+          - arn:aws:dynamodb:${self:provider.region}:*:table/${self:service}-${self:provider.stage}-outbox-table/index/gsi_outbox_status_updated_at
+      - Effect: Allow
+        Action:
+          - sqs:SendMessage
+        Resource:
+          - !GetAtt SignalsWriteQueue.Arn
       - Effect: Allow
         Action:
           - dynamodb:GetItem
@@ -380,6 +421,10 @@ functions:
           - xray:PutTelemetryRecords
         Resource: "*"
     events:
+      - schedule:
+          rate: rate(1 minute)
+          input:
+            recover_outbox: true
       - stream:
           type: dynamodb
           arn:
@@ -399,12 +444,22 @@ functions:
   # -------------------------
   notifier:
     handler: src.handlers.notifier.lambda_handler
+    timeout: 30
     environment:
+      DELIVERY_STATE_TABLE_NAME: !Ref DeliveryStateTable
       SERVICE_NAME: "OPENCDR-NOTIFIER"
       LAMBDA_NAME: "${self:service}-${self:provider.stage}-notifier"
       LOGS_TABLE_NAME: "${self:service}-${self:provider.stage}-logs-table-v2"
       ALERTS_SNS_TOPIC_ARN: !Ref AlertsSnsTopic
     iamRoleStatements:
+      - Effect: Allow
+        Action:
+          - dynamodb:GetItem
+          - dynamodb:PutItem
+          - dynamodb:UpdateItem
+          - dynamodb:DeleteItem
+        Resource:
+          - !GetAtt DeliveryStateTable.Arn
       - Effect: Allow
         Action:
           - dynamodb:GetItem
@@ -453,7 +508,8 @@ functions:
       - sqs:
           arn:
             Fn::GetAtt: [NotificationsQueue, Arn]
-          batchSize: 10
+          batchSize: 1
+          functionResponseType: ReportBatchItemFailures
 
   # -------------------------
   # Responder → automated incident response
@@ -463,6 +519,7 @@ functions:
     timeout: 30
     memorySize: 512
     environment:
+      DELIVERY_STATE_TABLE_NAME: !Ref DeliveryStateTable
       SERVICE_NAME: "OPENCDR-RESPONDER"
       LAMBDA_NAME: "${self:service}-${self:provider.stage}-incident-response"
       # v2 -- _recent_action_count()'s rate-limit circuit breaker queries
@@ -478,6 +535,13 @@ functions:
       RESPONDER_RATE_LIMIT_MAX_ACTIONS: ${env:RESPONDER_RATE_LIMIT_MAX_ACTIONS, '20'}
       IR_ACTIONS_TABLE_NAME: "${self:service}-${self:provider.stage}-ir-actions-table"
     iamRoleStatements:
+      - Effect: Allow
+        Action:
+          - dynamodb:GetItem
+          - dynamodb:PutItem
+          - dynamodb:UpdateItem
+        Resource:
+          - !GetAtt DeliveryStateTable.Arn
       # Responder holds no destructive IAM/EC2/S3 permissions of its own --
       # every response module (see dredge.aws_ir.response, a pinned
       # dependency -- requirements.txt) acts
@@ -614,12 +678,19 @@ functions:
     # stays under API Gateway's 29s integration timeout.
     timeout: 25
     environment:
+      INGESTION_QUEUE_URL: !Ref IngestionQueue
       SERVICE_NAME: "OPENCDR-API"
       LAMBDA_NAME: "${self:service}-${self:provider.stage}-api"
       IR_ACTIONS_TABLE_NAME: "${self:service}-${self:provider.stage}-ir-actions-table"
       IR_ROLLBACK_QUEUE_URL:
         Ref: IrRollbackQueue
     iamRoleStatements:
+      - Effect: Allow
+        Action: sqs:SendMessage
+        Resource: !GetAtt IngestionQueue.Arn
+      - Effect: Allow
+        Action: [dynamodb:GetItem, dynamodb:PutItem, dynamodb:Query]
+        Resource: !GetAtt IngestionTable.Arn
       - Effect: Allow
         Action:
           - dynamodb:PutItem
@@ -678,6 +749,41 @@ functions:
         Resource:
           - arn:aws:apigateway:${self:provider.region}::/apikeys/*
     events:
+      - http:
+          path: integrations/{integration_id}/jobs/{job_id}/replay
+          method: post
+          private: true
+          cors: true
+      - http:
+          path: integrations
+          method: get
+          private: true
+          cors: true
+      - http:
+          path: integrations/{integration_id}
+          method: get
+          private: true
+          cors: true
+      - http:
+          path: integrations/{integration_id}
+          method: put
+          private: true
+          cors: true
+      - http:
+          path: integrations/{integration_id}/preview
+          method: post
+          private: true
+          cors: true
+      - http:
+          path: integrations/{integration_id}/jobs
+          method: get
+          private: true
+          cors: true
+      - http:
+          path: integrations/{integration_id}/jobs/{job_id}
+          method: get
+          private: true
+          cors: true
       - http:
           path: help
           method: get
@@ -925,6 +1031,7 @@ functions:
 
 resources:
   Conditions:
+    HasCustomParsers: !Not [!Equals ["${param:customParserArns}", ""]]
     HasAlarmEmail: !Not
       - !Equals
         - "${param:alarmEmail}"
@@ -943,6 +1050,174 @@ resources:
         - ""
 
   Resources:
+
+    IngestionTable:
+      Type: AWS::DynamoDB::Table
+      DeletionPolicy: Retain
+      UpdateReplacePolicy: Retain
+      Properties:
+        TableName: ${self:service}-${self:provider.stage}-ingestion
+        BillingMode: PAY_PER_REQUEST
+        AttributeDefinitions:
+          - {AttributeName: pk, AttributeType: S}
+          - {AttributeName: sk, AttributeType: S}
+        KeySchema:
+          - {AttributeName: pk, KeyType: HASH}
+          - {AttributeName: sk, KeyType: RANGE}
+        SSESpecification: {SSEEnabled: true}
+        PointInTimeRecoverySpecification: {PointInTimeRecoveryEnabled: true}
+        TimeToLiveSpecification: {AttributeName: expires_at, Enabled: true}
+    IngestionDLQ:
+      Type: AWS::SQS::Queue
+      Properties:
+        MessageRetentionPeriod: 1209600
+        SqsManagedSseEnabled: true
+    IngestionQueue:
+      Type: AWS::SQS::Queue
+      Properties:
+        VisibilityTimeout: 720
+        MessageRetentionPeriod: 1209600
+        SqsManagedSseEnabled: true
+        RedrivePolicy:
+          deadLetterTargetArn: !GetAtt IngestionDLQ.Arn
+          maxReceiveCount: 10
+    IngestionQueuePolicy:
+      Type: AWS::SQS::QueuePolicy
+      Properties:
+        Queues: [!Ref IngestionQueue]
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Principal: {Service: s3.amazonaws.com}
+              Action: sqs:SendMessage
+              Resource: !GetAtt IngestionQueue.Arn
+              Condition:
+                StringEquals: {aws:SourceAccount: !Ref 'AWS::AccountId'}
+                ArnEquals:
+                  aws:SourceArn: !Sub 'arn:${AWS::Partition}:s3:::${self:service}-${self:provider.stage}-ingestion-${AWS::AccountId}-${AWS::Region}'
+    IngestionBucket:
+      Type: AWS::S3::Bucket
+      DependsOn: IngestionQueuePolicy
+      DeletionPolicy: Retain
+      UpdateReplacePolicy: Retain
+      Properties:
+        BucketName: !Sub '${self:service}-${self:provider.stage}-ingestion-${AWS::AccountId}-${AWS::Region}'
+        VersioningConfiguration: {Status: Enabled}
+        OwnershipControls:
+          Rules: [{ObjectOwnership: BucketOwnerEnforced}]
+        PublicAccessBlockConfiguration:
+          BlockPublicAcls: true
+          BlockPublicPolicy: true
+          IgnorePublicAcls: true
+          RestrictPublicBuckets: true
+        BucketEncryption:
+          ServerSideEncryptionConfiguration:
+            - ServerSideEncryptionByDefault: {SSEAlgorithm: AES256}
+        LifecycleConfiguration:
+          Rules:
+            - Id: retain-retry-window
+              Status: Enabled
+              ExpirationInDays: 90
+              NoncurrentVersionExpiration: {NoncurrentDays: 90}
+              AbortIncompleteMultipartUpload: {DaysAfterInitiation: 7}
+        NotificationConfiguration:
+          QueueConfigurations:
+            - Event: s3:ObjectCreated:*
+              Queue: !GetAtt IngestionQueue.Arn
+              Filter:
+                S3Key:
+                  Rules: [{Name: prefix, Value: 'ingest/'}]
+    IngestionBucketPolicy:
+      Type: AWS::S3::BucketPolicy
+      Properties:
+        Bucket: !Ref IngestionBucket
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+            - Effect: Deny
+              Principal: '*'
+              Action: 's3:*'
+              Resource: [!GetAtt IngestionBucket.Arn, !Sub '${IngestionBucket.Arn}/*']
+              Condition: {Bool: {aws:SecureTransport: false}}
+    IngestionWorkerRole:
+      Type: AWS::IAM::Role
+      Properties:
+        AssumeRolePolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Principal: {Service: lambda.amazonaws.com}
+              Action: sts:AssumeRole
+        Policies:
+          - PolicyName: ingestion
+            PolicyDocument:
+              Version: '2012-10-17'
+              Statement:
+                - Effect: Allow
+                  Action: [logs:CreateLogGroup, logs:CreateLogStream, logs:PutLogEvents]
+                  Resource: !Sub 'arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/${self:service}-${self:provider.stage}-s3Ingestion:*'
+                - Effect: Allow
+                  Action: [xray:PutTraceSegments, xray:PutTelemetryRecords]
+                  Resource: '*'
+                - Effect: Allow
+                  Action: [s3:GetObjectVersion]
+                  Resource: !Sub '${IngestionBucket.Arn}/ingest/*'
+                - Effect: Allow
+                  Action: [sqs:ReceiveMessage, sqs:DeleteMessage, sqs:GetQueueAttributes]
+                  Resource: !GetAtt IngestionQueue.Arn
+                - Effect: Allow
+                  Action: [sqs:SendMessage]
+                  Resource: !GetAtt SignalsWriteQueue.Arn
+                - Effect: Allow
+                  Action: [dynamodb:GetItem, dynamodb:PutItem, dynamodb:UpdateItem]
+                  Resource: !GetAtt IngestionTable.Arn
+                - Effect: Allow
+                  Action: [dynamodb:Query]
+                  Resource: !Sub 'arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${self:service}-${self:provider.stage}-detection-rules-table'
+                - Effect: Allow
+                  Action: [dynamodb:PutItem]
+                  Resource: !Sub 'arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${self:service}-${self:provider.stage}-logs-table-v2'
+    CustomParserInvokePolicy:
+      Type: AWS::IAM::Policy
+      Condition: HasCustomParsers
+      Properties:
+        PolicyName: custom-parser-invoke
+        Roles: [!Ref IngestionWorkerRole, !Ref ApiIamRoleLambdaExecution]
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Action: lambda:InvokeFunction
+              Resource: !Split [',', '${param:customParserArns}']
+    IngestionDLQAlarm:
+      Type: AWS::CloudWatch::Alarm
+      Properties:
+        AlarmDescription: S3 ingestion retries exhausted; inspect and redrive after correcting the cause
+        Namespace: AWS/SQS
+        MetricName: ApproximateNumberOfMessagesVisible
+        Dimensions: [{Name: QueueName, Value: !GetAtt IngestionDLQ.QueueName}]
+        Statistic: Maximum
+        Period: 60
+        EvaluationPeriods: 1
+        Threshold: 0
+        ComparisonOperator: GreaterThanThreshold
+        TreatMissingData: notBreaching
+        AlarmActions: [!Ref AlarmsSnsTopic]
+    IngestionLagAlarm:
+      Type: AWS::CloudWatch::Alarm
+      Properties:
+        AlarmDescription: S3 ingestion queue is over five minutes behind
+        Namespace: AWS/SQS
+        MetricName: ApproximateAgeOfOldestMessage
+        Dimensions: [{Name: QueueName, Value: !GetAtt IngestionQueue.QueueName}]
+        Statistic: Maximum
+        Period: 60
+        EvaluationPeriods: 5
+        Threshold: 300
+        ComparisonOperator: GreaterThanThreshold
+        TreatMissingData: notBreaching
+        AlarmActions: [!Ref AlarmsSnsTopic]
 
     # -------------------------
     # ALERTS TABLE (correlation outputs)
@@ -976,6 +1251,26 @@ resources:
     # -------------------------
     # OUTBOX TABLE (publisher pattern) + stream
     # -------------------------
+    DeliveryStateTable:
+      Type: AWS::DynamoDB::Table
+      Properties:
+        TableName: ${self:service}-${self:provider.stage}-delivery-state-table
+        BillingMode: PAY_PER_REQUEST
+        AttributeDefinitions:
+          - AttributeName: delivery_key
+            AttributeType: S
+        KeySchema:
+          - AttributeName: delivery_key
+            KeyType: HASH
+        TimeToLiveSpecification:
+          AttributeName: expires_at
+          Enabled: true
+        Tags:
+          - Key: Project
+            Value: opencdr
+          - Key: Stage
+            Value: ${self:provider.stage}
+
     OutboxTable:
       Type: AWS::DynamoDB::Table
       Properties:
@@ -989,6 +1284,19 @@ resources:
         AttributeDefinitions:
           - AttributeName: outbox_id
             AttributeType: S
+          - AttributeName: status
+            AttributeType: S
+          - AttributeName: updated_at
+            AttributeType: S
+        GlobalSecondaryIndexes:
+          - IndexName: gsi_outbox_status_updated_at
+            KeySchema:
+              - AttributeName: status
+                KeyType: HASH
+              - AttributeName: updated_at
+                KeyType: RANGE
+            Projection:
+              ProjectionType: ALL
         KeySchema:
           - AttributeName: outbox_id
             KeyType: HASH
@@ -1035,6 +1343,8 @@ resources:
           - Key: Stage
             Value: ${self:provider.stage}
         AttributeDefinitions:
+          - AttributeName: integration_id
+            AttributeType: S
           - AttributeName: severity_bucket
             AttributeType: S
           - AttributeName: timestamp
@@ -1051,6 +1361,11 @@ resources:
           - AttributeName: timestamp
             KeyType: RANGE
         GlobalSecondaryIndexes:
+          - IndexName: gsi_signal_integration
+            KeySchema:
+              - {AttributeName: integration_id, KeyType: HASH}
+              - {AttributeName: timestamp, KeyType: RANGE}
+            Projection: {ProjectionType: ALL}
           - IndexName: gsi_signal_event_id
             KeySchema:
               - AttributeName: event_id
@@ -1777,10 +2092,12 @@ resources:
       Type: AWS::SQS::Queue
       Properties:
         QueueName: ${self:service}-${self:provider.stage}-notifications-queue
+        # Six times the function timeout; also exceeds the 120s receipt lease.
+        VisibilityTimeout: 180
         RedrivePolicy:
           deadLetterTargetArn:
             Fn::GetAtt: [NotificationsQueueDLQ, Arn]
-          maxReceiveCount: 3
+          maxReceiveCount: 5
         Tags:
           - Key: Project
             Value: opencdr
@@ -2566,6 +2883,10 @@ resources:
               aws:PrincipalArn: !Sub "arn:aws:iam::*:role/${self:service}-${self:provider.stage}-account-forwarder-role"
 
   Outputs:
+    IngestionBucketName:
+      Value: !Ref IngestionBucket
+    IngestionWorkerRoleArn:
+      Value: !GetAtt IngestionWorkerRole.Arn
     AlarmsTopicArn:
       Description: "SNS topic ARN for CloudWatch alarms — subscribe to receive notifications"
       Value: !Ref AlarmsSnsTopic

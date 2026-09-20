@@ -13,6 +13,10 @@ import pytest
 os.environ.setdefault("LOGS_TABLE_NAME", "test-logs-table")
 os.environ.setdefault("AWS_DEFAULT_REGION", "us-east-1")
 
+# codeql[py/import-and-import-from] -- intentional, not redundant: the
+# module alias is for monkeypatching module-level state
+# (monkeypatch.setattr(notifier, ...)), the direct imports are for
+# readable call sites. Both point at the same cached module object.
 import src.handlers.notifier as notifier
 from src.handlers.notifier import _resolve_secret_refs, load_global_settings
 

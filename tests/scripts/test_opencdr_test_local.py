@@ -220,12 +220,17 @@ class TestListRuleSupport:
         assert "Rules : 1" in out
         assert "Lists: 1" in out
 
-    def test_malformed_rule_json_is_silently_skipped_not_fatal(self, isolated_dirs, capsys):
+    def test_malformed_rule_json_is_skipped_not_fatal_but_warned_about(self, isolated_dirs, capsys):
         rules_dir, events_dir = isolated_dirs
         _write_json(rules_dir, "001.json", _console_login_rule())
         (rules_dir / "broken.json").write_text("not valid json {{{")
         _write_json(events_dir, "001.json", CLOUDTRAIL_EVENT)
 
         # Should not raise on the broken file; still finds the one good rule.
+        # Previously skipped with zero trace -- now names the bad file, so
+        # "why did my rule count look low" is answerable from the output.
         opencdr.cmd_test_local(_make_args())
-        assert "Rules : 1" in capsys.readouterr().out
+        out = capsys.readouterr().out
+        assert "Rules : 1" in out
+        assert "broken.json" in out
+        assert "invalid JSON" in out

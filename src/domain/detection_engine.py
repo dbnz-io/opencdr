@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import logging
-import re
+import os
 import uuid
 from datetime import UTC, datetime
 from typing import Any
+
+import regex
 
 from .ocsf_min_parser import NormalizedEvent
 
@@ -13,6 +15,59 @@ from .ocsf_min_parser import NormalizedEvent
 # run_detection). Stdlib logging reaches CloudWatch automatically under
 # Lambda's default logging config without that coupling.
 _log = logging.getLogger(__name__)
+
+# ReDoS protection for rule-supplied `matches`/`not_matches` patterns.
+#
+# The processor evaluates every event against every enabled rule, so a single
+# catastrophic-backtracking pattern (e.g. authored by an attacker who wants a
+# customer blind) can stall detection account-wide. The `regex` module has a
+# more backtracking-resistant engine than stdlib `re` AND accepts a per-call
+# `timeout=`, which raises TimeoutError rather than hanging -- the hard bound.
+# A subject-length cap is cheap defense-in-depth. On timeout / oversized input
+# / invalid pattern the match is treated as "could not evaluate" -> the
+# condition is not satisfied (no spurious detection), mirroring the prior
+# re.error behaviour. Tunable per deployment without a code change.
+_REGEX_TIMEOUT_SECONDS = float(os.getenv("REGEX_EVAL_TIMEOUT_SECONDS", "1.0"))
+_REGEX_MAX_SUBJECT_LEN = int(os.getenv("REGEX_MAX_SUBJECT_LEN", "100000"))
+
+
+def _bounded_regex_search(pattern: str, subject: str, field, op) -> bool | None:
+    """Return True/False for a match, or None if the pattern could not be
+    safely evaluated (oversized subject, timeout, or invalid pattern).
+
+    Never raises and never hangs -- the timeout bounds wall-time regardless of
+    how pathological the pattern is.
+    """
+    if len(subject) > _REGEX_MAX_SUBJECT_LEN:
+        _log.warning(
+            "detection_engine: subject too long (%d > %d) for op=%s field=%r -- skipping regex",
+            len(subject),
+            _REGEX_MAX_SUBJECT_LEN,
+            op,
+            field,
+        )
+        return None
+    try:
+        return regex.search(pattern, subject, timeout=_REGEX_TIMEOUT_SECONDS) is not None
+    except TimeoutError:
+        _log.warning(
+            "detection_engine: regex timed out after %ss for op=%s field=%r value=%r -- "
+            "treating as no-match (possible ReDoS pattern)",
+            _REGEX_TIMEOUT_SECONDS,
+            op,
+            field,
+            pattern,
+        )
+        return None
+    except (regex.error, TypeError) as exc:
+        _log.warning(
+            "detection_engine: regex failed for op=%s field=%r value=%r: %s",
+            op,
+            field,
+            pattern,
+            exc,
+        )
+        return None
 
 # ----------------------------
 # Field Resolver
@@ -25,6 +80,15 @@ def get_field(obj: Any, path: str):
       actor.user_name
       network.source_ip
       api.operation
+
+    Security: dotted paths are resolved by dict lookup where the current value
+    is a dict, and by getattr otherwise. A real event field never starts with
+    an underscore, so a path segment like "__class__"/"__globals__" is not a
+    field lookup -- it is an attempt to walk out of the event object into
+    Python internals (turning "can author a rule" into a memory-read
+    primitive). Underscore-prefixed segments are refused on the getattr path
+    and the field resolves to None. Dict-key access is left untouched (it
+    cannot reach code objects), so arbitrary `raw_event.*` keys still work.
     """
 
     cur = obj
@@ -33,6 +97,14 @@ def get_field(obj: Any, path: str):
         if isinstance(cur, dict):
             cur = cur.get(part)
         else:
+            if part.startswith("_"):
+                _log.warning(
+                    "detection_engine: refusing disallowed field segment %r in path %r "
+                    "(underscore-prefixed attribute access is not permitted)",
+                    part,
+                    path,
+                )
+                return None
             cur = getattr(cur, part, None)
 
         if cur is None:
@@ -116,28 +188,12 @@ def evaluate_condition(
         return not observed.endswith(str(value))
 
     if op == "matches":
-        try:
-            return re.search(value, observed) is not None
-        except re.error as exc:
-            _log.warning(
-                "detection_engine: regex compile failed for op=matches field=%r value=%r: %s",
-                field,
-                value,
-                exc,
-            )
-            return False
+        # None (could-not-evaluate) -> condition not satisfied.
+        return _bounded_regex_search(value, observed, field, op) is True
 
     if op == "not_matches":
-        try:
-            return re.search(value, observed) is None
-        except re.error as exc:
-            _log.warning(
-                "detection_engine: regex compile failed for op=not_matches field=%r value=%r: %s",
-                field,
-                value,
-                exc,
-            )
-            return False
+        # None (could-not-evaluate) -> condition not satisfied (no spurious fire).
+        return _bounded_regex_search(value, observed, field, op) is False
 
     _log.warning(
         "detection_engine: unknown condition operator op=%r field=%r -- treating as no-match",
@@ -200,6 +256,17 @@ def build_detection_event(
         "gd_resource_type": normalized_event.gd_resource_type,
         "raw_event": normalized_event.raw_event,
     }
+
+    if normalized_event.integration_id:
+        from .ingestion import CONTEXT_FIELDS, identity
+        detection.update({key: getattr(normalized_event, key) for key in CONTEXT_FIELDS})
+        entity = normalized_event.container.get("id") or normalized_event.host.get("id") or normalized_event.host.get("name")
+        if entity:
+            detection["runtime_entity"] = normalized_event.integration_id + ":" + identity(normalized_event.host.get("name"), entity)
+        detection.update(integration_id=normalized_event.integration_id,
+                         provenance=normalized_event.provenance,
+                         event_time=normalized_event.time, cloud_provider=normalized_event.cloud_provider,
+                         response_module=None, playbook=None)
 
     # Denormalized mirror of actor.user_name for gsi_signal_actor_user_name
     # (serverless.yml) -- GSI keys must be top-level scalars, not nested

@@ -11,10 +11,12 @@ from typing import Any
 
 import boto3
 from boto3.dynamodb.conditions import Attr
+from boto3.dynamodb.types import TypeSerializer
 from botocore.exceptions import ClientError
 
 from .logger import Logger
 from .partition_keys import day_bucket_key
+from .serialization import dynamodb_safe, json_default
 
 # How long a signal/alert/outbox item lives in DynamoDB before TTL expires
 # it. Safe at 90 days specifically because signals/alerts (not outbox --
@@ -433,7 +435,7 @@ class AwsHandler:
         try:
             resp = self._sqs.send_message(
                 QueueUrl=queue_url,
-                MessageBody=json.dumps(body),
+                MessageBody=json.dumps(body, default=json_default),
                 MessageAttributes=msg_attrs,
             )
             msg_id = resp.get("MessageId", "")
@@ -581,8 +583,9 @@ class AwsHandler:
         item = {
             "outbox_id": {"S": outbox_id},
             "timestamp": {"S": _datetime.now(_UTC).isoformat()},
+            "updated_at": {"S": _datetime.now(_UTC).isoformat()},
             "status": {"S": "PENDING"},
-            "payload": {"S": json.dumps(payload)},
+            "payload": {"S": json.dumps(payload, default=json_default)},
             # JSON string so publisher's _extract_destinations can parse it as a list
             "destinations": {"S": json.dumps(destinations)},
             "attempts": {"N": "0"},
@@ -596,6 +599,48 @@ class AwsHandler:
         )
 
         return outbox_id
+
+    def put_alert_with_outbox(
+        self, *, alerts_table: str, outbox_table: str, alert_item: dict,
+        payload: dict, destinations: list[str],
+    ) -> bool:
+        """Commit the alert and its delivery intent together, or neither.
+
+        The stable outbox ID is the deduplication boundary: the alerts table
+        also has a timestamp sort key. Conditional conflicts are duplicates;
+        capacity/transaction errors must be retried.
+        """
+        serializer = TypeSerializer()
+        alert = dynamodb_safe({**alert_item, "expires_at": ttl_expires_at()})
+        now = datetime.now(UTC).isoformat()
+        outbox = {
+            "outbox_id": "alert:" + str(alert["alert_key"]),
+            "timestamp": now, "updated_at": now, "status": "PENDING",
+            "payload": json.dumps(payload, default=json_default),
+            "destinations": json.dumps(destinations), "attempts": 0,
+            "expires_at": ttl_expires_at(),
+        }
+        try:
+            self._ddb.transact_write_items(TransactItems=[
+                {"Put": {
+                    "TableName": alerts_table,
+                    "Item": {k: serializer.serialize(v) for k, v in alert.items()},
+                    "ConditionExpression": "attribute_not_exists(alert_key)",
+                }},
+                {"Put": {
+                    "TableName": outbox_table,
+                    "Item": {k: serializer.serialize(v) for k, v in outbox.items()},
+                    "ConditionExpression": "attribute_not_exists(outbox_id)",
+                }},
+            ])
+            return True
+        except ClientError as exc:
+            reasons = exc.response.get("CancellationReasons", [])
+            if (_err_code(exc) == "TransactionCanceledException" and reasons
+                    and any(r.get("Code") == "ConditionalCheckFailed" for r in reasons)
+                    and all(r.get("Code") in ("None", "ConditionalCheckFailed") for r in reasons)):
+                return False
+            raise
 
     def put_alert_if_not_exists(
         self,
@@ -641,7 +686,7 @@ class AwsHandler:
         table = self._ddb_resource.Table(table_name)
         try:
             table.put_item(
-                Item=item,
+                Item=dynamodb_safe(item),
                 ConditionExpression=Attr(id_attribute).not_exists(),
             )
             self.logger.info(

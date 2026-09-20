@@ -23,6 +23,7 @@ import boto3
 
 from ..infra.logger import Logger
 from ..infra.xray_setup import patch_boto3
+from ..notifier import egress_policy
 
 patch_boto3()
 
@@ -47,13 +48,15 @@ def _get_webhook_url() -> str:
         Name=f"/opencdr-{stage}/ops-alerts/slack-webhook", WithDecryption=True
     )
     _webhook_cache = resp["Parameter"]["Value"]
+    # codeql[py/unused-global-variable] -- module-level TTL cache
+    # (declared `global` above); read on the *next* invocation via the
+    # check at the top of this function, not within this one.
     _webhook_cache_loaded_at = now
     return _webhook_cache
 
 
 def _post_to_slack(webhook_url: str, text: str) -> None:
-    if urllib.parse.urlparse(webhook_url).scheme != "https":
-        raise ValueError(f"Webhook URL must use HTTPS, got: {webhook_url!r}")
+    egress_policy.check_destination(webhook_url, what="Webhook URL")
 
     data = json.dumps({"text": text}).encode("utf-8")
     req = urllib.request.Request(

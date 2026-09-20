@@ -3,15 +3,18 @@ from __future__ import annotations
 
 import base64
 import json
+import logging
 import os
 import re
 import time
 import uuid
+from copy import deepcopy
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import boto3
-from boto3.dynamodb.conditions import Key
+import regex
+from boto3.dynamodb.conditions import Attr, Key
 
 from ..domain.settings_secrets import (
     SECRET_CHANNEL_FIELDS,
@@ -25,6 +28,8 @@ from ..infra.detection_rules_repository import unpack_rule_body
 from ..infra.xray_setup import patch_boto3
 
 patch_boto3()
+
+_log = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Env / DynamoDB tables
@@ -61,8 +66,63 @@ ir_actions_table = ddb.Table(IR_ACTIONS_TABLE_NAME)
 
 SERVICE = os.getenv("SERVICE_NAME", "OPENCDR-API")
 
-ALLOWED_SEVERITIES = {"CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO", "INFORMATIONAL"}
+ALLOWED_SEVERITIES = {"CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO", "INFORMATIONAL", "UNKNOWN"}
 ALLOWED_RULE_KINDS = {"signal", "correlation", "list"}
+
+# Field roots a rule condition may reference: the public fields of
+# NormalizedEvent (src/domain/ocsf_min_parser.py) plus `rule_id`, which
+# correlation rules reference. A `field` whose first dot-segment is outside
+# this set cannot match a real event, and is how a malicious rule tries to
+# getattr into Python internals (see detection_engine.get_field's underscore
+# guard, which is the actual runtime security control). This write-time check
+# is enforced as a hard reject ONLY under STRICT_RULE_VALIDATION; otherwise the
+# offending root is logged and the rule is still accepted, so a customer's
+# existing off-root rule is never silently rejected mid-release. Published via
+# GET /help so consumers can build a field picker instead of a raw textarea.
+ALLOWED_FIELD_ROOTS = frozenset(
+    {
+        "event_id",
+        "source",
+        "time",
+        "category",
+        "class_name",
+        "activity_name",
+        "severity",
+        "actor",
+        "api",
+        "network",
+        "resources",
+        "cloud_provider",
+        "cloud_account_id",
+        "cloud_region",
+        "gd_resource_type",
+        "raw_event",
+        "rule_id",
+        "host", "process", "container", "kubernetes", "finding", "vendor",
+        "integration_id", "provenance", "runtime_entity",
+    }
+)
+
+
+def _strict_rule_validation() -> bool:
+    """Whether write-time rule validation rejects (vs. warns) on soft failures.
+
+    Read per-call (not at import) so it can be toggled per deployment via the
+    STRICT_RULE_VALIDATION env var without a code change, and exercised in
+    tests. Default off -- warn-and-allow -- for backward compatibility.
+    """
+    return os.getenv("STRICT_RULE_VALIDATION", "").strip().lower() in ("1", "true", "yes", "on")
+
+# arn:aws:iam::<12-digit-account>:role/<path/name> -- used to enforce that an
+# IR-role mapping's ARN names the same account the mapping is keyed on.
+_IR_ROLE_ARN_RE = re.compile(r"^arn:aws:iam::(\d{12}):role/.+$")
+
+# Best-effort detector for the commonest catastrophic-backtracking shape: a
+# quantified group whose body also contains a quantifier, e.g. (a+)+, (a*)*,
+# (x+x+)+. Deliberately conservative (a denylist is never complete -- the
+# runtime timeout in detection_engine is the real guarantee); used only for a
+# write-time advisory warning (reject under STRICT_RULE_VALIDATION).
+_NESTED_QUANTIFIER_RE = re.compile(r"\([^)]*[+*][^)]*\)[+*]")
 
 # Every handler src/handlers/responder.py's RESPONSE_MODULE_HANDLERS actually
 # registers. Kept in sync by hand -- api.py deliberately doesn't import
@@ -214,6 +274,10 @@ def lambda_handler(event, context):
         return _response(403, {"message": f"API key missing required scope: {required_scope}", "request_id": request_id})
 
     try:
+        if path == "/integrations" or path.startswith("/integrations/"):
+            from .integration_api import handle
+            code, payload = handle(method, path, _parse_json_body(event) if method in {"POST", "PUT"} else {}, qs)
+            return _response(code, payload)
         # ------------------------------------------------------------------
         # /status
         # ------------------------------------------------------------------
@@ -288,7 +352,7 @@ def lambda_handler(event, context):
 
         if path == "/rules" and method == "POST":
             body = _parse_json_body(event)
-            return _handle_create_rule(body)
+            return _handle_create_rule(body, _get_api_key_id(event))
 
         # /rules/{rule_id}
         if path.startswith("/rules/"):
@@ -304,7 +368,7 @@ def lambda_handler(event, context):
                 return _handle_get_rule(rule_id, qs)
             if method == "PUT":
                 body = _parse_json_body(event)
-                return _handle_update_rule(rule_id, body)
+                return _handle_update_rule(rule_id, body, _get_api_key_id(event))
             if method == "DELETE":
                 return _handle_delete_rule(rule_id, qs)
 
@@ -316,7 +380,7 @@ def lambda_handler(event, context):
 
         if path == "/settings" and method == "POST":
             body = _parse_json_body(event)
-            return _handle_create_settings("global", body)
+            return _handle_create_settings("global", body, _get_api_key_id(event))
 
         if path.startswith("/settings/"):
             setting_id = (
@@ -331,7 +395,7 @@ def lambda_handler(event, context):
                 return _handle_get_settings(setting_id)
             if method == "PUT":
                 body = _parse_json_body(event)
-                return _handle_upsert_settings(setting_id, body)
+                return _handle_upsert_settings(setting_id, body, _get_api_key_id(event))
             if method == "DELETE":
                 return _handle_delete_settings(setting_id)
 
@@ -343,7 +407,7 @@ def lambda_handler(event, context):
 
         if path == "/ir-roles" and method == "POST":
             body = _parse_json_body(event)
-            return _handle_create_ir_role(body)
+            return _handle_create_ir_role(body, _get_api_key_id(event))
 
         if path.startswith("/ir-roles/"):
             account_id = (
@@ -358,7 +422,7 @@ def lambda_handler(event, context):
                 return _handle_get_ir_role(account_id)
             if method == "PUT":
                 body = _parse_json_body(event)
-                return _handle_upsert_ir_role(account_id, body)
+                return _handle_upsert_ir_role(account_id, body, _get_api_key_id(event))
             if method == "DELETE":
                 return _handle_delete_ir_role(account_id)
 
@@ -378,7 +442,8 @@ def lambda_handler(event, context):
             if method == "GET" and not is_rollback_route:
                 return _handle_get_ir_action(detection_id)
             if method == "POST" and is_rollback_route:
-                return _handle_rollback_ir_action(detection_id)
+                body = _parse_json_body(event)
+                return _handle_rollback_ir_action(detection_id, body, _get_api_key_id(event))
 
         return _response(404, {"message": f"Route {method} {path} not found"})
 
@@ -413,6 +478,8 @@ def _required_scope_for(method: str, path: str) -> str | None:
         return None
     if path == "/rules" or path.startswith("/rules/"):
         return "read" if method == "GET" else "rules"
+    if path == "/integrations" or path.startswith("/integrations/"):
+        return "read" if method == "GET" else "settings"
     if path == "/settings" or path.startswith("/settings/"):
         return "read" if method == "GET" else "settings"
     if path == "/ir-roles" or path.startswith("/ir-roles/"):
@@ -432,7 +499,18 @@ def _get_api_key_id(event: dict) -> str | None:
 
 def _scopes_from_key_name(name: str) -> frozenset[str]:
     if name == _API_KEY_NAME_PREFIX:
-        return ALL_SCOPES  # bare key, no suffix -- back-compat, full access
+        # Bare key, no suffix -- back-compat, full access. DEPRECATED: it grants
+        # every scope by having no discriminator, so it is neither narrowable
+        # nor individually attributable. Callers should migrate to a named key
+        # (e.g. the `-console-...` key in serverless.yml). Logged with a stable
+        # marker so a deployment can alarm on continued use and gate the bare
+        # key's removal (planned for a future major) on this going quiet.
+        _log.warning(
+            "DEPRECATED_BARE_API_KEY_USED: the unsuffixed API key %r grants all scopes; "
+            "migrate to a named scoped key (see serverless.yml apiKeys / docs security)",
+            name,
+        )
+        return ALL_SCOPES
     prefix = _API_KEY_NAME_PREFIX + "-"
     if not name.startswith(prefix):
         return frozenset()  # unrecognized key name -- fail closed
@@ -494,6 +572,65 @@ def _encode_next_token(last_evaluated_key: dict | None) -> str | None:
     if not last_evaluated_key:
         return None
     return base64.urlsafe_b64encode(json.dumps(last_evaluated_key).encode()).decode()
+
+
+# ---------------------------------------------------------------------------
+# Optimistic concurrency (lost-update protection)
+#
+# Config docs (rules, settings) are read-modify-write from clients (CLI/MCP):
+# GET -> edit locally -> PUT the whole item. Two writers that both read the
+# same version and PUT would silently clobber each other. To make that safe
+# without pessimistic locking, guarded writes carry an `expected_rev`: the rev
+# the client based its edit on. The put is conditional on the stored rev still
+# equalling it (or being absent, for the first guarded write), and the item is
+# written with rev = expected_rev + 1. A mismatch -> 409, and the client
+# re-reads and retries (compare-and-set). Writers that send no expected_rev
+# keep the previous unconditional behaviour (deliberate clobber / bulk load),
+# so this is fully backward-compatible.
+# ---------------------------------------------------------------------------
+
+
+class OptimisticLockError(Exception):
+    """Raised when a guarded put's expected_rev no longer matches the stored rev."""
+
+
+def _pop_expected_rev(body: dict) -> int | None:
+    """Extract and validate an optional `expected_rev` from a request body.
+
+    Popped (not just read) so it is never persisted as a document field.
+    """
+    if not isinstance(body, dict) or "expected_rev" not in body:
+        return None
+    raw = body.pop("expected_rev")
+    if raw is None:
+        return None
+    try:
+        rev = int(raw)
+    except (TypeError, ValueError) as err:
+        raise ValueError("expected_rev must be an integer") from err
+    if rev < 0:
+        raise ValueError("expected_rev must be >= 0")
+    return rev
+
+
+def _put_with_rev(table, item: dict, expected_rev: int | None) -> dict:
+    """Put `item`, guarded by optimistic concurrency when expected_rev is given.
+
+    Returns the item actually written (including the bumped `rev` when
+    guarded). Raises OptimisticLockError on a version conflict.
+    """
+    if expected_rev is None:
+        table.put_item(Item=item)
+        return item
+    written = {**item, "rev": expected_rev + 1}
+    condition = Attr("rev").not_exists() if expected_rev == 0 else Attr("rev").eq(expected_rev)
+    try:
+        table.put_item(Item=written, ConditionExpression=condition)
+    except Exception as e:  # noqa: BLE001 -- narrow to the conditional-check case, re-raise the rest
+        if "ConditionalCheckFailed" in repr(e):
+            raise OptimisticLockError from e
+        raise
+    return written
 
 
 def _parse_order(qs: dict[str, str]) -> str:
@@ -690,15 +827,16 @@ def _handle_list_signals(qs: dict[str, str]) -> dict:
       3) By category (GSI: gsi_signal_category_id):
          ?category=...&order=desc&page_size=20&next_token=...
 
-    Exactly one of severity|event_id|category is required.
+    Exactly one of severity|event_id|category|integration_id is required.
     """
     severity = qs.get("severity")
     event_id = qs.get("event_id")
     category = qs.get("category")
 
-    provided = [x for x in (severity, event_id, category) if x]
+    integration_id = qs.get("integration_id")
+    provided = [x for x in (severity, event_id, category, integration_id) if x]
     if len(provided) != 1:
-        raise ValueError("Provide exactly one of: severity, event_id, category")
+        raise ValueError("Provide exactly one of: severity, event_id, category, integration_id")
 
     order = _parse_order(qs)
     scan_forward = order == "asc"
@@ -729,10 +867,13 @@ def _handle_list_signals(qs: dict[str, str]) -> dict:
             },
         )
 
-    if event_id:
+    if event_id or integration_id:
+        index = "gsi_signal_integration" if integration_id else "gsi_signal_event_id"
+        field = "integration_id" if integration_id else "event_id"
+        value = integration_id or event_id
         kwargs = {
-            "IndexName": "gsi_signal_event_id",
-            "KeyConditionExpression": Key("event_id").eq(event_id),
+            "IndexName": index,
+            "KeyConditionExpression": Key(field).eq(value),
             "ScanIndexForward": scan_forward,
             "Limit": limit,
         }
@@ -744,7 +885,7 @@ def _handle_list_signals(qs: dict[str, str]) -> dict:
         return _response(
             200,
             {
-                "query": {"event_id": event_id, "index": "gsi_signal_event_id"},
+                "query": {field: value, "index": index},
                 "order": order,
                 "page_size": limit,
                 "items": resp.get("Items", []),
@@ -1085,7 +1226,7 @@ def _handle_get_rule(rule_id: str, qs: dict[str, str]) -> dict:
     return _response(200, unpack_rule_body(item))
 
 
-def _handle_create_rule(body: dict) -> dict:
+def _handle_create_rule(body: dict, api_key_id: str | None = None) -> dict:
     """
     POST /rules
 
@@ -1094,7 +1235,7 @@ def _handle_create_rule(body: dict) -> dict:
 
     Uses a conditional put to prevent overwriting.
     """
-    normalized = _normalize_rule_payload(body, force_rule_id=None)
+    normalized = _normalize_rule_payload(body, force_rule_id=None, actor=api_key_id)
 
     try:
         detection_rules_table.put_item(
@@ -1115,18 +1256,31 @@ def _handle_create_rule(body: dict) -> dict:
     return _response(201, normalized)
 
 
-def _handle_update_rule(rule_id: str, body: dict) -> dict:
+def _handle_update_rule(rule_id: str, body: dict, api_key_id: str | None = None) -> dict:
     """
     PUT /rules/{rule_id}?rule_kind=signal|correlation
 
-    Overwrites the existing item (upsert), preserving the key.
-    If you want versioning, do it at the application level (or change schema).
+    Overwrites the existing item (upsert), preserving the key. Supports
+    optional optimistic concurrency: pass `expected_rev` (the rev you read)
+    to make the write conditional -- a stale rev yields 409 instead of
+    silently clobbering a concurrent edit. Omit it for an unconditional
+    upsert.
     """
+    expected_rev = _pop_expected_rev(body)
     # must keep key stable
-    normalized = _normalize_rule_payload(body, force_rule_id=rule_id)
+    normalized = _normalize_rule_payload(body, force_rule_id=rule_id, actor=api_key_id)
 
-    detection_rules_table.put_item(Item=normalized)
-    return _response(200, normalized)
+    try:
+        written = _put_with_rev(detection_rules_table, normalized, expected_rev)
+    except OptimisticLockError:
+        return _response(
+            409,
+            {
+                "message": "Rule was modified concurrently (rev mismatch) -- re-read and retry",
+                "rule_id": rule_id,
+            },
+        )
+    return _response(200, written)
 
 
 def _handle_delete_rule(rule_id: str, qs: dict[str, str]) -> dict:
@@ -1150,7 +1304,7 @@ def _handle_delete_rule(rule_id: str, qs: dict[str, str]) -> dict:
     return _response(200, {"message": "Rule deleted", "rule": unpack_rule_body(item)})
 
 
-def _normalize_rule_payload(payload: dict, *, force_rule_id: str | None) -> dict:
+def _normalize_rule_payload(payload: dict, *, force_rule_id: str | None, actor: str | None = None) -> dict:
     """
     Normalizes to your current OpenCDR rule table key shape:
       PK: rule_kind
@@ -1176,9 +1330,16 @@ def _normalize_rule_payload(payload: dict, *, force_rule_id: str | None) -> dict
     else:
         data["rule_id"] = str(data.get("rule_id") or uuid.uuid4())
 
-    # optional metadata
-    data.setdefault("created_by", "api")
-    data["updated_by"] = str(data.get("updated_by") or "api")
+    # Audit metadata. `updated_by` is set from the server-authenticated caller
+    # identity (the API key id), NOT from the request body -- a client cannot
+    # forge who made the change. Any body-supplied created_by/updated_by is
+    # discarded. Falls back to "api" when no key id is resolvable (e.g. local
+    # tests / unauthenticated invocations).
+    actor_id = actor or "api"
+    data.pop("updated_by", None)
+    body_created_by = data.pop("created_by", None)
+    data.setdefault("created_by", body_created_by if isinstance(body_created_by, str) else actor_id)
+    data["updated_by"] = actor_id
 
     # timestamp is useful for audit (even if not key)
     data["timestamp"] = datetime.now(UTC).isoformat()
@@ -1230,6 +1391,17 @@ def _normalize_rule_payload(payload: dict, *, force_rule_id: str | None) -> dict
         if response_module not in ALLOWED_RESPONSE_MODULES:
             raise ValueError(f"response_module must be one of {sorted(ALLOWED_RESPONSE_MODULES)} or empty")
 
+    if response_module:
+        source_conditions = []
+        for field in ("conditions", "signal_conditions"):
+            values = data.get(field) or []
+            if not isinstance(values, list):
+                raise ValueError(f"{field} must be a list")
+            source_conditions.extend(values)
+        if any(isinstance(c, dict) and (c.get("field") == "integration_id" or
+               (c.get("field") == "source" and c.get("value") in ("falco", "custom"))) for c in source_conditions):
+            raise ValueError("AWS response modules are not supported for Falco/custom integrations")
+
     # conditions: accept either your newer list-of-conditions (field/op/value) or older formats
     conditions = data.get("conditions")
     if conditions is None:
@@ -1250,6 +1422,27 @@ def _normalize_rule_payload(payload: dict, *, force_rule_id: str | None) -> dict
 
         if not isinstance(field, str) or not field.strip():
             raise ValueError(f"conditions[{i}].field must be a non-empty string")
+
+        # Field-root allowlist (see ALLOWED_FIELD_ROOTS). The runtime engine
+        # already refuses underscore-prefixed getattr traversal; this is the
+        # write-time half -- a soft signal by default (so a customer rule with
+        # an unrecognized root is logged, not rejected), a hard reject under
+        # STRICT_RULE_VALIDATION.
+        field_root = field.strip().split(".", 1)[0]
+        if field_root not in ALLOWED_FIELD_ROOTS:
+            if _strict_rule_validation():
+                raise ValueError(
+                    f"conditions[{i}].field root {field_root!r} is not an allowed field root "
+                    f"(one of {sorted(ALLOWED_FIELD_ROOTS)})"
+                )
+            _log.warning(
+                "api: rule condition[%d] uses unrecognized field root %r (path=%r) -- "
+                "allowed under STRICT_RULE_VALIDATION=off, but it cannot match a real event",
+                i,
+                field_root,
+                field,
+            )
+
         if not isinstance(op, str) or op not in ALLOWED_CONDITION_OPS:
             raise ValueError(f"conditions[{i}].op must be one of {sorted(ALLOWED_CONDITION_OPS)}")
 
@@ -1272,10 +1465,33 @@ def _normalize_rule_payload(payload: dict, *, force_rule_id: str | None) -> dict
                 raise ValueError(f"conditions[{i}].value is required for op={op}")
 
         if op in _REGEX_CONDITION_OPS:
+            # Validate with the SAME engine the detection engine runs (`regex`,
+            # a superset of stdlib `re`), so a pattern accepted here can't be
+            # rejected at runtime or vice-versa.
             try:
-                re.compile(value)
-            except (re.error, TypeError) as exc:
+                regex.compile(value)
+            except (regex.error, TypeError) as exc:
                 raise ValueError(f"conditions[{i}].value is not a valid regex: {exc}") from exc
+
+            # ReDoS advisory. The runtime timeout (detection_engine) is the hard
+            # guarantee; this is an early, best-effort heads-up about the most
+            # common catastrophic-backtracking shape -- a quantified group whose
+            # body is itself quantified, e.g. (a+)+ / (a*)* / (a+)*. Warn by
+            # default (never reject a customer's existing rule mid-release);
+            # reject only under STRICT_RULE_VALIDATION, mirroring field roots.
+            if _NESTED_QUANTIFIER_RE.search(value):
+                if _strict_rule_validation():
+                    raise ValueError(
+                        f"conditions[{i}].value has a nested quantifier "
+                        f"(catastrophic-backtracking risk): {value!r}"
+                    )
+                _log.warning(
+                    "api: rule condition[%d] regex %r has a nested quantifier "
+                    "(ReDoS risk) -- allowed under STRICT_RULE_VALIDATION=off; the "
+                    "detection engine bounds evaluation time regardless",
+                    i,
+                    value,
+                )
 
         norm_condition = {"field": field, "op": op, "value": value}
         if op in _LIST_CONDITION_OPS:
@@ -1375,8 +1591,8 @@ def _handle_get_settings(setting_id: str) -> dict:
     return _response(200, _redact_settings(item))
 
 
-def _handle_create_settings(setting_id: str, body: dict) -> dict:
-    normalized = _normalize_settings_payload(body, setting_id=setting_id)
+def _handle_create_settings(setting_id: str, body: dict, api_key_id: str | None = None) -> dict:
+    normalized = _normalize_settings_payload(body, setting_id=setting_id, actor=api_key_id)
 
     try:
         settings_table.put_item(
@@ -1391,10 +1607,28 @@ def _handle_create_settings(setting_id: str, body: dict) -> dict:
     return _response(201, normalized)
 
 
-def _handle_upsert_settings(setting_id: str, body: dict) -> dict:
-    normalized = _normalize_settings_payload(body, setting_id=setting_id)
-    settings_table.put_item(Item=normalized)
-    return _response(200, normalized)
+def _handle_upsert_settings(setting_id: str, body: dict, api_key_id: str | None = None) -> dict:
+    """
+    PUT /settings/{setting_id}
+
+    Supports optional optimistic concurrency via `expected_rev` -- since the
+    settings write is a read-modify-write from the client, a stale rev yields
+    409 rather than silently overwriting a concurrent change. Omit it for an
+    unconditional upsert.
+    """
+    expected_rev = _pop_expected_rev(body)
+    normalized = _normalize_settings_payload(body, setting_id=setting_id, actor=api_key_id)
+    try:
+        written = _put_with_rev(settings_table, normalized, expected_rev)
+    except OptimisticLockError:
+        return _response(
+            409,
+            {
+                "message": "Settings were modified concurrently (rev mismatch) -- re-read and retry",
+                "setting_id": setting_id,
+            },
+        )
+    return _response(200, written)
 
 
 def _handle_delete_settings(setting_id: str) -> dict:
@@ -1440,14 +1674,19 @@ def _externalize_secrets(data: dict, *, setting_id: str) -> None:
     """
     Replaces real secret values under data["channels"] with `ssm:`
     references, writing the real values to SSM Parameter Store
-    (SecureString) as a side effect. A value that's empty or already an
+    (SecureString) under a unique immutable name as a side effect. Failed
+    document writes can leave unreferenced versions; do not delete them after
+    an ambiguous timeout because the document write may have committed.
+    A value that's empty or already an
     `ssm:` reference (unchanged from a prior read/write) is left alone.
     """
     for container, key, path_parts in iter_secret_locations(data.get("channels")):
         value = container.get(key)
         if isinstance(value, str) and value and not is_ssm_ref(value):
-            param_name = ssm_param_name(setting_id, *path_parts)
-            ssm.put_parameter(Name=param_name, Value=value, Type="SecureString", Overwrite=True)
+            # Immutable per-write names keep rejected/concurrent updates from
+            # changing a secret referenced by the currently committed document.
+            param_name = ssm_param_name(setting_id, *path_parts, "versions", uuid.uuid4().hex)
+            ssm.put_parameter(Name=param_name, Value=value, Type="SecureString", Overwrite=False)
             container[key] = ssm_ref(param_name)
 
 
@@ -1465,17 +1704,24 @@ def _delete_secret_refs(item: dict) -> None:
     try:
         for i in range(0, len(names), 10):
             ssm.delete_parameters(Names=names[i : i + 10])
-    except Exception:
-        pass
+    except Exception as e:
+        # Genuinely swallowed (see docstring), but was previously silent
+        # about it too -- this file doesn't use the shared Logger other
+        # handlers do, so a plain print is what actually reaches
+        # CloudWatch here, not a new logging pattern for this one path.
+        print(f"WARN: failed to delete SSM parameter(s) {names}: {e!r}")
 
 
-def _normalize_settings_payload(payload: dict, *, setting_id: str) -> dict:
+def _normalize_settings_payload(payload: dict, *, setting_id: str, actor: str | None = None) -> dict:
     if not isinstance(payload, dict):
         raise ValueError("Settings payload must be a JSON object")
 
-    data = dict(payload)
+    data = deepcopy(payload)
     data["setting_id"] = setting_id
     data["timestamp"] = datetime.now(UTC).isoformat()
+    # Server-controlled audit attribution -- never trust a body-supplied actor.
+    data.pop("updated_by", None)
+    data["updated_by"] = actor or "api"
 
     if "notifications_enabled" not in data:
         data["notifications_enabled"] = True
@@ -1551,8 +1797,8 @@ def _handle_get_ir_role(account_id: str) -> dict:
     return _response(200, item)
 
 
-def _handle_create_ir_role(body: dict) -> dict:
-    normalized = _normalize_ir_role_payload(body, force_account_id=None)
+def _handle_create_ir_role(body: dict, api_key_id: str | None = None) -> dict:
+    normalized = _normalize_ir_role_payload(body, force_account_id=None, actor=api_key_id)
 
     try:
         ir_account_roles_table.put_item(
@@ -1570,8 +1816,8 @@ def _handle_create_ir_role(body: dict) -> dict:
     return _response(201, normalized)
 
 
-def _handle_upsert_ir_role(account_id: str, body: dict) -> dict:
-    normalized = _normalize_ir_role_payload(body, force_account_id=account_id)
+def _handle_upsert_ir_role(account_id: str, body: dict, api_key_id: str | None = None) -> dict:
+    normalized = _normalize_ir_role_payload(body, force_account_id=account_id, actor=api_key_id)
     ir_account_roles_table.put_item(Item=normalized)
     return _response(200, normalized)
 
@@ -1585,11 +1831,14 @@ def _handle_delete_ir_role(account_id: str) -> dict:
     return _response(200, {"message": "IR role mapping deleted", "ir_role": item})
 
 
-def _normalize_ir_role_payload(payload: dict, *, force_account_id: str | None) -> dict:
+def _normalize_ir_role_payload(payload: dict, *, force_account_id: str | None, actor: str | None = None) -> dict:
     if not isinstance(payload, dict):
         raise ValueError("IR role payload must be a JSON object")
 
     data = dict(payload)
+    # Server-controlled audit attribution -- never trust a body-supplied actor.
+    data.pop("updated_by", None)
+    data["updated_by"] = actor or "api"
 
     account_id = force_account_id or data.get("aws_account_id")
     if not account_id or not isinstance(account_id, str):
@@ -1601,6 +1850,18 @@ def _normalize_ir_role_payload(payload: dict, *, force_account_id: str | None) -
     role_arn = data.get("role_arn")
     if not role_arn or not isinstance(role_arn, str) or not role_arn.startswith("arn:aws:iam::"):
         raise ValueError("role_arn is required and must be an IAM role ARN (arn:aws:iam::...)")
+
+    # The account embedded in the role ARN must match aws_account_id. Without
+    # this, a caller could map account A to a role in an unrelated account B
+    # (arn:aws:iam::B:role/...), turning the responder into a confused deputy
+    # that assumes a role in an account this mapping does not name. Tenant
+    # ownership of the account is a separate, still-open backend concern (see
+    # the MCP hardening report) -- this only closes the ARN/account mismatch.
+    arn_match = _IR_ROLE_ARN_RE.match(role_arn)
+    if not arn_match:
+        raise ValueError("role_arn must be an IAM role ARN of the form arn:aws:iam::<account>:role/<name>")
+    if arn_match.group(1) != account_id:
+        raise ValueError("role_arn account does not match aws_account_id -- cross-account role mapping refused")
 
     if "enabled" not in data:
         data["enabled"] = True
@@ -1647,7 +1908,9 @@ def _handle_get_ir_action(detection_id: str) -> dict:
     return _response(200, item)
 
 
-def _handle_rollback_ir_action(detection_id: str) -> dict:
+def _handle_rollback_ir_action(
+    detection_id: str, body: dict | None = None, api_key_id: str | None = None
+) -> dict:
     """
     POST /ir-actions/{detection_id}/rollback
 
@@ -1686,11 +1949,32 @@ def _handle_rollback_ir_action(detection_id: str) -> dict:
 
     sqs.send_message(QueueUrl=IR_ROLLBACK_QUEUE_URL, MessageBody=json.dumps({"detection_id": detection_id}))
 
+    # Audit metadata for the rollback request. The actor identity is taken
+    # from the authenticated API key id (server-controlled), NOT from the
+    # request body -- a caller cannot forge who they are. `interface`/`reason`
+    # are client-supplied context only. `reason` is length-capped so a client
+    # can't stuff an unbounded blob into the item.
+    body = body or {}
+    reason = body.get("reason")
+    interface = body.get("interface")
+    now_iso = datetime.now(UTC).isoformat()
+    set_parts = ["rollback_status = :status", "rollback_updated_at = :ts", "rollback_requested_at = :ts"]
+    values: dict[str, Any] = {":status": "pending", ":ts": now_iso}
+    if api_key_id:
+        set_parts.append("rollback_requested_by = :actor")
+        values[":actor"] = api_key_id
+    if isinstance(interface, str) and interface:
+        set_parts.append("rollback_requested_via = :iface")
+        values[":iface"] = interface[:64]
+    if isinstance(reason, str) and reason.strip():
+        set_parts.append("rollback_reason = :reason")
+        values[":reason"] = reason.strip()[:1024]
+
     try:
         ir_actions_table.update_item(
             Key={"detection_id": detection_id},
-            UpdateExpression="SET rollback_status = :status, rollback_updated_at = :ts REMOVE rollback_error",
-            ExpressionAttributeValues={":status": "pending", ":ts": datetime.now(UTC).isoformat()},
+            UpdateExpression="SET " + ", ".join(set_parts) + " REMOVE rollback_error",
+            ExpressionAttributeValues=values,
         )
     except Exception:
         # Best-effort -- the rollback is already enqueued and will run
@@ -1711,6 +1995,12 @@ def _help_payload() -> dict:
         "service": SERVICE,
         "lambda_name": LAMBDA_NAME,
         "endpoints": {
+            "/integrations": {"method": "GET", "description": "Parser catalog and ingestion bucket"},
+            "/integrations/{id}": {"methods": ["GET", "PUT"], "notes": "settings scope for updates; expected_rev required"},
+            "/integrations/{id}/preview": {"method": "POST", "notes": "Executes parser with one sample; settings scope"},
+            "/integrations/{id}/jobs": {"method": "GET"},
+            "/integrations/{id}/jobs/{job_id}": {"method": "GET"},
+            "/integrations/{id}/jobs/{job_id}/replay": {"method": "POST", "notes": "Analysis only; settings scope"},
             "/status": {"method": "GET"},
             "/help": {"method": "GET"},
             "/signals": {
@@ -1718,6 +2008,7 @@ def _help_payload() -> dict:
                 "description": "List signals using base table or GSIs with cursor pagination.",
                 "query_params": {
                     "severity": "Query base table by severity (day-bucketed PK). One of CRITICAL,HIGH,MEDIUM,LOW,INFO,INFORMATIONAL.",
+                    "integration_id": "Query GSI gsi_signal_integration by integration_id.",
                     "event_id": "Query GSI gsi_signal_event_id by event_id (PK).",
                     "category": "Query GSI gsi_signal_category_id by category (PK).",
                     "date_from": "YYYY-MM-DD, UTC, inclusive. Only applies to the severity selector. Defaults to 6 days before date_to/today.",
@@ -1726,7 +2017,7 @@ def _help_payload() -> dict:
                     "page_size": "1..200 (default 20).",
                     "next_token": "Opaque cursor from previous response.",
                 },
-                "notes": "Exactly one of severity|event_id|category is required. severity queries default to the last 7 days -- see date_from/date_to.",
+                "notes": "Exactly one of severity|event_id|category|integration_id is required. severity queries default to the last 7 days -- see date_from/date_to.",
             },
             "/signals/stats": {
                 "method": "GET",
@@ -1763,6 +2054,10 @@ def _help_payload() -> dict:
                     "page_size": "1..200 (default 20).",
                     "next_token": "Opaque cursor from previous response.",
                 },
+                "condition_field_roots": sorted(ALLOWED_FIELD_ROOTS),
+                "condition_field_roots_note": "The first dot-segment of a condition `field` should "
+                "be one of these. Nested access continues under the root (e.g. actor.user_name, "
+                "raw_event.<any-key>). Underscore-prefixed segments are refused by the engine.",
             },
             "/rules/{rule_id}": {
                 "methods": ["GET", "PUT", "DELETE"],

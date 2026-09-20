@@ -28,7 +28,7 @@ This is the layer that answers the question Lambda's own built-in metrics can't:
 
 ### X-Ray tracing
 
-`provider.tracing: {lambda: true, apiGateway: true}` in `serverless.yml` — every invocation across all 9 Lambdas and every API Gateway request is traced, viewable in the X-Ray console for the deployed account.
+`provider.tracing: {lambda: true, apiGateway: true}` in `serverless.yml` — every invocation across all 10 Lambdas and every API Gateway request is traced, viewable in the X-Ray console for the deployed account.
 
 That setting alone only traces the *invocation boundary* — it doesn't instrument what a handler's code does internally, so without more, the service map would show Lambda nodes but never DynamoDB or SQS. Closed with a small amount of application code after all: `src/infra/xray_setup.py` calls `aws_xray_sdk`'s `patch(["boto3"])` (AWS's own SDK, deliberately narrower than `patch_all()` — this codebase doesn't use `requests`/sqlite3/mysql for anything that needs tracing) once per handler at cold start, so every DynamoDB/SQS/SNS call shows up as its own node too. Worth being explicit that this walks back the "zero application code" framing this page used to have — but it's a different risk than the OTel instrumentor bug described below: that library wrapped Lambda invocation and API Gateway event parsing and crashed before the handler ever ran, where this only wraps outgoing `boto3` calls and never touches event handling.
 

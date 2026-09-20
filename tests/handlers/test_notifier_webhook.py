@@ -101,6 +101,9 @@ class TestPostJsonExtraHeaders:
                     {},
                     extra_headers={"Authorization": "Bearer mytoken", "X-Custom": "val"},
                 )
+            # codeql[py/empty-except] -- fake_open deliberately raises to
+            # short-circuit once it's captured the request headers; this
+            # swallows that sentinel exception on purpose.
             except Exception:
                 pass
 
@@ -123,6 +126,8 @@ class TestPostJsonExtraHeaders:
                     {},
                     extra_headers={"Content-Type": "text/plain"},
                 )
+            # codeql[py/empty-except] -- see the comment on the same
+            # pattern earlier in this file.
             except Exception:
                 pass
 

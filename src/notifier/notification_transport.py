@@ -8,6 +8,7 @@ from typing import Any
 
 from src.infra.aws_handler import AwsHandler
 from src.infra.logger import Logger
+from src.notifier import egress_policy
 
 
 @dataclass
@@ -204,8 +205,7 @@ class NotificationTransport:
             )
             return DeliveryResult(channel="discord", status="SKIPPED")
 
-        if urllib.parse.urlparse(discord_webhook).scheme != "https":
-            raise ValueError(f"Discord webhook URL must use HTTPS, got: {discord_webhook!r}")
+        egress_policy.check_destination(discord_webhook, what="Discord webhook URL")
 
         payload = self._build_discord_payload(safe)
         data_bytes = json.dumps(payload).encode("utf-8")
@@ -422,8 +422,7 @@ class NotificationTransport:
             )
             return DeliveryResult(channel="slack", status="SKIPPED")
 
-        if urllib.parse.urlparse(slack_webhook).scheme != "https":
-            raise ValueError(f"Slack webhook URL must use HTTPS, got: {slack_webhook!r}")
+        egress_policy.check_destination(slack_webhook, what="Slack webhook URL")
 
         payload = self._build_slack_payload(safe)
         data_bytes = json.dumps(payload).encode("utf-8")

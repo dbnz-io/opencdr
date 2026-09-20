@@ -1,0 +1,17 @@
+{
+  "time": "2026-09-17T13:00:00.123456789Z",
+  "rule": "Terminal shell in container",
+  "priority": "Warning",
+  "source": "syscall",
+  "hostname": "example-worker",
+  "tags": ["container", "shell"],
+  "output_fields": {
+    "user.name": "root",
+    "user.uid": 0,
+    "proc.name": "bash",
+    "proc.pid": 100,
+    "container.id": "example-container",
+    "k8s.ns.name": "example",
+    "k8s.pod.name": "example-pod"
+  }
+}

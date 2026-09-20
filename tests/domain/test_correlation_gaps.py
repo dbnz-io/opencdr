@@ -11,8 +11,6 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 
-import pytest
-
 from src.domain.correlation_engine import (
     CorrelationEngine,
     _as_list,

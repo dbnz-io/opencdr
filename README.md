@@ -15,16 +15,29 @@ This README is a quickstart: enough to get a working deployment. Everything else
 
 ## How It Works
 
-```
-EventBridge (CloudTrail / GuardDuty)
-  └─► processor      — normalizes events, runs detection rules → writes signals
-        └─► alerter  — runs correlation rules → writes alerts + outbox
-              └─► publisher  — drains outbox → SQS
-                    ├─► notifier   — sends alerts to Slack / Discord / Email / Security Hub / Jira / custom webhook
-                    └─► responder  — executes automated IR actions (disable user, isolate EC2, block S3…)
+```mermaid
+%%{init: {"theme":"base","themeVariables":{"fontFamily":"\"Helvetica Neue\", Arial, sans-serif","lineColor":"#0a6849","edgeLabelBackground":"#e9ece9","primaryTextColor":"#18201d"}}}%%
+flowchart LR
+    EB["EventBridge<br/>CloudTrail · GuardDuty"]
+    P["<b>processor</b><br/>detect"]
+    AL["<b>alerter</b><br/>correlate"]
+    PUB["<b>publisher</b><br/>fan out"]
+    NOT["notify<br/>Slack · Jira · …"]
+    ACT["respond<br/>automated IR"]
+
+    EB --> P --> AL --> PUB
+    PUB --> NOT
+    PUB --> ACT
+
+    classDef proc fill:#e2e6e3,stroke:#b8c1bc,stroke-width:1px,color:#18201d;
+    classDef bound fill:#e9ece9,stroke:#0a6849,stroke-width:1.5px,color:#0a6849;
+    class P,AL,PUB proc;
+    class EB,NOT,ACT bound;
 ```
 
-A REST API lets you query signals, logs, and rules, and manage configuration at runtime. Full architecture — all 9 Lambdas, every data store, the event-flow diagram: [`docs/architecture.md`](docs/architecture.md).
+> **This is the 30-second view** — `signalWriter`, `responder`, `rollbackHandler`, and the archival/alarm paths are collapsed out. See the [full event-flow diagram](docs/architecture.md#data-flow) for all 10 Lambdas, every data store, and how they connect.
+
+A REST API lets you query signals, logs, and rules, and manage configuration at runtime.
 
 ---
 
@@ -111,12 +124,23 @@ python3 scripts/opencdr.py setup    # interactive wizard
 ## Running Tests
 
 ```bash
-pip install pytest pytest-cov
-pytest tests/ -v
+pip install -r requirements-dev.txt
+python scripts/qa.py
 
 # With coverage
 pytest tests/ --cov=src --cov=scripts --cov-report=term-missing
 ```
+
+The QA command runs the complete regression suite, including real-handler integration
+journeys backed by emulated AWS services. Open `artifacts/qa/report.html` for results;
+JUnit XML, JSON, and a run log are saved alongside it. CI runs the same command and
+uploads the reports even on failure. To run just the new integration journeys:
+
+```bash
+python scripts/qa.py --integration-only
+```
+
+See [QA coverage and limitations](docs/qa.md) for what this verifies and how to add journeys.
 
 Contributing a rule or code change? See [`CONTRIBUTING.md`](CONTRIBUTING.md).
 

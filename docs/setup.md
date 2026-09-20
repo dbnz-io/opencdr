@@ -32,7 +32,7 @@ serverless deploy --stage dev \
   --param="monthlyBudgetUsd=50"
 ```
 
-This provisions everything — all 9 Lambdas, all 7 tables, the S3/Glue/Firehose archival pipeline, all 7 SQS queues, both SNS topics, API Gateway, 16 CloudWatch alarms, the dashboard, X-Ray tracing, and the cost budget. Full detail: [Architecture](architecture.md), [Deployment](deployment.md), [Data Archival](data-archival.md).
+This provisions everything — all 10 Lambdas, all 8 tables, the S3/Glue/Firehose archival pipeline, all 9 SQS queues, both SNS topics, API Gateway, 16 CloudWatch alarms, the dashboard, X-Ray tracing, and the cost budget. Full detail: [Architecture](architecture.md), [Deployment](deployment.md), [Data Archival](data-archival.md).
 
 ## 3. Load the bundled detection rules
 
