@@ -213,8 +213,6 @@ class TestArgparser:
         # Capture the parser by running through main's setup without executing
         captured_parser: list[argparse.ArgumentParser] = []
 
-        original_parse = argparse.ArgumentParser.parse_args
-
         def _capture(self, args=None, namespace=None):
             captured_parser.append(self)
             raise SystemExit(0)

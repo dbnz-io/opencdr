@@ -16,6 +16,10 @@ from unittest.mock import MagicMock
 
 os.environ.setdefault("AWS_DEFAULT_REGION", "us-east-1")
 
+# codeql[py/import-and-import-from] -- intentional, not redundant: the
+# module alias is for monkeypatching module-level state, the direct
+# imports are for readable call sites. Both point at the same cached
+# module object.
 import src.infra.logger as logger_module
 from src.infra.logger import Logger, _should_store_in_dynamodb, _ttl_expires_at
 

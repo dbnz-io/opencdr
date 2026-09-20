@@ -19,7 +19,7 @@ npm install    # installs serverless-python-requirements
 serverless deploy --stage dev
 ```
 
-This single command provisions everything in [Architecture](architecture.md): all 9 Lambdas with their own IAM roles, all 7 DynamoDB tables, the S3/Glue/Firehose archival pipeline (see [Data Archival](data-archival.md)), all 7 SQS queues, both SNS topics, API Gateway with API-key auth, 16 CloudWatch alarms, a monthly cost budget, and the [CloudWatch Dashboard](observability.md). Nothing else needs to run first.
+This single command provisions everything in [Architecture](architecture.md): all 10 Lambdas with their own IAM roles, all 8 DynamoDB tables, the S3/Glue/Firehose archival pipeline (see [Data Archival](data-archival.md)), all 9 SQS queues, both SNS topics, API Gateway with API-key auth, 16 CloudWatch alarms, a monthly cost budget, and the [CloudWatch Dashboard](observability.md). Nothing else needs to run first.
 
 Two deploy-time parameters are worth knowing about, both optional:
 
@@ -37,7 +37,7 @@ This is the general pattern worth internalizing, not just an observability-speci
 
 | Automatic on every deploy | One-time manual step |
 |---|---|
-| All 9 Lambdas, all tables/queues/topics, the S3 archive pipeline | Enabling CloudTrail (prerequisite, not part of the stack) |
+| All 10 Lambdas, all tables/queues/topics, the S3 archive pipeline | Enabling CloudTrail (prerequisite, not part of the stack) |
 | The home account's IR role (`OpencdrIrRole`), wired to `responder` | Onboarding *additional* AWS accounts for cross-account IR — see [Incident Response](incident-response.md) |
 | CloudWatch Dashboard, custom metrics, X-Ray tracing | Alarm delivery destination (`alarmEmail` param, or the Slack SSM parameter) — see [Observability](observability.md) |
 | Cost-allocation tags (`Project`/`Stage`) on every resource, monthly `CostBudget` alert | Enabling Cost Explorer and activating those tags as cost allocation tags in Billing preferences — see [Cost tracking](observability.md#cost-tracking) |
@@ -49,7 +49,7 @@ This is the general pattern worth internalizing, not just an observability-speci
 
 `.github/workflows/ci.yml` deploys to `dev` automatically on every push to `main`, authenticating via short-lived credentials federated through GitHub's OIDC provider — no long-lived AWS access keys stored in GitHub at all.
 
-Pipeline stages, in order: `validate-rules` → `secrets-scan` / `python-sast` (parallel, non-blocking — findings are visible but don't fail the run) → `test` → `deploy` → post-deploy checks (parallel) → `release`.
+Pipeline stages, in order: `validate-rules` and the blocking `secrets-scan` → `test` → `deploy` → post-deploy checks (parallel) → `release`. `python-sast` runs independently as a non-blocking advisory check.
 
 The post-deploy stage used to be one long serial job; it's now independent jobs, all `needs: [deploy]` and nothing else, running in parallel — each has one concern, each is individually re-runnable from the GitHub UI if only it fails, and total wall-clock time is bounded by the slowest single job rather than the sum of all of them (the two pipeline checks each have up to ~90s of built-in retry/sleep for a warm-container rule-cache race, which used to be additive against everything else):
 

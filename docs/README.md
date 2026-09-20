@@ -7,7 +7,7 @@ This is the deep-reference documentation set. For a fast-start overview and copy
 ## Pages
 
 - [Complete Setup Guide](setup.md) — every step, in order, from a clean AWS account to a fully working deployment
-- [Architecture](architecture.md) — the nine Lambdas, the data stores, and how an event flows from raw CloudTrail record to delivered alert
+- [Architecture](architecture.md) — the ten Lambdas, the data stores, and how an event flows from raw CloudTrail record to delivered alert
 - [Detection Rules](detection-rules.md) — the rule schema, how to author/test/load rules
 - [API Reference](api-reference.md) — every REST endpoint, auth model, and where the OpenAPI spec is out of date
 - [Incident Response](incident-response.md) — automated response modules, how `responder` authorizes itself, rate limiting, remediation notifications
@@ -20,6 +20,8 @@ This is the deep-reference documentation set. For a fast-start overview and copy
 - [Glossary](glossary.md) — terms used throughout these pages, defined the way this codebase actually uses them
 - [`ir-role.md`](ir-role.md) — full IAM walkthrough for onboarding additional AWS accounts for cross-account incident response
 - [`stack-protection.md`](stack-protection.md) — CloudFormation termination protection and drift detection
+- [Falco and executable S3 ingestion](s3-ingestion.md) — setup, parser contract, operations and release gates.
+
 - [`region-forwarding.md`](region-forwarding.md) — why OpenCDR is blind outside its deployment region by default, and how to fix it
 - [`org-forwarding.md`](org-forwarding.md) — routing every member account's events into a central security account, without an org-wide `PutEvents` grant
 
@@ -35,6 +37,7 @@ This is the deep-reference documentation set. For a fast-start overview and copy
 | What's the difference between a signal, a correlation, and an alert? | [Glossary](glossary.md#signal-vs-alert-vs-correlation) |
 | What fields can a rule's `conditions` check? | [dbnz-io/opencdr-detection-rules](https://github.com/dbnz-io/opencdr-detection-rules#signal-rules) |
 | How does OpenCDR notify me of an alert? | [Notifications](notifications.md) |
+| How do delivery retries work, and how do I recover interrupted work? | [Delivery reliability](delivery-reliability.md) |
 | How do I route different severities to different channels? | [Notifications](notifications.md#per-severity-routing) |
 | How do I forward alerts to my SIEM (Datadog, Splunk, Sentinel, ...)? | [Notifications](notifications.md#sns-fan-out-for-anything-the-built-in-channels-dont-cover) |
 | Are my Slack/Jira/webhook secrets stored in plaintext? | [Security](security.md#secrets-management) |
@@ -67,3 +70,4 @@ This is the deep-reference documentation set. For a fast-start overview and copy
 | What does OCSF-aligned mean in this codebase? | [Glossary](glossary.md#ocsf) |
 | How do I report a security vulnerability in OpenCDR itself? | [`SECURITY.md`](../SECURITY.md) |
 | How do I contribute a rule, bug fix, or feature? | [`CONTRIBUTING.md`](../CONTRIBUTING.md) |
+

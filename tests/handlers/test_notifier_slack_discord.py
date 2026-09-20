@@ -13,7 +13,6 @@ os.environ.setdefault("AWS_DEFAULT_REGION", "us-east-1")
 
 from src.handlers.notifier import (
     _post_json,
-    _route_channels,
     build_discord_payload,
     build_slack_payload,
     lambda_handler,

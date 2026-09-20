@@ -135,6 +135,7 @@ class Actor:
     account_id: str | None = None
     arn: str | None = None
     type: str | None = None  # Root/IAMUser/AssumedRole/FederatedUser/Unknown
+    namespace: str = "aws"
     session_arn: str | None = None  # assumed role session ARN if applicable
 
 
@@ -190,7 +191,7 @@ class NormalizedEvent:
     resources: list[ResourceRef] = field(default_factory=list)
 
     # Cloud context
-    cloud_provider: str = "aws"
+    cloud_provider: str | None = "aws"
     cloud_account_id: str | None = None
     cloud_region: str | None = None
 
@@ -200,6 +201,16 @@ class NormalizedEvent:
     # None for CloudTrail events. Lets rules/settings match "by service"
     # without re-parsing activity_name themselves.
     gd_resource_type: str | None = None
+
+    integration_id: str | None = None
+    runtime_entity: str | None = None
+    provenance: dict[str, Any] = field(default_factory=dict)
+    host: dict[str, Any] = field(default_factory=dict)
+    process: dict[str, Any] = field(default_factory=dict)
+    container: dict[str, Any] = field(default_factory=dict)
+    kubernetes: dict[str, Any] = field(default_factory=dict)
+    finding: dict[str, Any] = field(default_factory=dict)
+    vendor: dict[str, Any] = field(default_factory=dict)
 
     # Raw payload (keep fidelity)
     raw_event: dict[str, Any] = field(default_factory=dict)
@@ -214,7 +225,12 @@ class NormalizedEvent:
 
 
 class Parser(Protocol):
+    # codeql[py/ineffectual-statement] -- `...` is the standard Protocol
+    # method-stub body (PEP 544), not a mistake. Each line below is its
+    # own separately-flagged finding, so this comment is repeated per
+    # line rather than assumed to cover both from one placement.
     def can_parse(self, event: dict[str, Any]) -> bool: ...
+    # codeql[py/ineffectual-statement] -- see above.
     def parse(self, event: dict[str, Any]) -> NormalizedEvent | None: ...
 
 

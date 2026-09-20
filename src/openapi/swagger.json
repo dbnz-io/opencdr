@@ -129,6 +129,13 @@
             "schema": {
               "type": "string"
             }
+          },
+          {
+            "in": "query",
+            "name": "integration_id",
+            "schema": {
+              "type": "string"
+            }
           }
         ],
         "responses": {
@@ -262,6 +269,372 @@
           }
         }
       }
+    },
+    "/integrations": {
+      "get": {
+        "summary": "Parser catalog and managed bucket",
+        "tags": [
+          "Integrations"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ParserCatalog"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request or parser output"
+          },
+          "403": {
+            "description": "Missing API key scope"
+          },
+          "404": {
+            "description": "Not found"
+          },
+          "409": {
+            "description": "Revision conflict"
+          },
+          "502": {
+            "description": "Parser invocation or registration failed"
+          }
+        }
+      }
+    },
+    "/integrations/{integration_id}": {
+      "get": {
+        "summary": "Read integration binding",
+        "tags": [
+          "Integrations"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IntegrationBinding"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request or parser output"
+          },
+          "403": {
+            "description": "Missing API key scope"
+          },
+          "404": {
+            "description": "Not found"
+          },
+          "409": {
+            "description": "Revision conflict"
+          },
+          "502": {
+            "description": "Parser invocation or registration failed"
+          }
+        },
+        "parameters": [
+          {
+            "name": "integration_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ]
+      },
+      "put": {
+        "summary": "Create or replace binding using expected_rev; settings scope",
+        "tags": [
+          "Integrations"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IntegrationBinding"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request or parser output"
+          },
+          "403": {
+            "description": "Missing API key scope"
+          },
+          "404": {
+            "description": "Not found"
+          },
+          "409": {
+            "description": "Revision conflict"
+          },
+          "502": {
+            "description": "Parser invocation or registration failed"
+          }
+        },
+        "parameters": [
+          {
+            "name": "integration_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/IntegrationConfiguration"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/integrations/{integration_id}/preview": {
+      "post": {
+        "summary": "Execute parser on sample without delivery; settings scope",
+        "tags": [
+          "Integrations"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ParserPreview"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request or parser output"
+          },
+          "403": {
+            "description": "Missing API key scope"
+          },
+          "404": {
+            "description": "Not found"
+          },
+          "409": {
+            "description": "Revision conflict"
+          },
+          "502": {
+            "description": "Parser invocation or registration failed"
+          }
+        },
+        "parameters": [
+          {
+            "name": "integration_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "config",
+                  "record"
+                ],
+                "properties": {
+                  "config": {
+                    "$ref": "#/components/schemas/IntegrationConfiguration"
+                  },
+                  "record": {
+                    "oneOf": [
+                      {
+                        "type": "object",
+                        "additionalProperties": true
+                      },
+                      {
+                        "type": "string"
+                      }
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/integrations/{integration_id}/jobs": {
+      "get": {
+        "summary": "List ingestion jobs with cursor pagination",
+        "tags": [
+          "Integrations"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IngestionJobs"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request or parser output"
+          },
+          "403": {
+            "description": "Missing API key scope"
+          },
+          "404": {
+            "description": "Not found"
+          },
+          "409": {
+            "description": "Revision conflict"
+          },
+          "502": {
+            "description": "Parser invocation or registration failed"
+          }
+        },
+        "parameters": [
+          {
+            "name": "integration_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "next_token",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ]
+      }
+    },
+    "/integrations/{integration_id}/jobs/{job_id}": {
+      "get": {
+        "summary": "Job status and per-record diagnostics",
+        "tags": [
+          "Integrations"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IngestionJob"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request or parser output"
+          },
+          "403": {
+            "description": "Missing API key scope"
+          },
+          "404": {
+            "description": "Not found"
+          },
+          "409": {
+            "description": "Revision conflict"
+          },
+          "502": {
+            "description": "Parser invocation or registration failed"
+          }
+        },
+        "parameters": [
+          {
+            "name": "integration_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "job_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ]
+      }
+    },
+    "/integrations/{integration_id}/jobs/{job_id}/replay": {
+      "post": {
+        "summary": "Analysis-only replay using current binding/rules; settings scope",
+        "tags": [
+          "Integrations"
+        ],
+        "responses": {
+          "202": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IngestionReplay"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request or parser output"
+          },
+          "403": {
+            "description": "Missing API key scope"
+          },
+          "404": {
+            "description": "Not found"
+          },
+          "409": {
+            "description": "Revision conflict"
+          },
+          "502": {
+            "description": "Parser invocation or registration failed"
+          }
+        },
+        "parameters": [
+          {
+            "name": "integration_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "job_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ]
+      }
     }
   },
   "components": {
@@ -270,6 +643,318 @@
         "type": "apiKey",
         "in": "header",
         "name": "x-api-key"
+      }
+    },
+    "schemas": {
+      "IntegrationConfiguration": {
+        "type": "object",
+        "required": [
+          "kind",
+          "format",
+          "parser",
+          "expected_rev"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "kind": {
+            "type": "string",
+            "enum": [
+              "falco",
+              "custom"
+            ]
+          },
+          "format": {
+            "type": "string",
+            "enum": [
+              "json",
+              "ndjson",
+              "lines"
+            ]
+          },
+          "compression": {
+            "type": "string",
+            "enum": [
+              "none",
+              "gzip"
+            ],
+            "default": "none"
+          },
+          "enabled": {
+            "type": "boolean",
+            "default": false
+          },
+          "expected_rev": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "0 creates; updates require current rev."
+          },
+          "parser": {
+            "oneOf": [
+              {
+                "type": "object",
+                "required": [
+                  "kind",
+                  "id",
+                  "version"
+                ],
+                "additionalProperties": false,
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "enum": [
+                      "builtin"
+                    ]
+                  },
+                  "id": {
+                    "type": "string",
+                    "enum": [
+                      "falco.json"
+                    ]
+                  },
+                  "version": {
+                    "type": "string",
+                    "enum": [
+                      "1.0.0"
+                    ]
+                  }
+                }
+              },
+              {
+                "type": "object",
+                "required": [
+                  "kind",
+                  "version_arn",
+                  "contract_version"
+                ],
+                "additionalProperties": false,
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "enum": [
+                      "lambda"
+                    ]
+                  },
+                  "version_arn": {
+                    "type": "string",
+                    "description": "Deployment-allowlisted immutable numeric version ARN."
+                  },
+                  "contract_version": {
+                    "type": "string",
+                    "enum": [
+                      "1"
+                    ]
+                  }
+                }
+              }
+            ]
+          }
+        }
+      },
+      "IntegrationBinding": {
+        "type": "object",
+        "properties": {
+          "integration_id": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "falco",
+              "custom"
+            ]
+          },
+          "bucket": {
+            "type": "string"
+          },
+          "prefix": {
+            "type": "string"
+          },
+          "format": {
+            "type": "string"
+          },
+          "compression": {
+            "type": "string"
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "rev": {
+            "type": "integer"
+          },
+          "parser": {
+            "type": "object"
+          }
+        },
+        "required": [
+          "integration_id",
+          "kind",
+          "bucket",
+          "prefix",
+          "rev",
+          "parser"
+        ]
+      },
+      "IngestionJob": {
+        "type": "object",
+        "properties": {
+          "object_id": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "PROCESSING",
+              "DISPATCHED",
+              "PARTIAL",
+              "QUARANTINED"
+            ]
+          },
+          "created_at": {
+            "type": "string"
+          },
+          "mode": {
+            "type": "string",
+            "enum": [
+              "live",
+              "analysis"
+            ]
+          },
+          "record_count": {
+            "type": "integer"
+          },
+          "invalid_count": {
+            "type": "integer"
+          },
+          "dropped_count": {
+            "type": "integer"
+          },
+          "signal_count": {
+            "type": "integer"
+          },
+          "error_code": {
+            "type": "string"
+          },
+          "bucket": {
+            "type": "string"
+          },
+          "key": {
+            "type": "string"
+          },
+          "version_id": {
+            "type": "string"
+          },
+          "records": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "sk": {
+                  "type": "string"
+                },
+                "status": {
+                  "type": "string"
+                },
+                "code": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        },
+        "required": [
+          "object_id",
+          "status"
+        ]
+      },
+      "ParserPreview": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "parsed",
+              "dropped"
+            ]
+          },
+          "event": {
+            "type": "object",
+            "nullable": true
+          },
+          "code": {
+            "type": "string",
+            "nullable": true
+          }
+        },
+        "required": [
+          "status"
+        ]
+      },
+      "ParserCatalog": {
+        "type": "object",
+        "properties": {
+          "bucket": {
+            "type": "string"
+          },
+          "prefix_template": {
+            "type": "string"
+          },
+          "parsers": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          },
+          "stock_falco_rules": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          }
+        },
+        "required": [
+          "bucket",
+          "parsers"
+        ]
+      },
+      "IngestionJobs": {
+        "type": "object",
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/IngestionJob"
+            }
+          },
+          "next_token": {
+            "type": "string",
+            "nullable": true
+          }
+        },
+        "required": [
+          "items"
+        ]
+      },
+      "IngestionReplay": {
+        "type": "object",
+        "properties": {
+          "run_id": {
+            "type": "string"
+          },
+          "mode": {
+            "type": "string",
+            "enum": [
+              "analysis"
+            ]
+          },
+          "object_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "run_id",
+          "mode",
+          "object_id"
+        ]
       }
     }
   }

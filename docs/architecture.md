@@ -9,7 +9,7 @@
 - **Delivery uses the outbox pattern.** `alerter` doesn't call SQS directly — it writes a row to an outbox table in the same logical operation as writing the alert, and a separate `publisher` Lambda (triggered by the outbox table's own DynamoDB stream) claims and publishes that row to SQS. This gives at-least-once delivery without alerter and publisher being directly coupled, and survives a `publisher` failure without losing the alert (the outbox row just stays `PENDING` and gets retried, up to `PUBLISHER_MAX_ATTEMPTS`).
 - **`processor`'s EventBridge rule is single-region by default.** CloudTrail delivers an event to the default bus in whichever region the API call happened in — true even for a multi-region trail — and GuardDuty detectors are per-region. An account operating in more than one region needs an explicit, opt-in step per additional region to not be blind everywhere except the deployment region. See [Cross-Region Event Forwarding](region-forwarding.md).
 
-## The nine Lambda functions
+## The ten Lambda functions
 
 | Function | Trigger | Responsibility |
 |---|---|---|
@@ -18,8 +18,9 @@
 | `alerter` | DynamoDB stream on the signals table | Run correlation rules over recent signals, write alerts + an outbox record, enqueue the correlation result as a signal (via `signalWriter`) |
 | `publisher` | DynamoDB stream on the outbox table | Claim outbox records, publish to the notifications/responses SQS queues |
 | `notifier` | SQS (notifications queue) | Format and deliver an alert to whichever channels are configured (Slack/Discord/Email/Security Hub/Jira/webhook) |
-| `responder` | SQS (responses queue) | Execute an automated IR response module, assuming a per-account IAM role first |
-| `api` | API Gateway (HTTP, API-key auth) | Query signals/logs/rules, manage settings and IR-role mappings |
+| `responder` | SQS (responses queue) | Execute an automated IR response module, assuming a per-account IAM role first; records a rollback-eligible action to `ir-actions-table` |
+| `rollbackHandler` | SQS (`ir-rollback-queue`) | Undo a previously-executed, rollback-eligible action on request — assumes the same per-account IR role, own circuit-breaker budget separate from `responder`'s. See [Incident Response](incident-response.md#rollback) |
+| `api` | API Gateway (HTTP, API-key auth) | Query signals/logs/rules, manage settings and IR-role mappings, enqueue rollback requests to `rollbackHandler` |
 | `alarmNotifier` | SNS (`AlarmsSnsTopic`) | Format a CloudWatch Alarm state-change notification and forward it to Slack — operational/infra health, separate from the security-alert pipeline above |
 | `archiver` | DynamoDB streams on the signals/alerts/logs tables | Flatten and forward new records to S3 (Parquet, via Firehose) before they TTL out of DynamoDB — see [`data-archival.md`](data-archival.md) |
 
@@ -28,9 +29,10 @@ Each function has its **own** IAM role (`provider.iam.role.mode: perFunction`), 
 ## Data flow
 
 ```mermaid
+%%{init: {"theme":"base","themeVariables":{"fontFamily":"\"Helvetica Neue\", Arial, sans-serif","lineColor":"#0a6849","edgeLabelBackground":"#e9ece9","primaryTextColor":"#18201d"}}}%%
 flowchart TD
-    EB["EventBridge rule\n(CloudTrail / GuardDuty)"] --> P["processor"]
-    P -->|"signal rule matches"| SWQ["SQS: signals write queue"]
+    EB["EventBridge rule<br/>(CloudTrail / GuardDuty)"] --> P["processor"]
+    P -->|"signal rule matches"| SWQ>"SQS: signals write queue"]
     SWQ --> SW["signalWriter"]
     SW --> SIG[("signals table")]
     SIG -->|DynamoDB stream| AL["alerter"]
@@ -38,24 +40,41 @@ flowchart TD
     AL -->|"correlation rule matches"| ALT[("alerts table")]
     AL --> OUT[("outbox table")]
     OUT -->|DynamoDB stream| PUB["publisher"]
-    PUB --> NQ["SQS: notifications queue"]
-    PUB --> RQ["SQS: responses queue"]
+    PUB --> NQ>"SQS: notifications queue"]
+    PUB --> RQ>"SQS: responses queue"]
     NQ --> NOT["notifier"]
     RQ --> RESP["responder"]
-    NOT --> CH["Slack / Discord / Email / Security Hub / Jira / webhook"]
+    NOT --> CH(["Slack / Discord / Email / Security Hub / Jira / webhook"])
     RESP -->|"sts:AssumeRole"| IR["per-account IR role"]
-    IR --> ACT["disable_user, isolate_ec2_instances, ..."]
+    IR --> ACT(["disable_user, isolate_ec2_instances, ..."])
+    RESP -->|"rollback-eligible"| IRT[("ir-actions table")]
 
-    ALM["CloudWatch Alarms"] --> ALMSNS["SNS: AlarmsSnsTopic"]
+    API["api<br/>(POST /ir-actions/{id}/rollback)"] -->|"enqueue"| RBQ>"SQS: ir-rollback queue"]
+    RBQ --> RB["rollbackHandler"]
+    RB -->|"sts:AssumeRole"| IR
+    RB --> IRT
+
+    ALM["CloudWatch Alarms"] --> ALMSNS>"SNS: AlarmsSnsTopic"]
     ALMSNS --> ALMN["alarmNotifier"]
-    ALMN --> SLACK["Slack (ops)"]
+    ALMN --> SLACK(["Slack (ops)"])
 
     SIG -->|DynamoDB stream| ARC["archiver"]
     ALT -->|DynamoDB stream| ARC
     LOG[("logs table")] -->|DynamoDB stream| ARC
-    ARC --> FH["Kinesis Data Firehose\n(Parquet conversion)"]
-    FH --> S3[("S3 archive bucket\naccount/year/month/day/hour")]
+    ARC --> FH["Kinesis Data Firehose<br/>(Parquet conversion)"]
+    FH --> S3[("S3 archive bucket<br/>account/year/month/day/hour")]
+
+    classDef lambda fill:#e2e6e3,stroke:#b8c1bc,stroke-width:1px,color:#18201d;
+    classDef queue fill:#e9ece9,stroke:#69746e,stroke-width:1px,color:#18201d;
+    classDef store fill:#e9ece9,stroke:#69746e,stroke-width:1.25px,color:#18201d;
+    classDef bound fill:#e9ece9,stroke:#0a6849,stroke-width:1.5px,color:#0a6849;
+    class P,SW,AL,PUB,NOT,RESP,RB,API,ALMN,ARC lambda;
+    class SWQ,NQ,RQ,RBQ,ALMSNS queue;
+    class SIG,ALT,OUT,IRT,LOG,S3 store;
+    class EB,ALM,CH,ACT,SLACK,IR bound;
 ```
+
+> Rendered in the dbnz Registry palette: **accent green** marks the flow (arrows) and the system's boundaries — event sources in, delivery / IR actions out. Neutral panels are Lambdas, cylinders are DynamoDB / S3 data stores, and flag shapes are SQS/SNS queues. The README carries a [collapsed 30-second version](../README.md#how-it-works) of this same flow.
 
 Every SQS queue above (`signals-write-queue`, `notifications-queue`, `responses-queue`) has its own dead-letter queue, and every DynamoDB-stream-triggered Lambda (`alerter`, `publisher`, `archiver`) feeds a shared `stream-failures` queue for records that fail stream processing outright — see [Observability](observability.md) for how depth on any of these queues surfaces as an alarm.
 

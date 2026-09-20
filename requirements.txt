@@ -5,6 +5,13 @@ python-dateutil>=2.8.2
 pytz>=2024.1
 typing_extensions>=4.10.0
 
+# Detection-engine regex evaluation runs rule-supplied patterns. `regex` has a
+# more backtracking-resistant engine than stdlib `re` and, crucially, accepts a
+# per-call timeout= that raises TimeoutError instead of hanging -- the hard
+# bound against a catastrophic-backtracking (ReDoS) rule stalling detection
+# account-wide. See src/domain/detection_engine.py _bounded_regex_search.
+regex>=2024.5.15
+
 # provider.tracing in serverless.yml only traces the Lambda invocation
 # boundary; this is what makes DynamoDB/SQS/SNS calls show up as their own
 # nodes in the X-Ray service map -- see src/infra/xray_setup.py.

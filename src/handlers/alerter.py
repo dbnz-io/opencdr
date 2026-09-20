@@ -1,10 +1,8 @@
 # src/handlers/alerter.py
 from __future__ import annotations
 
-import json
 import os
 import time
-import uuid
 from datetime import UTC, datetime
 from typing import Any
 
@@ -12,7 +10,7 @@ from boto3.dynamodb.conditions import Key
 from boto3.dynamodb.types import TypeDeserializer
 
 from ..domain.correlation_engine import CorrelationEngine
-from ..infra.aws_handler import AwsHandler, ttl_expires_at
+from ..infra.aws_handler import AwsHandler
 from ..infra.detection_rules_repository import load_detection_rules
 from ..infra.logger import Logger
 from ..infra.metrics import emit_metric
@@ -119,6 +117,23 @@ class DynamoSignalsRepository:
         start = datetime.now(UTC)
         indexed = _INDEXED_GROUP_BY_FIELDS.get(group_by_field)
 
+        if group_by_field == "runtime_entity":
+            # One additional GSI can be introduced in a CloudFormation update.
+            # Query only this integration, newest first, with bounded page work.
+            table = self.aws._ddb_resource.Table(self.table_name)
+            integration = group_value.split(":", 1)[0]
+            kwargs = {"IndexName": "gsi_signal_integration", "ScanIndexForward": False,
+                      "KeyConditionExpression": Key("integration_id").eq(integration) & Key("timestamp").gte(since.isoformat()),
+                      "Limit": 300}
+            results = []
+            for _ in range(10):
+                page = table.query(**kwargs)
+                results.extend(s for s in page.get("Items", []) if s.get("runtime_entity") == group_value)
+                if len(results) >= limit or not page.get("LastEvaluatedKey"):
+                    return results[:limit]
+                kwargs["ExclusiveStartKey"] = page["LastEvaluatedKey"]
+            self.logger.warning(event_name="RUNTIME_CORRELATION_QUERY_LIMIT", message="Runtime correlation lookback exceeded 3000 records; narrow the integration or window")
+            return results[:limit]
         if indexed:
             index_name, key_attr = indexed
             query_mode = "gsi"
@@ -280,21 +295,6 @@ def _build_alert_item(alert: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _marshal_outbox(*, payload: dict[str, Any], destinations: list[str]) -> dict[str, Any]:
-    outbox_id = str(uuid.uuid4())
-    now = datetime.now(UTC).isoformat()
-
-    return {
-        "outbox_id": {"S": outbox_id},
-        "timestamp": {"S": now},
-        "status": {"S": "PENDING"},
-        "destinations": {"S": json.dumps(destinations)},
-        "attempts": {"N": "0"},
-        "payload": {"S": json.dumps(payload)},
-        "expires_at": {"N": str(ttl_expires_at())},
-    }
-
-
 # ----------------------------
 # Lambda handler
 # ----------------------------
@@ -411,58 +411,42 @@ def lambda_handler(event, context):
                 dimensions={"rule_id": str(alert.get("rule_id", "unknown"))},
             )
 
-            # Store alert idempotently (recommended). should_outbox defaults
-            # True: with no ALERTS_TABLE_NAME configured there's no dedup
-            # mechanism at all, so outboxing every match is the accepted
-            # behavior for that configuration choice, not a bug. Once
-            # ALERTS_TABLE_NAME *is* configured, only a genuinely new
-            # (non-duplicate) alert should reach the outbox.
-            should_outbox = True
-            if ALERTS_TABLE_NAME:
-                alert_item = _build_alert_item(alert)
+            if ALERTS_TABLE_NAME and OUTBOX_TABLE_NAME:
+                # Signal write-back is also a durable outbox destination. A
+                # crash between storage and SQS must not lose either delivery.
+                destinations = ["notifications", "responses"]
+                if SIGNALS_TABLE_NAME:
+                    destinations.insert(0, "signals")
+                inserted = aws.put_alert_with_outbox(
+                    alerts_table=ALERTS_TABLE_NAME,
+                    outbox_table=OUTBOX_TABLE_NAME,
+                    alert_item=_build_alert_item(alert),
+                    payload=alert,
+                    destinations=destinations,
+                )
+                stored_alerts += int(inserted)
+                outboxed += int(inserted)
+                continue
 
+            # Support storage-only / outbox-only local configurations.
+            if ALERTS_TABLE_NAME:
                 inserted = aws.put_alert_if_not_exists(
                     table_name=ALERTS_TABLE_NAME,
-                    alert_item=alert_item,
-                    id_attribute="alert_key",
-                    success_event_name="ALERT_STORE_OK",
-                    duplicate_event_name="ALERT_STORE_DUP",
-                    failure_event_name="ALERT_STORE_FAIL",
-                    details={"rule_id": alert.get("rule_id")},
+                    alert_item=_build_alert_item(alert),
                 )
-                should_outbox = inserted
-                if inserted:
-                    stored_alerts += 1
-
-                    # Write correlation result back to signals table so it appears
-                    # in the unified signal log. item_type="correlation" prevents
-                    # the alerter stream trigger from re-processing it. Enqueued
-                    # via signal_writer.py (see serverless.yml's SIGNALS TABLE V2
-                    # comment) rather than written directly, same as processor.py
-                    # -- this was already fire-and-forget (return value unused),
-                    # so routing it through the buffer is a zero-risk swap.
-                    if SIGNALS_TABLE_NAME:
-                        corr_signal = dict(alert)
-                        corr_signal["item_type"] = "correlation"
-                        corr_signal["detection_id"] = str(alert["alert_id"])
-                        aws.sqs_send(
-                            queue_url=SIGNALS_WRITE_QUEUE_URL,
-                            body=corr_signal,
-                            success_event_name="SIGNAL_ENQUEUED",
-                            failure_event_name="SIGNAL_ENQUEUE_FAIL",
-                        )
-
-            # Write outbox for publisher (optional) -- only for a genuinely
-            # new alert (see should_outbox above), not a duplicate.
-            if should_outbox and OUTBOX_TABLE_NAME:
-                outbox_item = _marshal_outbox(
-                    payload=alert, destinations=["notifications", "responses"]
-                )
-                aws.ddb_put_item(
-                    table_name=OUTBOX_TABLE_NAME,
-                    item=outbox_item,
-                    log_event_name="ALERT_OUTBOX_PUT_OK",
-                    details={"alert_key": alert.get("alert_key"), "rule_id": alert.get("rule_id")},
+                stored_alerts += int(inserted)
+                if inserted and SIGNALS_TABLE_NAME:
+                    aws.sqs_send(
+                        queue_url=SIGNALS_WRITE_QUEUE_URL,
+                        body={**alert, "item_type": "correlation",
+                              "detection_id": str(alert["alert_id"])},
+                        success_event_name="SIGNAL_ENQUEUED",
+                        failure_event_name="SIGNAL_ENQUEUE_FAIL",
+                    )
+            elif OUTBOX_TABLE_NAME:
+                aws.put_outbox_record(
+                    table_name=OUTBOX_TABLE_NAME, payload=alert,
+                    destinations=["notifications", "responses"],
                 )
                 outboxed += 1
 

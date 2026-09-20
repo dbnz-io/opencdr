@@ -63,6 +63,7 @@ def load_detection_rules(
     logger: Logger,
     *,
     rule_kind: str,
+    include_disabled: bool = False,
 ) -> list[dict[str, Any]]:
     """
     Load rules using the new schema:
@@ -141,4 +142,4 @@ def load_detection_rules(
         details={"rule_kind": rule_kind, "total": len(rules), "enabled": len(enabled)},
     )
 
-    return enabled
+    return rules if include_disabled else enabled

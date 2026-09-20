@@ -2,20 +2,25 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import os
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from contextlib import nullcontext
+from datetime import datetime
 from typing import Any
 
 from boto3.dynamodb.types import TypeDeserializer
 
 from ..domain.settings_secrets import is_ssm_ref, iter_secret_locations, ssm_ref_param_name
 from ..infra.aws_handler import AwsHandler
+from ..infra.delivery_state import AlreadyDelivered, DeliveryState, delivery_id
 from ..infra.logger import Logger
 from ..infra.xray_setup import patch_boto3
+from ..notifier import egress_policy
 
 patch_boto3()
 
@@ -181,7 +186,12 @@ def load_global_settings(*, aws: AwsHandler, logger: Logger) -> dict[str, Any]:
             event_type="SYSTEM",
             message="SETTINGS_TABLE_NAME is not set; using safe defaults",
         )
+        # codeql[py/unused-global-variable] -- module-level TTL cache
+        # (declared `global` above); read on the *next* invocation via
+        # the check at the top of this function, not within this one --
+        # a per-function dead-store check can't see that cross-call read.
         _cached_settings = defaults
+        # codeql[py/unused-global-variable] -- see above.
         _cached_settings_loaded_at = now
         return defaults
 
@@ -198,10 +208,10 @@ def load_global_settings(*, aws: AwsHandler, logger: Logger) -> dict[str, Any]:
         logger.error(
             event_name="NOTIFIER_SETTINGS_LOAD_FAIL",
             event_type="SYSTEM",
-            message="Failed to load settings from DynamoDB; using safe defaults",
+            message="Failed to load settings from DynamoDB; retrying batch",
             details={"error": repr(e), "setting_id": DEFAULT_SETTING_ID},
         )
-        settings = {}
+        raise
 
     if not settings:
         settings = dict(defaults)
@@ -213,7 +223,10 @@ def load_global_settings(*, aws: AwsHandler, logger: Logger) -> dict[str, Any]:
 
     _resolve_secret_refs(settings, aws=aws)
 
+    # codeql[py/unused-global-variable] -- see the comment on the earlier
+    # assignment above in this same function.
     _cached_settings = settings
+    # codeql[py/unused-global-variable] -- see above.
     _cached_settings_loaded_at = now
     return settings
 
@@ -254,6 +267,19 @@ def _pick_event_id(item: dict[str, Any]) -> str:
 # ----------------------------
 # Slack / Discord payload builders (SOC-friendly, no emoji)
 # ----------------------------
+def _runtime_context(primary: dict) -> str:
+    if not primary.get("integration_id"):
+        return ""
+    # Bounded context only; raw command lines are deliberately excluded.
+    values = [("Integration", primary.get("integration_id")),
+              ("Host", _safe_dict(primary.get("host")).get("name")),
+              ("Process", _safe_dict(primary.get("process")).get("name")),
+              ("Container", _safe_dict(primary.get("container")).get("id")),
+              ("Namespace", _safe_dict(primary.get("kubernetes")).get("namespace")),
+              ("Pod", _safe_dict(primary.get("kubernetes")).get("pod"))]
+    return " | ".join(f"{label}: {str(value)[:128]}" for label, value in values if value)
+
+
 def build_slack_payload(item: dict[str, Any]) -> dict[str, Any]:
     primary = _safe_dict(item.get("primary_signal")) or item
 
@@ -331,6 +357,9 @@ def build_slack_payload(item: dict[str, Any]) -> dict[str, Any]:
             "text": {"type": "mrkdwn", "text": f"*Recommended Response*\n{playbook}"},
         },
     ]
+
+    if _runtime_context(primary):
+        blocks.append({"type": "section", "text": {"type": "plain_text", "text": _runtime_context(primary)}})
 
     # Evidence only for correlation alerts
     if refs:
@@ -412,6 +441,7 @@ def build_discord_payload(item: dict[str, Any]) -> dict[str, Any]:
                     },
                     {"name": "Matches", "value": _s(item.get("match_count"), "1"), "inline": True},
                     {"name": "Playbook", "value": playbook, "inline": False},
+                    *([{"name": "Runtime", "value": _runtime_context(primary), "inline": False}] if _runtime_context(primary) else []),
                 ],
                 "footer": {"text": " | ".join(footer_bits)} if footer_bits else {"text": "OpenCDR"},
             }
@@ -473,6 +503,8 @@ def build_email_message(item: dict[str, Any]) -> tuple[str, str]:
     if alert_key:
         lines.append(f"Alert Key: {alert_key}")
 
+    if _runtime_context(primary):
+        lines += ["", _runtime_context(primary)]
     return subject, "\n".join(lines)
 
 
@@ -694,6 +726,8 @@ def build_securityhub_finding(
     alert_id = _s(item.get("alert_id"), _s(item.get("detection_id"), "unknown"))
     timestamp = _iso8601_z(_s(item.get("timestamp"), ""))
 
+    if primary.get("integration_id") and timestamp:
+        timestamp = datetime.fromisoformat(timestamp.replace("Z", "+00:00")).isoformat(timespec="microseconds")
     activity_name = _s(primary.get("activity_name"), _s(api.get("operation"), rule_id))
     playbook = _s(item.get("playbook"), "No playbook provided.")
 
@@ -704,7 +738,10 @@ def build_securityhub_finding(
     title = f"{rule_id}: {activity_name}"[:256]
     description = playbook[:1024]
 
-    if user_arn:
+    if primary.get("integration_id") or primary.get("source") in {"falco", "custom"}:
+        resource = {"Type": "Other", "Id": "opencdr:integration:" + _s(primary.get("integration_id"), "runtime"),
+                    "Details": {"Other": {"context": _runtime_context(primary) or "Runtime finding"}}}
+    elif user_arn:
         resource = {"Type": "AwsIamUser", "Id": user_arn}
     elif user_name:
         resource = {
@@ -750,8 +787,7 @@ def _post_json(
     extra_headers: dict[str, str] | None = None,
     timeout: int = 10,
 ) -> tuple[int, str]:
-    if urllib.parse.urlparse(url).scheme != "https":
-        raise ValueError(f"URL must use HTTPS, got: {url!r}")
+    egress_policy.check_destination(url)
     data = json.dumps(payload).encode("utf-8")
     headers = {"Content-Type": "application/json", "User-Agent": "opencdr-notifier/1.0"}
     if extra_headers:
@@ -849,6 +885,8 @@ def build_jira_issue(
         _adf_para(playbook),
     ]
 
+    if _runtime_context(primary):
+        content.append(_adf_para(_runtime_context(primary)))
     if alert_id:
         content.append(_adf_para(f"Alert ID: {alert_id}"))
 
@@ -1009,6 +1047,8 @@ def lambda_handler(event, context):
         },
     )
 
+    deliveries = DeliveryState()
+    batch_item_failures = []
     processed = 0
     sent = 0
     skipped = 0
@@ -1016,6 +1056,7 @@ def lambda_handler(event, context):
 
     for record in records:
         processed += 1
+        failed_before_record = failed
         body = record.get("body", "")
 
         # Parse message (handles publisher wrappers)
@@ -1032,9 +1073,11 @@ def lambda_handler(event, context):
                 message="Failed to parse SQS message body as JSON dict",
                 details={"error": repr(e)},
             )
+            batch_item_failures.append({"itemIdentifier": record.get("messageId")})
             continue
 
         item = msg
+        identity = delivery_id(record, item) + ":" + str(item.get("type", "alert"))
 
         # bind event_id (only if present & non-empty)
         eid = _pick_event_id(item).strip()
@@ -1099,227 +1142,235 @@ def lambda_handler(event, context):
 
         for channel in channels_to_send:
             try:
-                if (is_remediation or is_rollback) and channel in ("securityhub", "jira", "webhook"):
-                    # These builders assume the full alert shape (severity,
-                    # primary_signal, etc.) that a remediation-success/
-                    # rollback-success item doesn't have -- scoped to
-                    # slack/discord/email for now.
-                    logger.info(
-                        event_name="NOTIFIER_SKIP_REMEDIATION_UNSUPPORTED_CHANNEL",
-                        event_type="PROCESSING",
-                        message="Remediation/rollback notifications aren't supported on this channel yet",
-                        details={"channel": channel, "rule_id": item.get("rule_id")},
-                    )
-                    continue
+                with (nullcontext() if channel == "webhook" else deliveries.delivery(identity, channel)):
+                    if (is_remediation or is_rollback) and channel in ("securityhub", "jira", "webhook"):
+                        # These builders assume the full alert shape (severity,
+                        # primary_signal, etc.) that a remediation-success/
+                        # rollback-success item doesn't have -- scoped to
+                        # slack/discord/email for now.
+                        logger.info(
+                            event_name="NOTIFIER_SKIP_REMEDIATION_UNSUPPORTED_CHANNEL",
+                            event_type="PROCESSING",
+                            message="Remediation/rollback notifications aren't supported on this channel yet",
+                            details={"channel": channel, "rule_id": item.get("rule_id")},
+                        )
+                        continue
 
-                if channel == "slack":
-                    url = _s(slack.get("webhook_url")).strip()
-                    if not (bool(slack.get("enabled")) and url):
-                        raise RuntimeError("Slack selected but not enabled or webhook_url missing")
+                    if channel == "slack":
+                        url = _s(slack.get("webhook_url")).strip()
+                        if not (bool(slack.get("enabled")) and url):
+                            raise RuntimeError("Slack selected but not enabled or webhook_url missing")
 
-                    payload = (
-                        build_rollback_success_slack_payload(item)
-                        if is_rollback
-                        else build_remediation_success_slack_payload(item)
-                        if is_remediation
-                        else build_slack_payload(item)
-                    )
-                    status, resp_body = _post_json(url, payload)
-                    if status >= 400:
-                        raise RuntimeError(f"Webhook HTTP {status}: {resp_body}")
+                        payload = (
+                            build_rollback_success_slack_payload(item)
+                            if is_rollback
+                            else build_remediation_success_slack_payload(item)
+                            if is_remediation
+                            else build_slack_payload(item)
+                        )
+                        status, resp_body = _post_json(url, payload)
+                        if status >= 400:
+                            raise RuntimeError(f"Webhook HTTP {status}: {resp_body}")
 
-                    sent += 1
-                    logger.info(
-                        event_name="NOTIFIER_SENT_SLACK",
-                        event_type="PROCESSING",
-                        message="Sent notification to Slack",
-                        details={"http_status": status, "rule_id": item.get("rule_id")},
-                    )
-
-                elif channel == "discord":
-                    url = _s(discord.get("webhook_url")).strip()
-                    if not (bool(discord.get("enabled")) and url):
-                        raise RuntimeError(
-                            "Discord selected but not enabled or webhook_url missing"
+                        sent += 1
+                        logger.info(
+                            event_name="NOTIFIER_SENT_SLACK",
+                            event_type="PROCESSING",
+                            message="Sent notification to Slack",
+                            details={"http_status": status, "rule_id": item.get("rule_id")},
                         )
 
-                    payload = (
-                        build_rollback_success_discord_payload(item)
-                        if is_rollback
-                        else build_remediation_success_discord_payload(item)
-                        if is_remediation
-                        else build_discord_payload(item)
-                    )
-                    status, resp_body = _post_json(url, payload)
-                    if status >= 400:
-                        raise RuntimeError(f"Webhook HTTP {status}: {resp_body}")
-
-                    sent += 1
-                    logger.info(
-                        event_name="NOTIFIER_SENT_DISCORD",
-                        event_type="PROCESSING",
-                        message="Sent notification to Discord",
-                        details={"http_status": status, "rule_id": item.get("rule_id")},
-                    )
-
-                elif channel == "email":
-                    topic_arn = _s(email_cfg.get("topic_arn")).strip() or ALERTS_SNS_TOPIC_ARN
-                    if not (bool(email_cfg.get("enabled")) and topic_arn):
-                        raise RuntimeError(
-                            "Email selected but not enabled or topic_arn/ALERTS_SNS_TOPIC_ARN missing"
-                        )
-
-                    subject, body = (
-                        build_rollback_success_email_message(item)
-                        if is_rollback
-                        else build_remediation_success_email_message(item)
-                        if is_remediation
-                        else build_email_message(item)
-                    )
-                    aws._sns.publish(TopicArn=topic_arn, Subject=subject, Message=body)
-
-                    sent += 1
-                    logger.info(
-                        event_name="NOTIFIER_SENT_EMAIL",
-                        event_type="PROCESSING",
-                        message="Sent notification to email via SNS",
-                        details={"topic_arn": topic_arn, "rule_id": item.get("rule_id")},
-                    )
-
-                elif channel == "securityhub":
-                    sh_cfg = _safe_dict(channels.get("securityhub"))
-                    if not bool(sh_cfg.get("enabled")):
-                        raise RuntimeError("Security Hub selected but not enabled in settings")
-                    if not _securityhub_product_arn:
-                        raise RuntimeError("Cannot derive Security Hub product ARN (missing account/region)")
-
-                    finding = build_securityhub_finding(
-                        item,
-                        product_arn=_securityhub_product_arn,
-                        account_id=_account_id,
-                    )
-                    resp = aws._securityhub.batch_import_findings(Findings=[finding])
-                    failed_count = resp.get("FailedCount", 0)
-                    if failed_count:
-                        failures = resp.get("FailedFindings", [])
-                        raise RuntimeError(
-                            f"Security Hub rejected finding: {failures[0].get('ErrorMessage', 'unknown error')}"
-                        )
-
-                    sent += 1
-                    logger.info(
-                        event_name="NOTIFIER_SENT_SECURITYHUB",
-                        event_type="PROCESSING",
-                        message="Sent finding to Security Hub",
-                        details={
-                            "finding_id": finding["Id"],
-                            "rule_id": item.get("rule_id"),
-                        },
-                    )
-
-                elif channel == "jira":
-                    jira_cfg = _safe_dict(channels.get("jira"))
-                    if not bool(jira_cfg.get("enabled")):
-                        raise RuntimeError("Jira selected but not enabled in settings")
-
-                    base_url = _s(jira_cfg.get("base_url")).rstrip("/")
-                    project_key = _s(jira_cfg.get("project_key")).strip()
-                    user_email = _s(jira_cfg.get("user_email")).strip()
-                    api_token = _s(jira_cfg.get("api_token")).strip()
-                    issue_type = _s(jira_cfg.get("issue_type"), "Bug").strip() or "Bug"
-
-                    if not all([base_url, project_key, user_email, api_token]):
-                        raise RuntimeError(
-                            "Jira channel missing required config: base_url, project_key, user_email, api_token"
-                        )
-
-                    issue_payload = build_jira_issue(
-                        item, project_key=project_key, issue_type=issue_type
-                    )
-                    status, resp_body = _post_json_basic_auth(
-                        f"{base_url}/rest/api/3/issue",
-                        issue_payload,
-                        email=user_email,
-                        token=api_token,
-                    )
-                    if status >= 400:
-                        raise RuntimeError(f"Jira API HTTP {status}: {resp_body}")
-
-                    try:
-                        issue_key = json.loads(resp_body).get("key", "unknown")
-                    except Exception:
-                        issue_key = "unknown"
-
-                    sent += 1
-                    logger.info(
-                        event_name="NOTIFIER_SENT_JIRA",
-                        event_type="PROCESSING",
-                        message="Created Jira issue",
-                        details={"issue_key": issue_key, "rule_id": item.get("rule_id")},
-                    )
-
-                elif channel == "webhook":
-                    webhook_cfg = _safe_dict(channels.get("webhook"))
-                    if not bool(webhook_cfg.get("enabled")):
-                        raise RuntimeError("Webhook channel selected but not enabled in settings")
-                    targets = _safe_list(webhook_cfg.get("targets"))
-                    if not targets:
-                        raise RuntimeError("Webhook channel has no targets configured")
-
-                    # Each target is counted independently — partial failures are visible.
-                    for target in targets:
-                        target_name = _s(target.get("name"), "unnamed")
-                        target_url = _s(target.get("url")).strip()
-                        target_headers = _safe_dict(target.get("headers")) or None
-
-                        if not target_url:
-                            logger.warning(
-                                event_name="NOTIFIER_WEBHOOK_TARGET_SKIP",
-                                event_type="PROCESSING",
-                                message="Webhook target has no URL; skipping",
-                                details={"webhook_name": target_name, "rule_id": item.get("rule_id")},
+                    elif channel == "discord":
+                        url = _s(discord.get("webhook_url")).strip()
+                        if not (bool(discord.get("enabled")) and url):
+                            raise RuntimeError(
+                                "Discord selected but not enabled or webhook_url missing"
                             )
-                            continue
+
+                        payload = (
+                            build_rollback_success_discord_payload(item)
+                            if is_rollback
+                            else build_remediation_success_discord_payload(item)
+                            if is_remediation
+                            else build_discord_payload(item)
+                        )
+                        status, resp_body = _post_json(url, payload)
+                        if status >= 400:
+                            raise RuntimeError(f"Webhook HTTP {status}: {resp_body}")
+
+                        sent += 1
+                        logger.info(
+                            event_name="NOTIFIER_SENT_DISCORD",
+                            event_type="PROCESSING",
+                            message="Sent notification to Discord",
+                            details={"http_status": status, "rule_id": item.get("rule_id")},
+                        )
+
+                    elif channel == "email":
+                        topic_arn = _s(email_cfg.get("topic_arn")).strip() or ALERTS_SNS_TOPIC_ARN
+                        if not (bool(email_cfg.get("enabled")) and topic_arn):
+                            raise RuntimeError(
+                                "Email selected but not enabled or topic_arn/ALERTS_SNS_TOPIC_ARN missing"
+                            )
+
+                        subject, body = (
+                            build_rollback_success_email_message(item)
+                            if is_rollback
+                            else build_remediation_success_email_message(item)
+                            if is_remediation
+                            else build_email_message(item)
+                        )
+                        aws._sns.publish(TopicArn=topic_arn, Subject=subject, Message=body)
+
+                        sent += 1
+                        logger.info(
+                            event_name="NOTIFIER_SENT_EMAIL",
+                            event_type="PROCESSING",
+                            message="Sent notification to email via SNS",
+                            details={"topic_arn": topic_arn, "rule_id": item.get("rule_id")},
+                        )
+
+                    elif channel == "securityhub":
+                        sh_cfg = _safe_dict(channels.get("securityhub"))
+                        if not bool(sh_cfg.get("enabled")):
+                            raise RuntimeError("Security Hub selected but not enabled in settings")
+                        if not _securityhub_product_arn:
+                            raise RuntimeError("Cannot derive Security Hub product ARN (missing account/region)")
+
+                        finding = build_securityhub_finding(
+                            item,
+                            product_arn=_securityhub_product_arn,
+                            account_id=_account_id,
+                        )
+                        resp = aws._securityhub.batch_import_findings(Findings=[finding])
+                        failed_count = resp.get("FailedCount", 0)
+                        if failed_count:
+                            failures = resp.get("FailedFindings", [])
+                            raise RuntimeError(
+                                f"Security Hub rejected finding: {failures[0].get('ErrorMessage', 'unknown error')}"
+                            )
+
+                        sent += 1
+                        logger.info(
+                            event_name="NOTIFIER_SENT_SECURITYHUB",
+                            event_type="PROCESSING",
+                            message="Sent finding to Security Hub",
+                            details={
+                                "finding_id": finding["Id"],
+                                "rule_id": item.get("rule_id"),
+                            },
+                        )
+
+                    elif channel == "jira":
+                        jira_cfg = _safe_dict(channels.get("jira"))
+                        if not bool(jira_cfg.get("enabled")):
+                            raise RuntimeError("Jira selected but not enabled in settings")
+
+                        base_url = _s(jira_cfg.get("base_url")).rstrip("/")
+                        project_key = _s(jira_cfg.get("project_key")).strip()
+                        user_email = _s(jira_cfg.get("user_email")).strip()
+                        api_token = _s(jira_cfg.get("api_token")).strip()
+                        issue_type = _s(jira_cfg.get("issue_type"), "Bug").strip() or "Bug"
+
+                        if not all([base_url, project_key, user_email, api_token]):
+                            raise RuntimeError(
+                                "Jira channel missing required config: base_url, project_key, user_email, api_token"
+                            )
+
+                        issue_payload = build_jira_issue(
+                            item, project_key=project_key, issue_type=issue_type
+                        )
+                        status, resp_body = _post_json_basic_auth(
+                            f"{base_url}/rest/api/3/issue",
+                            issue_payload,
+                            email=user_email,
+                            token=api_token,
+                        )
+                        if status >= 400:
+                            raise RuntimeError(f"Jira API HTTP {status}: {resp_body}")
 
                         try:
-                            t_status, t_body = _post_json(
-                                target_url, item, extra_headers=target_headers
-                            )
-                            if t_status >= 400:
-                                raise RuntimeError(f"HTTP {t_status}: {t_body}")
-                            sent += 1
-                            logger.info(
-                                event_name="NOTIFIER_SENT_WEBHOOK",
-                                event_type="PROCESSING",
-                                message="Sent alert to custom webhook",
-                                details={
-                                    "webhook_name": target_name,
-                                    "http_status": t_status,
-                                    "rule_id": item.get("rule_id"),
-                                },
-                            )
-                        except Exception as target_err:
-                            failed += 1
-                            logger.error(
-                                event_name="NOTIFIER_WEBHOOK_TARGET_FAIL",
-                                event_type="PROCESSING",
-                                message="Failed to send alert to custom webhook",
-                                details={
-                                    "webhook_name": target_name,
-                                    "error": repr(target_err),
-                                    "rule_id": item.get("rule_id"),
-                                },
-                            )
+                            issue_key = json.loads(resp_body).get("key", "unknown")
+                        except Exception:
+                            issue_key = "unknown"
 
-                else:
-                    skipped += 1
-                    logger.warning(
-                        event_name="NOTIFIER_SKIP_UNKNOWN_CHANNEL",
-                        event_type="PROCESSING",
-                        message="Unknown channel selected; skipping",
-                        details={"rule_id": item.get("rule_id"), "channel_selected": channel},
-                    )
+                        sent += 1
+                        logger.info(
+                            event_name="NOTIFIER_SENT_JIRA",
+                            event_type="PROCESSING",
+                            message="Created Jira issue",
+                            details={"issue_key": issue_key, "rule_id": item.get("rule_id")},
+                        )
 
+                    elif channel == "webhook":
+                        webhook_cfg = _safe_dict(channels.get("webhook"))
+                        if not bool(webhook_cfg.get("enabled")):
+                            raise RuntimeError("Webhook channel selected but not enabled in settings")
+                        targets = _safe_list(webhook_cfg.get("targets"))
+                        if not targets:
+                            raise RuntimeError("Webhook channel has no targets configured")
+
+                        # Each target is counted independently — partial failures are visible.
+                        for target in targets:
+                            target_name = _s(target.get("name"), "unnamed")
+                            target_url = _s(target.get("url")).strip()
+                            target_headers = _safe_dict(target.get("headers")) or None
+
+                            if not target_url:
+                                logger.warning(
+                                    event_name="NOTIFIER_WEBHOOK_TARGET_SKIP",
+                                    event_type="PROCESSING",
+                                    message="Webhook target has no URL; skipping",
+                                    details={"webhook_name": target_name, "rule_id": item.get("rule_id")},
+                                )
+                                continue
+
+                            try:
+                                target_key = "webhook:" + hashlib.sha256(
+                                    (target_name + "\0" + target_url).encode()
+                                ).hexdigest()
+                                with deliveries.delivery(identity, target_key):
+                                    t_status, t_body = _post_json(
+                                        target_url, item, extra_headers=target_headers
+                                    )
+                                    if t_status >= 400:
+                                        raise RuntimeError(f"HTTP {t_status}: {t_body}")
+                                    sent += 1
+                                    logger.info(
+                                        event_name="NOTIFIER_SENT_WEBHOOK",
+                                        event_type="PROCESSING",
+                                        message="Sent alert to custom webhook",
+                                        details={
+                                            "webhook_name": target_name,
+                                            "http_status": t_status,
+                                            "rule_id": item.get("rule_id"),
+                                        },
+                                    )
+                            except AlreadyDelivered:
+                                skipped += 1
+                            except Exception as target_err:
+                                failed += 1
+                                logger.error(
+                                    event_name="NOTIFIER_WEBHOOK_TARGET_FAIL",
+                                    event_type="PROCESSING",
+                                    message="Failed to send alert to custom webhook",
+                                    details={
+                                        "webhook_name": target_name,
+                                        "error": repr(target_err),
+                                        "rule_id": item.get("rule_id"),
+                                    },
+                                )
+
+                    else:
+                        skipped += 1
+                        logger.warning(
+                            event_name="NOTIFIER_SKIP_UNKNOWN_CHANNEL",
+                            event_type="PROCESSING",
+                            message="Unknown channel selected; skipping",
+                            details={"rule_id": item.get("rule_id"), "channel_selected": channel},
+                        )
+            except AlreadyDelivered:
+                skipped += 1
             except Exception as e:
                 failed += 1
                 logger.error(
@@ -1328,6 +1379,9 @@ def lambda_handler(event, context):
                     message="Failed to send notification",
                     details={"error": repr(e), "rule_id": item.get("rule_id"), "channel": channel},
                 )
+        if failed > failed_before_record:
+            batch_item_failures.append({"itemIdentifier": record.get("messageId")})
+
     base_logger.info(
         event_name="NOTIFIER_DONE",
         event_type="PROCESSING",
@@ -1335,4 +1389,5 @@ def lambda_handler(event, context):
         details={"processed": processed, "sent": sent, "skipped": skipped, "failed": failed},
     )
 
-    return {"processed": processed, "sent": sent, "skipped": skipped, "failed": failed}
+    return {"processed": processed, "sent": sent, "skipped": skipped, "failed": failed,
+            "batchItemFailures": batch_item_failures}

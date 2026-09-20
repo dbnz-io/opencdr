@@ -5,8 +5,6 @@ import json
 import os
 from unittest.mock import MagicMock, patch
 
-import pytest
-
 # Must be set before src.infra.logger is imported (it raises at module level if missing,
 # and boto3 requires a region even for client construction at import time)
 os.environ.setdefault("LOGS_TABLE_NAME", "test-logs-table")

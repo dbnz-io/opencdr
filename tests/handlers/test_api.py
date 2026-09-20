@@ -352,7 +352,7 @@ class TestListSignalsDateBucketing:
 
 class TestSignalStats:
     def test_single_day_counts_per_severity(self):
-        # One day in range * 6 severities = 6 Select=COUNT queries.
+        # One day in range * 7 severities = 7 Select=COUNT queries.
         with patch.object(api, "signals_table") as mock_table:
             mock_table.query.return_value = {"Count": 3, "LastEvaluatedKey": None}
             resp = api.lambda_handler(
@@ -365,10 +365,10 @@ class TestSignalStats:
         assert body["date_from"] == "2026-08-17"
         assert body["date_to"] == "2026-08-17"
         assert body["counts"] == {
-            "CRITICAL": 3, "HIGH": 3, "MEDIUM": 3, "LOW": 3, "INFO": 3, "INFORMATIONAL": 3,
+            "CRITICAL": 3, "HIGH": 3, "MEDIUM": 3, "LOW": 3, "INFO": 3, "INFORMATIONAL": 3, "UNKNOWN": 3,
         }
-        assert body["total"] == 18
-        assert mock_table.query.call_count == 6
+        assert body["total"] == 21
+        assert mock_table.query.call_count == 7
 
     def test_every_severity_present_even_at_zero(self):
         with patch.object(api, "signals_table") as mock_table:
@@ -378,11 +378,11 @@ class TestSignalStats:
                 make_context(),
             )
         body = body_of(resp)
-        assert set(body["counts"].keys()) == {"CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO", "INFORMATIONAL"}
+        assert set(body["counts"].keys()) == {"CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO", "INFORMATIONAL", "UNKNOWN"}
         assert body["total"] == 0
 
     def test_sums_across_multiple_days(self):
-        # 3 days * 6 severities = 18 calls, each contributing 1.
+        # 3 days * 7 severities = 21 calls, each contributing 1.
         with patch.object(api, "signals_table") as mock_table:
             mock_table.query.return_value = {"Count": 1, "LastEvaluatedKey": None}
             resp = api.lambda_handler(
@@ -391,8 +391,8 @@ class TestSignalStats:
             )
         body = body_of(resp)
         assert body["counts"]["HIGH"] == 3
-        assert body["total"] == 18
-        assert mock_table.query.call_count == 18
+        assert body["total"] == 21
+        assert mock_table.query.call_count == 21
 
     def test_paginates_within_a_single_severity_day_bucket(self):
         # A single (severity, day) bucket whose Select=COUNT response is
@@ -444,7 +444,7 @@ class TestSignalStats:
         }
         assert queried_buckets == {
             "CRITICAL#2026-08-17", "HIGH#2026-08-17", "MEDIUM#2026-08-17",
-            "LOW#2026-08-17", "INFO#2026-08-17", "INFORMATIONAL#2026-08-17",
+            "LOW#2026-08-17", "INFO#2026-08-17", "INFORMATIONAL#2026-08-17", "UNKNOWN#2026-08-17",
         }
         for call in mock_table.query.call_args_list:
             assert call.kwargs["Select"] == "COUNT"

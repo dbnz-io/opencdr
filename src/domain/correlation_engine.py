@@ -25,6 +25,8 @@ class SignalsRepository(Protocol):
           - actor / network / api / etc (whatever you stored as the signal)
     """
 
+    # codeql[py/ineffectual-statement] -- `...` is the standard Protocol
+    # method-stub body (PEP 544); this checker doesn't special-case it.
     def query_signals(
         self,
         *,
@@ -244,6 +246,8 @@ class CorrelationEngine:
         rules: list[dict[str, Any]],
         now: datetime | None = None,
     ) -> list[dict[str, Any]]:
+        if (new_signal.get("provenance") or {}).get("mode") == "analysis":
+            return []
         now = now or datetime.now(UTC)
         alerts: list[dict[str, Any]] = []
 
@@ -251,6 +255,16 @@ class CorrelationEngine:
             rule = parse_correlation_rule(raw_rule)
             if not rule or not rule.enabled:
                 continue
+
+            integration = new_signal.get("integration_id")
+            if integration:
+                # Runtime/custom correlation must explicitly bind the integration
+                # and group by a scoped entity, never a host's generic user name.
+                if not any(c.get("field") == "integration_id" and c.get("op") == "equals"
+                           and c.get("value") == integration for c in rule.signal_conditions):
+                    continue
+                if rule.group_by != "runtime_entity":
+                    continue
 
             # Gate 1: does the incoming signal itself match the rule conditions?
             if not _all_conditions_match(new_signal, rule.signal_conditions):
@@ -275,16 +289,23 @@ class CorrelationEngine:
             )
 
             # Keep only those that match rule conditions (AND)
-            matched = [s for s in recent if _all_conditions_match(s, rule.signal_conditions)]
+            matched = [s for s in recent
+                       if s.get("integration_id") == integration
+                       and (s.get("provenance") or {}).get("mode") != "analysis"
+                       and _all_conditions_match(s, rule.signal_conditions)]
 
             if len(matched) < rule.threshold:
                 continue
 
             # Build alert
+            trigger_time = _parse_iso(str(new_signal.get("timestamp") or "")) or now
+            if trigger_time.tzinfo is None:
+                trigger_time = trigger_time.replace(tzinfo=UTC)
             alerts.append(
                 self._build_alert(
                     rule=rule,
                     now=now,
+                    trigger_time=trigger_time,
                     group_value=group_value,
                     matched_signals=matched,
                 )
@@ -297,11 +318,18 @@ class CorrelationEngine:
         *,
         rule: CorrelationRule,
         now: datetime,
+        trigger_time: datetime,
         group_value: str,
         matched_signals: list[dict[str, Any]],
     ) -> dict[str, Any]:
-        # Bucket by time window so repeated triggers in the same window coalesce.
-        bucket = int(now.timestamp() // max(getattr(rule, "time_window_seconds", 300) or 300, 1))
+        # Key the window from the triggering signal's event time, not processing
+        # time. A retry on the other side of an aligned wall-clock boundary must
+        # retain the same logical identity and be rejected by the conditional
+        # alert write.
+        bucket = int(
+            trigger_time.timestamp()
+            // max(getattr(rule, "time_window_seconds", 300) or 300, 1)
+        )
         alert_key = _hash_id(
             str(getattr(rule, "rule_id", "") or ""),
             str(getattr(rule, "group_by", "") or ""),
@@ -326,17 +354,6 @@ class CorrelationEngine:
             """Safe list."""
             return obj if isinstance(obj, list) else []
 
-        def _get(obj: Any, *path: str, default: Any = None) -> Any:
-            """Safe nested get for dicts."""
-            cur = obj
-            for p in path:
-                if not isinstance(cur, dict):
-                    return default
-                cur = cur.get(p)
-                if cur is None:
-                    return default
-            return cur
-
         def _signal_snapshot(s_any: Any) -> dict[str, Any]:
             """
             Compact, responder/notifier-friendly snapshot.
@@ -357,6 +374,8 @@ class CorrelationEngine:
                 "timestamp": _s(s.get("timestamp")),
                 # normalized context
                 "source": _s(s.get("source")),
+                **({key: s.get(key, {}) for key in ("integration_id", "host", "process", "container", "kubernetes", "finding", "provenance")}
+                   if s.get("integration_id") else {}),
                 "severity": _s(s.get("severity")),
                 "category": _s(s.get("category")),
                 "class_name": _s(s.get("class_name")),

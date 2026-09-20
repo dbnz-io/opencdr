@@ -355,6 +355,7 @@ def _notify_rollback_success(
         _outbox_table.put_item(
             Item={
                 "outbox_id": str(uuid.uuid4()),
+                "updated_at": datetime.now(UTC).isoformat(),
                 "timestamp": datetime.now(UTC).isoformat(),
                 "status": "PENDING",
                 "payload": json.dumps(payload),

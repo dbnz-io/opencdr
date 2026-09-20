@@ -47,6 +47,7 @@ def make_cfg(**overrides):
 def make_publisher(aws=None, logger=None) -> OutboxPublisher:
     with patch("src.handlers.publisher.boto3.resource") as mock_resource:
         mock_table = MagicMock()
+        mock_table.update_item.return_value = {"Attributes": {}}
         mock_resource.return_value.Table.return_value = mock_table
         pub = OutboxPublisher(
             logger=logger or MagicMock(),
@@ -55,6 +56,14 @@ def make_publisher(aws=None, logger=None) -> OutboxPublisher:
         )
     pub.outbox_table = mock_table
     return pub
+
+
+def set_claim_result(pub, image):
+    """Model UpdateItem ReturnValues=ALL_NEW, including the incremented attempt."""
+    item = _dynamodb_unmarshal_image(image)
+    item["attempts"] = int(item.get("attempts", 0)) + 1
+    item["status"] = "IN_FLIGHT"
+    pub.outbox_table.update_item.return_value = {"Attributes": item}
 
 
 def ddb_string_image(**fields) -> dict:
@@ -254,6 +263,7 @@ class TestProcessRecordSkipPaths:
     def test_ignores_non_pending_status(self):
         pub = make_publisher()
         image = ddb_string_image(outbox_id="ob-1", status="SENT")
+        set_claim_result(pub, image)
         pub.process_record(record=make_stream_record(new_image=image), cfg=make_cfg())
         pub.outbox_table.update_item.assert_not_called()
 
@@ -261,6 +271,7 @@ class TestProcessRecordSkipPaths:
         logger = MagicMock()
         pub = make_publisher(logger=logger)
         image = ddb_string_image(status="PENDING")
+        set_claim_result(pub, image)
         pub.process_record(record=make_stream_record(new_image=image), cfg=make_cfg())
         pub.outbox_table.update_item.assert_not_called()
         logger.error.assert_called_once()
@@ -272,6 +283,7 @@ class TestProcessRecordSkipPaths:
         pub = make_publisher(aws=aws, logger=logger)
         pub.outbox_table.update_item.side_effect = _client_error("ConditionalCheckFailedException")
         image = ddb_string_image(outbox_id="ob-1", status="PENDING")
+        set_claim_result(pub, image)
         pub.process_record(record=make_stream_record(new_image=image), cfg=make_cfg())
         aws.sqs_send.assert_not_called()
         assert logger.info.call_args.kwargs["event_name"] == "OUTBOX_ALREADY_CLAIMED"
@@ -284,6 +296,7 @@ class TestProcessRecordSkipPaths:
         pub.outbox_table.update_item.side_effect = _client_error("ProvisionedThroughputExceededException")
         image = ddb_string_image(outbox_id="ob-1", status="PENDING")
         with pytest.raises(ClientError):
+            set_claim_result(pub, image)
             pub.process_record(record=make_stream_record(new_image=image), cfg=make_cfg())
 
 
@@ -294,13 +307,16 @@ class TestProcessRecordPublishSuccess:
         pub = make_publisher(aws=aws)
         image = ddb_string_image(outbox_id="ob-1", status="PENDING", destination="notifications")
         image["payload"] = {"M": {"a": {"S": "b"}}}
+        set_claim_result(pub, image)
         pub.process_record(record=make_stream_record(new_image=image), cfg=make_cfg())
 
         aws.sqs_send.assert_called_once()
         assert aws.sqs_send.call_args.kwargs["queue_url"] == make_cfg().notifications_queue_url
-        # second update_item call is the SENT mark (first was the claim)
-        assert pub.outbox_table.update_item.call_count == 2
-        sent_kwargs = pub.outbox_table.update_item.call_args_list[1].kwargs
+        # Claim, per-destination checkpoint, then SENT.
+        assert pub.outbox_table.update_item.call_count == 3
+        checkpoint = pub.outbox_table.update_item.call_args_list[1].kwargs
+        assert checkpoint["ExpressionAttributeValues"][":sd"] == ["notifications"]
+        sent_kwargs = pub.outbox_table.update_item.call_args_list[-1].kwargs
         assert sent_kwargs["ExpressionAttributeValues"][":sent"] == "SENT"
 
     def test_multiple_destinations_all_published_last_msg_id_recorded(self):
@@ -310,10 +326,11 @@ class TestProcessRecordPublishSuccess:
         image = ddb_string_image(outbox_id="ob-1", status="PENDING")
         image["destinations"] = {"L": [{"S": "notifications"}, {"S": "responses"}]}
         image["payload"] = {"M": {}}
+        set_claim_result(pub, image)
         pub.process_record(record=make_stream_record(new_image=image), cfg=make_cfg())
 
         assert aws.sqs_send.call_count == 2
-        sent_kwargs = pub.outbox_table.update_item.call_args_list[1].kwargs
+        sent_kwargs = pub.outbox_table.update_item.call_args_list[-1].kwargs
         assert sent_kwargs["ExpressionAttributeValues"][":m"] == "msg-2"
 
     def test_optional_sqs_attributes_forwarded(self):
@@ -325,8 +342,9 @@ class TestProcessRecordPublishSuccess:
             signal_id="sig-1", rule_id="rule-1",
         )
         image["payload"] = {"M": {}}
+        set_claim_result(pub, image)
         pub.process_record(record=make_stream_record(new_image=image), cfg=make_cfg())
-        assert aws.sqs_send.call_args.kwargs["attributes"] == {"signal_id": "sig-1", "rule_id": "rule-1"}
+        assert aws.sqs_send.call_args.kwargs["attributes"] == {"delivery_id": "ob-1", "signal_id": "sig-1", "rule_id": "rule-1"}
 
 
 class TestProcessRecordPublishFailure:
@@ -340,8 +358,9 @@ class TestProcessRecordPublishFailure:
         image = ddb_string_image(outbox_id="ob-1", status="PENDING")
         image["payload"] = {"M": {}}
         with pytest.raises(ValueError):
+            set_claim_result(pub, image)
             pub.process_record(record=make_stream_record(new_image=image), cfg=make_cfg())
-        retry_kwargs = pub.outbox_table.update_item.call_args_list[1].kwargs
+        retry_kwargs = pub.outbox_table.update_item.call_args_list[-1].kwargs
         assert retry_kwargs["ExpressionAttributeValues"][":pending"] == "PENDING"
 
     def test_bad_payload_resets_to_pending_for_retry_and_reraises(self):
@@ -350,8 +369,9 @@ class TestProcessRecordPublishFailure:
             outbox_id="ob-1", status="PENDING", destination="notifications", payload="{not json",
         )
         with pytest.raises(ValueError):
+            set_claim_result(pub, image)
             pub.process_record(record=make_stream_record(new_image=image), cfg=make_cfg())
-        retry_kwargs = pub.outbox_table.update_item.call_args_list[1].kwargs
+        retry_kwargs = pub.outbox_table.update_item.call_args_list[-1].kwargs
         assert retry_kwargs["ExpressionAttributeValues"][":pending"] == "PENDING"
 
     def test_second_destination_failure_preserves_first_as_sent_and_retries(self):
@@ -366,10 +386,11 @@ class TestProcessRecordPublishFailure:
         image["destinations"] = {"L": [{"S": "notifications"}, {"S": "responses"}]}
         image["payload"] = {"M": {}}
         with pytest.raises(RuntimeError):
+            set_claim_result(pub, image)
             pub.process_record(record=make_stream_record(new_image=image), cfg=make_cfg())
 
         assert aws.sqs_send.call_count == 2  # first destination WAS published
-        retry_kwargs = pub.outbox_table.update_item.call_args_list[1].kwargs
+        retry_kwargs = pub.outbox_table.update_item.call_args_list[-1].kwargs
         assert retry_kwargs["ExpressionAttributeValues"][":pending"] == "PENDING"
         assert retry_kwargs["ExpressionAttributeValues"][":sd"] == ["notifications"]
 
@@ -386,11 +407,12 @@ class TestProcessRecordPublishFailure:
         image["sent_destinations"] = {"L": [{"S": "notifications"}]}
         image["payload"] = {"M": {}}
 
+        set_claim_result(pub, image)
         pub.process_record(record=make_stream_record(new_image=image), cfg=make_cfg())
 
         aws.sqs_send.assert_called_once()
         assert aws.sqs_send.call_args.kwargs["queue_url"] == make_cfg().responses_queue_url
-        sent_kwargs = pub.outbox_table.update_item.call_args_list[1].kwargs
+        sent_kwargs = pub.outbox_table.update_item.call_args_list[-1].kwargs
         assert set(sent_kwargs["ExpressionAttributeValues"][":sd"]) == {"notifications", "responses"}
 
 
@@ -401,6 +423,7 @@ class TestBoundedRetry:
         image["attempts"] = {"N": "4"}
         image["payload"] = {"M": {}}
         with pytest.raises(ValueError):
+            set_claim_result(pub, image)
             pub.process_record(record=make_stream_record(new_image=image), cfg=make_cfg())
         failed_kwargs = pub.outbox_table.update_item.call_args_list[1].kwargs
         assert failed_kwargs["ExpressionAttributeValues"][":failed"] == "FAILED"
@@ -411,8 +434,9 @@ class TestBoundedRetry:
         image["attempts"] = {"N": "3"}
         image["payload"] = {"M": {}}
         with pytest.raises(ValueError):
+            set_claim_result(pub, image)
             pub.process_record(record=make_stream_record(new_image=image), cfg=make_cfg())
-        retry_kwargs = pub.outbox_table.update_item.call_args_list[1].kwargs
+        retry_kwargs = pub.outbox_table.update_item.call_args_list[-1].kwargs
         assert retry_kwargs["ExpressionAttributeValues"][":pending"] == "PENDING"
 
 

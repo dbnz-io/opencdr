@@ -92,6 +92,7 @@ def default_tables(monkeypatch):
 def fake_aws(monkeypatch):
     aws = MagicMock()
     aws.put_alert_if_not_exists.return_value = True
+    aws.put_alert_with_outbox.return_value = True
     monkeypatch.setattr(alerter, "AwsHandler", MagicMock(return_value=aws))
     return aws
 
@@ -197,20 +198,16 @@ class TestAlertStorageAndOutbox:
 
         assert result == {"status": "ok", "alerts_created": 1, "alerts_stored": 1, "outboxed": 1}
 
-        fake_aws.put_alert_if_not_exists.assert_called_once()
-        _, kwargs = fake_aws.put_alert_if_not_exists.call_args
-        assert kwargs["table_name"] == "test-alerts-table"
+        fake_aws.put_alert_with_outbox.assert_called_once()
+        kwargs = fake_aws.put_alert_with_outbox.call_args.kwargs
+        assert kwargs["alerts_table"] == "test-alerts-table"
+        assert kwargs["outbox_table"] == "test-outbox-table"
         assert kwargs["alert_item"]["alert_key"] == "hash-abc"
-
-        fake_aws.sqs_send.assert_called_once()
-        _, kwargs = fake_aws.sqs_send.call_args
-        assert kwargs["queue_url"] == alerter.SIGNALS_WRITE_QUEUE_URL
-        assert kwargs["body"]["item_type"] == "correlation"
-        assert kwargs["body"]["detection_id"] == "alert-abc"
-
-        fake_aws.ddb_put_item.assert_called_once()
-        _, kwargs = fake_aws.ddb_put_item.call_args
-        assert kwargs["table_name"] == "test-outbox-table"
+        assert kwargs["payload"]["alert_id"] == "alert-abc"
+        assert kwargs["destinations"] == ["signals", "notifications", "responses"]
+        # Both delivery and signal write-back must follow the committed outbox.
+        fake_aws.sqs_send.assert_not_called()
+        fake_aws.ddb_put_item.assert_not_called()
 
     def test_no_alerts_produced_is_a_noop(self, fake_aws, fake_engine, with_correlation_rules):
         fake_engine.correlate.return_value = []
@@ -255,12 +252,8 @@ class TestAlertStorageAndOutbox:
     def test_duplicate_alert_not_double_counted_and_not_re_outboxed(
         self, fake_aws, fake_engine, with_correlation_rules
     ):
-        """Fixed: put_alert_if_not_exists returning False means the alert
-        already existed -- stored_alerts must not increment, the
-        correlation write-back must not happen, and (fixed) the outbox
-        write is now gated on the same "genuinely new" condition, so a
-        duplicate is no longer re-outboxed either."""
-        fake_aws.put_alert_if_not_exists.return_value = False
+        """An atomic duplicate must not count or enqueue another delivery."""
+        fake_aws.put_alert_with_outbox.return_value = False
         fake_engine.correlate.return_value = [make_alert()]
         record = make_stream_record(make_signal())
 
@@ -284,8 +277,9 @@ class TestAlertStorageAndOutbox:
         result = alerter.lambda_handler(make_event([record]), make_context())
 
         assert result == {"status": "ok", "alerts_created": 2, "alerts_stored": 2, "outboxed": 2}
-        assert fake_aws.put_alert_if_not_exists.call_count == 2
-        assert fake_aws.ddb_put_item.call_count == 2
+        assert fake_aws.put_alert_with_outbox.call_count == 2
+        assert [c.kwargs["alert_item"]["alert_key"] for c in
+                fake_aws.put_alert_with_outbox.call_args_list] == ["k1", "k2"]
 
 
 # ---------------------------------------------------------------------------

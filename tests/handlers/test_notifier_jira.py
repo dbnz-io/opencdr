@@ -98,10 +98,6 @@ class TestPostJsonBasicAuth:
         expected = "Basic " + base64.b64encode(f"{_EMAIL}:{_TOKEN}".encode()).decode()
         captured_headers: list[dict] = []
 
-        import urllib.request as _ur
-
-        original_open = _ur.urlopen
-
         def fake_open(req, timeout=None):
             captured_headers.append(dict(req.headers))
             raise urllib.error.HTTPError(req.full_url, 200, "ok", {}, None)
@@ -113,6 +109,10 @@ class TestPostJsonBasicAuth:
                 _post_json_basic_auth(
                     f"{_JIRA_BASE}/rest/api/3/issue", {}, email=_EMAIL, token=_TOKEN
                 )
+            # codeql[py/empty-except] -- fake_open deliberately raises to
+            # short-circuit once it's captured the request headers; this
+            # swallows that sentinel exception on purpose, it's not error
+            # handling being skipped.
             except Exception:
                 pass
 

@@ -314,7 +314,7 @@ class TestDeleteSettingsCleansUpSsmRefs:
         assert resp["statusCode"] == 200
         mock_ssm.delete_parameters.assert_not_called()
 
-    def test_delete_swallows_ssm_cleanup_failure(self):
+    def test_delete_swallows_ssm_cleanup_failure(self, capsys):
         stored = {
             "setting_id": "team-a",
             "channels": {"slack": {"webhook_url": "ssm:/opencdr-dev/settings/team-a/slack/webhook_url"}},
@@ -326,3 +326,9 @@ class TestDeleteSettingsCleansUpSsmRefs:
                 make_event("DELETE", "/settings/team-a", path_params={"setting_id": "team-a"}), make_context()
             )
         assert resp["statusCode"] == 200
+        # Swallowed (the DELETE itself still succeeds -- the DynamoDB row is
+        # already gone), but not silently: this used to disappear with zero
+        # trace, leaving an orphaned SSM parameter with no way to know.
+        out = capsys.readouterr().out
+        assert "SSM unavailable" in out
+        assert "/opencdr-dev/settings/team-a/slack/webhook_url" in out
