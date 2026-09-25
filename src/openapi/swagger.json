@@ -1,9 +1,9 @@
 {
   "openapi": "3.0.3",
   "info": {
-    "title": "OpenCDR API",
-    "version": "1.0.0",
-    "description": "OpenCDR management API (signals, logs, rules, settings)"
+    "title": "OpenCDR Core API",
+    "version": "1.2.0",
+    "description": "OpenCDR Core management API (signals, logs, rules, settings)"
   },
   "servers": [
     {
@@ -29,10 +29,28 @@
   "paths": {
     "/status": {
       "get": {
-        "summary": "Health check",
+        "summary": "OpenCDR Core liveness and deployment identity",
         "responses": {
           "200": {
-            "description": "OK"
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": ["status", "product", "core_version", "management_contract_version", "deployment"],
+                  "properties": {
+                    "status": { "type": "string", "enum": ["ok"] },
+                    "product": { "type": "string", "enum": ["OpenCDR Core"] },
+                    "service": { "type": "string" },
+                    "core_version": { "type": "string" },
+                    "management_contract_version": { "type": "string" },
+                    "deployment": { "type": "object" },
+                    "capabilities": { "type": "object" },
+                    "time": { "type": "string" }
+                  }
+                }
+              }
+            }
           }
         }
       }

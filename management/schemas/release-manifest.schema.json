@@ -1,0 +1,56 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://opencdr.dev/schemas/release-manifest/1.0.0",
+  "title": "OpenCDR Core release manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "manifest_version",
+    "product",
+    "release_version",
+    "management_contract_version",
+    "deployment_model",
+    "runtime",
+    "contracts",
+    "capabilities"
+  ],
+  "properties": {
+    "$schema": { "type": "string" },
+    "manifest_version": { "const": "1.0.0" },
+    "product": { "const": "OpenCDR Core" },
+    "release_version": {
+      "type": "string",
+      "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+(?:-[0-9A-Za-z.-]+)?$"
+    },
+    "management_contract_version": {
+      "type": "string",
+      "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$"
+    },
+    "deployment_model": { "const": "single-account-home-region" },
+    "runtime": {
+      "type": "object",
+      "required": ["provider", "python", "regions"],
+      "additionalProperties": false,
+      "properties": {
+        "provider": { "const": "aws" },
+        "python": { "type": "string" },
+        "regions": { "const": "home-plus-regional-collectors" }
+      }
+    },
+    "contracts": {
+      "type": "object",
+      "required": ["health_endpoint", "configuration_bundle_schema", "alert_schema"],
+      "additionalProperties": false,
+      "properties": {
+        "health_endpoint": { "const": "GET /status" },
+        "configuration_bundle_schema": { "type": "string" },
+        "alert_schema": { "type": "string" }
+      }
+    },
+    "capabilities": {
+      "type": "array",
+      "items": { "type": "string" },
+      "uniqueItems": true
+    }
+  }
+}

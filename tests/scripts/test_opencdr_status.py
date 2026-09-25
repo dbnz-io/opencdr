@@ -30,9 +30,20 @@ class TestStatus:
         assert path == "/status"
 
     def test_prints_service_and_time(self, capsys):
-        _run_status()
+        _run_status(api_response=(200, {
+            "product": "OpenCDR Core",
+            "service": "OPENCDR-API",
+            "core_version": "0.3.0",
+            "management_contract_version": "1.0.0",
+            "deployment": {"account_id": "123456789012", "home_region": "us-east-1", "stage": "prod"},
+            "time": "2026-08-14T00:00:00Z",
+            "request_id": "r-1",
+        }))
         out = capsys.readouterr().out
+        assert "OpenCDR Core" in out
         assert "OPENCDR-API" in out
+        assert "0.3.0" in out
+        assert "123456789012 / us-east-1 / prod" in out
         assert "2026-08-14T00:00:00Z" in out
         assert "r-1" in out
 

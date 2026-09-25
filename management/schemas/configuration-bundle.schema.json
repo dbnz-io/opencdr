@@ -1,0 +1,45 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://opencdr.dev/schemas/configuration-bundle/1.0.0",
+  "title": "OpenCDR Core configuration bundle",
+  "description": "Declarative desired configuration for one OpenCDR Core deployment. Fleet applies rules and settings through the existing management API using optimistic concurrency.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["contract_version", "bundle_id", "rules"],
+  "properties": {
+    "contract_version": { "const": "1.0.0" },
+    "bundle_id": { "type": "string", "minLength": 1, "maxLength": 128 },
+    "description": { "type": "string", "maxLength": 1024 },
+    "minimum_core_version": {
+      "type": "string",
+      "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+(?:-[0-9A-Za-z.-]+)?$"
+    },
+    "response_mode": { "type": "string", "enum": ["dry-run", "live"] },
+    "rules": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["rule_id", "rule_kind", "enabled"],
+        "properties": {
+          "rule_id": { "type": "string", "minLength": 1 },
+          "rule_kind": { "type": "string", "enum": ["signal", "correlation", "list"] },
+          "enabled": { "type": "boolean" },
+          "expected_rev": { "type": "integer", "minimum": 0 }
+        },
+        "additionalProperties": true
+      }
+    },
+    "settings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["setting_id"],
+        "properties": {
+          "setting_id": { "type": "string", "minLength": 1 },
+          "expected_rev": { "type": "integer", "minimum": 0 }
+        },
+        "additionalProperties": true
+      }
+    }
+  }
+}

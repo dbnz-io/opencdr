@@ -6,6 +6,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [Unreleased]
+
+### Changed
+- Reframed the repository as **OpenCDR Core**, an account-local detection and response data plane with stable deployed resource names for upgrade compatibility.
+- Made regional onboarding fail closed by default and verify the live EventBridge target after deployment; partial coverage now requires an explicit `--allow-partial`.
+
+### Added
+- Versioned management contract covering the release manifest, `/status` identity response, declarative configuration bundles, and a fleet-facing alert envelope.
+- Regional forwarding DLQs, explicit retry settings, delivery-failure alarms, and source-scoped EventBridge role trust.
+- Deployment-contract tests for CloudFormation description limits, event-pattern parity, regional delivery resources, and manifest/version consistency.
+
 ## [0.2.0] — 2026-08-12
 
 ### Fixed

@@ -10,7 +10,7 @@ The one exception is global services — IAM, STS, Route53, CloudFront, Organiza
 
 Everything else — `011` (security groups), every GuardDuty finding, `013`–`019` (Config, Security Hub, Secrets Manager, SSM, S3, RDS) — is silently blind in every region except the deployment region, for any account operating in more than one. This isn't an edge case; multi-region AWS usage is the norm.
 
-## The fix: cross-region forwarding, opt-in per region
+## The fix: account-local cross-region forwarding
 
 Same shape as [multi-account IR role onboarding](ir-role.md): a `serverless deploy` in the home region can't provision an EventBridge rule in a different region, so each additional region you want covered needs a small, separate one-time setup, applied via `scripts/setup_region_forwarding.sh`, not automatically.
 
@@ -43,7 +43,7 @@ serverless deploy --stage dev
 
 `--region` (singular, one value) and `--regions` (comma-separated) are interchangeable — `--region` exists purely as a convenience for the common case of onboarding just one region at a time, without needing to think about list syntax.
 
-The script reads `DefaultEventBusArn` and `RegionForwarderRoleArn` from the home region's stack outputs, then deploys `region-forwarding/cross-region-forwarder.yaml` — a small standalone CloudFormation template (no Serverless Framework dependency, same reasoning as [`ci-bootstrap/`](../ci-bootstrap/README.md)) — independently in each target region. That template creates one `AWS::Events::Rule` on the target region's own default bus, mirroring `processor`'s event pattern, targeting the home region's bus.
+The script reads `DefaultEventBusArn` and `RegionForwarderRoleArn` from the home region's stack outputs, then deploys `region-forwarding/cross-region-forwarder.yaml` independently in each target region. Each regional stack creates an EventBridge rule, an encrypted SQS dead-letter queue, an explicit 24-hour/185-attempt delivery policy, delivery alarms, and the queue policy EventBridge needs. After deployment, the script reads the live rule and target back and verifies the destination bus, role, DLQ, retry policy, and enabled state before counting that region as successful.
 
 ### Removing a region
 
@@ -56,7 +56,7 @@ Deletes that region's forwarding stack (`aws cloudformation delete-stack`, waite
 
 ### Failures are per-region, not all-or-nothing
 
-An AWS Control Tower or Service Control Policy setup that restricts the account to an approved region list will legitimately deny CloudFormation/EventBridge calls in blocked regions — this is expected, not a bug. `setup_region_forwarding.sh` deploys each region independently and continues past a failure rather than aborting the whole run, printing a full succeeded/failed/skipped summary at the end. Verified directly (not just claimed): a mock run with one region simulating an `AccessDeniedException` confirmed the other regions still deploy and the script exits `0` on partial success.
+An AWS Control Tower or Service Control Policy setup that restricts the account to an approved region list will legitimately deny CloudFormation/EventBridge calls in blocked regions. `setup_region_forwarding.sh` still attempts every requested region so its summary is complete, but exits nonzero if **any** region failed. Incomplete coverage must be accepted explicitly with `--allow-partial`.
 
 ### What's created
 
@@ -66,6 +66,9 @@ An AWS Control Tower or Service Control Policy setup that restricts the account 
 
 **Each additional region** (`region-forwarding/cross-region-forwarder.yaml`, applied independently):
 - One `AWS::Events::Rule` on that region's own default bus, matching the identical event pattern `processor`'s rule uses, targeting the home region's bus via the role above.
+- One encrypted SQS dead-letter queue retaining undelivered events for 14 days.
+- An explicit EventBridge retry policy and queue policy scoped to that forwarding rule.
+- CloudWatch alarms for permanent EventBridge delivery failures and visible DLQ messages. Alarm actions are intentionally left to the account's existing alarm-routing policy.
 
 ## Keeping this in sync
 

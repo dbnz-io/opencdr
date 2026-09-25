@@ -1,11 +1,13 @@
-# OpenCDR Documentation
+# OpenCDR Core Documentation
 
-*Open-source Cloud Detection & Response for AWS — ingests CloudTrail and GuardDuty events, runs them through a configurable detection and correlation engine, and delivers alerts (with optional automated incident response) to Slack, Discord, Email, Security Hub, Jira, or any custom webhook.*
+*Account-local Cloud Detection & Response for AWS. Each Core deployment protects one AWS account and remains operational independently of any fleet control plane.*
 
 This is the deep-reference documentation set. For a fast-start overview and copy-paste command reference, the root [README](../README.md) is often quicker; these pages go deeper on *why* things are built the way they are, and are meant to work as a standalone reference on their own.
 
 ## Pages
 
+- [OpenCDR Core](core.md) — product boundary, account-local topology, and fleet-management separation
+- [Management contract](management-contract.md) — release manifest, health identity, configuration bundle, and alert schemas
 - [Complete Setup Guide](setup.md) — every step, in order, from a clean AWS account to a fully working deployment
 - [Architecture](architecture.md) — the ten Lambdas, the data stores, and how an event flows from raw CloudTrail record to delivered alert
 - [Detection Rules](detection-rules.md) — the rule schema, how to author/test/load rules
@@ -23,12 +25,14 @@ This is the deep-reference documentation set. For a fast-start overview and copy
 - [Falco and executable S3 ingestion](s3-ingestion.md) — setup, parser contract, operations and release gates.
 
 - [`region-forwarding.md`](region-forwarding.md) — why OpenCDR is blind outside its deployment region by default, and how to fix it
-- [`org-forwarding.md`](org-forwarding.md) — routing every member account's events into a central security account, without an org-wide `PutEvents` grant
+- [`org-forwarding.md`](org-forwarding.md) — legacy central-ingestion compatibility path; new installations use one Core per account
 
 ## Find what you need
 
 | Question | Page |
 |---|---|
+| What belongs in Core versus a fleet manager? | [OpenCDR Core](core.md) |
+| What stable contract can fleet tooling depend on? | [Management contract](management-contract.md) |
 | What does OpenCDR actually do, end to end? | [Architecture](architecture.md) |
 | I'm setting this up for the first time — what's the full checklist? | [Complete Setup Guide](setup.md) |
 | How do I deploy this into a new AWS account? | [Deployment](deployment.md) |
@@ -48,7 +52,7 @@ This is the deep-reference documentation set. For a fast-start overview and copy
 | How do I set up incident response across multiple AWS accounts? | [`ir-role.md`](ir-role.md) |
 | My account operates in more than one region — will OpenCDR catch everything? | [`region-forwarding.md`](region-forwarding.md) |
 | Why does GuardDuty/EC2/S3 activity in another region never generate a signal? | [`region-forwarding.md`](region-forwarding.md#the-problem) |
-| I run an AWS Organization — how do I get every member account's events into one place? | [`org-forwarding.md`](org-forwarding.md) |
+| I run an AWS Organization — what is the Core deployment unit? | [OpenCDR Core](core.md) — one Core per account; fleet orchestration is separate |
 | How do I disable automated response for one account without deleting its config? | [`ir-role.md`](ir-role.md#multi-account-onboard-each-additional-account) |
 | Are API keys scoped, or does one key control everything? | [API Reference](api-reference.md#api-key-scopes) |
 | Can I manage rules/settings/etc. from an MCP client instead of the CLI? | [API Reference](api-reference.md#mcp-server-default-management-plane) |

@@ -1,0 +1,24 @@
+{
+  "$schema": "./schemas/release-manifest.schema.json",
+  "manifest_version": "1.0.0",
+  "product": "OpenCDR Core",
+  "release_version": "0.3.0-dev",
+  "management_contract_version": "1.0.0",
+  "deployment_model": "single-account-home-region",
+  "runtime": {
+    "provider": "aws",
+    "python": "3.12",
+    "regions": "home-plus-regional-collectors"
+  },
+  "contracts": {
+    "health_endpoint": "GET /status",
+    "configuration_bundle_schema": "management/schemas/configuration-bundle.schema.json",
+    "alert_schema": "management/schemas/alert.schema.json"
+  },
+  "capabilities": [
+    "account-local-processing",
+    "multi-region-forwarding",
+    "configuration-bundles",
+    "versioned-alert-schema"
+  ]
+}

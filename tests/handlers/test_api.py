@@ -83,6 +83,10 @@ class TestStatusAndHelp:
         assert resp["statusCode"] == 200
         body = body_of(resp)
         assert body["status"] == "ok"
+        assert body["product"] == "OpenCDR Core"
+        assert body["management_contract_version"] == "1.0.0"
+        assert body["capabilities"]["account_local"] is True
+        assert set(body["deployment"]) == {"stage", "account_id", "home_region"}
         assert body["request_id"] == "test-req-id"
 
     def test_help_lists_endpoints(self):

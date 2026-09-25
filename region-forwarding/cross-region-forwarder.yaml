@@ -1,28 +1,8 @@
 AWSTemplateFormatVersion: "2010-09-09"
 Description: >
-  Standalone template forwarding one AWS region's CloudTrail/GuardDuty
-  EventBridge events to OpenCDR's home (deployment) region.
-
-  Why this exists: OpenCDR's own serverless.yml wires processor's
-  EventBridge rule to the default bus in its own deployment region only.
-  CloudTrail delivers an event to the default bus in whichever region the
-  API call actually happened in -- true even for a multi-region trail --
-  and GuardDuty detectors are inherently per-region. An account operating
-  in more than one region is otherwise silently blind everywhere except
-  the one region OpenCDR is deployed to.
-
-  Deliberately kept separate from the main serverless.yml, same reasoning
-  as ci-bootstrap/ -- a `serverless deploy` in the home region can't
-  provision a rule in a different region, so this is applied independently
-  once per additional region you want covered (via
-  scripts/setup_region_forwarding.sh, not manually region by region).
-
-  The event pattern below must be kept in sync with processor's own
-  EventBridge rule in serverless.yml AND with
-  org-forwarding/account-event-forwarder.yaml's copy -- if you add a new
-  event source to one and not the others, that source goes blind in
-  every non-deployment region or member account the other two cover. See
-  docs/org-forwarding.md.
+  OpenCDR Core regional collector. Forwards matching CloudTrail and GuardDuty
+  events from one additional region to the account-local home region. Deploy
+  once per enabled region through scripts/setup_region_forwarding.sh.
 
 Parameters:
   ServiceName:
@@ -45,8 +25,16 @@ Parameters:
       creating one per region under the same name would collide.
 
 Resources:
+  ForwardingDeadLetterQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub "${ServiceName}-${Stage}-region-forwarder-dlq"
+      MessageRetentionPeriod: 1209600
+      SqsManagedSseEnabled: true
+
   ForwardingRule:
     Type: AWS::Events::Rule
+    DependsOn: ForwardingDeadLetterQueuePolicy
     Properties:
       Name: !Sub "${ServiceName}-${Stage}-region-forwarder"
       Description: !Sub "Forwards this region's CloudTrail/GuardDuty events to ${HomeEventBusArn}"
@@ -75,7 +63,72 @@ Resources:
         - Id: HomeRegionBus
           Arn: !Ref HomeEventBusArn
           RoleArn: !Ref HomeForwarderRoleArn
+          RetryPolicy:
+            MaximumEventAgeInSeconds: 86400
+            MaximumRetryAttempts: 185
+          DeadLetterConfig:
+            Arn: !GetAtt ForwardingDeadLetterQueue.Arn
+
+  ForwardingDeadLetterQueuePolicy:
+    Type: AWS::SQS::QueuePolicy
+    Properties:
+      Queues:
+        - !Ref ForwardingDeadLetterQueue
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: AllowEventBridgeRule
+            Effect: Allow
+            Principal:
+              Service: events.amazonaws.com
+            Action: sqs:SendMessage
+            Resource: !GetAtt ForwardingDeadLetterQueue.Arn
+            Condition:
+              ArnEquals:
+                aws:SourceArn: !Sub "arn:${AWS::Partition}:events:${AWS::Region}:${AWS::AccountId}:rule/${ServiceName}-${Stage}-region-forwarder"
+
+  ForwardingFailedInvocationsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${ServiceName}-${Stage}-${AWS::Region}-region-forwarder-failed"
+      AlarmDescription: "OpenCDR Core regional collector permanently failed to deliver an event"
+      Namespace: AWS/Events
+      MetricName: FailedInvocations
+      Dimensions:
+        - Name: RuleName
+          Value: !Ref ForwardingRule
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+
+  ForwardingDeadLetterQueueAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${ServiceName}-${Stage}-${AWS::Region}-region-forwarder-dlq"
+      AlarmDescription: "OpenCDR Core regional collector has undelivered events in its DLQ"
+      Namespace: AWS/SQS
+      MetricName: ApproximateNumberOfMessagesVisible
+      Dimensions:
+        - Name: QueueName
+          Value: !GetAtt ForwardingDeadLetterQueue.QueueName
+      Statistic: Maximum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
 
 Outputs:
   ForwardingRuleArn:
     Value: !GetAtt ForwardingRule.Arn
+  ForwardingDeadLetterQueueArn:
+    Value: !GetAtt ForwardingDeadLetterQueue.Arn
+  ForwardingDeadLetterQueueUrl:
+    Value: !Ref ForwardingDeadLetterQueue
+  ForwardingFailedInvocationsAlarmName:
+    Value: !Ref ForwardingFailedInvocationsAlarm
+  ForwardingDeadLetterQueueAlarmName:
+    Value: !Ref ForwardingDeadLetterQueueAlarm

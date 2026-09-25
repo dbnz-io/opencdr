@@ -2,6 +2,8 @@
 
 *The REST API's authentication model and endpoint surface — for exact request/response schemas, [`openapi.yml`](../openapi.yml) is the authoritative machine-readable spec, though see the note below on where it's currently out of sync with the actual code.*
 
+`GET /status` is OpenCDR Core's stable liveness and deployment-identity contract. It reports the Core version, management-contract version, account, home region, stage, and advertised capabilities; see [Management contract](management-contract.md).
+
 ## Authentication
 
 Every endpoint requires an `x-api-key` header. Keys are created automatically by API Gateway on deploy and available in the deploy output, or in SSM — along with the base URL itself, handy for pointing Postman, `curl`, `scripts/opencdr.py`, or the MCP server at a deployed stage directly (see [Deployment](deployment.md)).
