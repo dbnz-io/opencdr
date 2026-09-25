@@ -1,9 +1,9 @@
 openapi: 3.0.3
 info:
-  title: OpenCDR API
-  version: "1.1.0"
+  title: OpenCDR Core API
+  version: "1.2.0"
   description: >-
-    OpenCDR management API: signals, logs, detection rules, detection lists,
+    OpenCDR Core management API: signals, logs, detection rules, detection lists,
     notification settings, IR-role mappings, and executed IR actions. All
     routes require an x-api-key whose name encodes its scopes (see
     docs/api-reference.md#api-key-scopes).
@@ -26,6 +26,28 @@ components:
       name: x-api-key
 
   schemas:
+    CoreStatus:
+      type: object
+      required: [status, product, service, core_version, management_contract_version, deployment, capabilities, time]
+      properties:
+        status: { type: string, enum: [ok] }
+        product: { type: string, enum: [OpenCDR Core] }
+        service: { type: string }
+        core_version: { type: string }
+        management_contract_version: { type: string }
+        deployment:
+          type: object
+          required: [stage, account_id, home_region]
+          properties:
+            stage: { type: string }
+            account_id: { type: string }
+            home_region: { type: string }
+        capabilities:
+          type: object
+          additionalProperties: true
+        lambda_name: { type: string }
+        time: { type: string, format: date-time }
+        request_id: { type: string, nullable: true }
     IntegrationBinding:
       type: object
       properties:
@@ -753,7 +775,7 @@ paths:
           type: string
   /status:
     get:
-      summary: Health check
+      summary: OpenCDR Core liveness, version, deployment identity, and capabilities
       security: []
       responses:
         "200":
@@ -761,11 +783,7 @@ paths:
           content:
             application/json:
               schema:
-                type: object
-                properties:
-                  status: { type: string }
-                  service: { type: string }
-                  time: { type: string }
+                $ref: "#/components/schemas/CoreStatus"
 
   /help:
     get:

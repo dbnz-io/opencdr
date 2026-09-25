@@ -65,6 +65,12 @@ ir_actions_table = ddb.Table(IR_ACTIONS_TABLE_NAME)
 # ---------------------------------------------------------------------------
 
 SERVICE = os.getenv("SERVICE_NAME", "OPENCDR-API")
+PRODUCT = os.getenv("OPENCDR_PRODUCT", "OpenCDR Core")
+CORE_VERSION = os.getenv("OPENCDR_CORE_VERSION", "0.0.0-unknown")
+MANAGEMENT_CONTRACT_VERSION = os.getenv("OPENCDR_MANAGEMENT_CONTRACT_VERSION", "1.0.0")
+DEPLOYMENT_STAGE = os.getenv("STAGE", "dev")
+DEPLOYMENT_ACCOUNT_ID = os.getenv("OPENCDR_ACCOUNT_ID", "")
+DEPLOYMENT_HOME_REGION = os.getenv("OPENCDR_HOME_REGION", os.getenv("AWS_REGION", ""))
 
 ALLOWED_SEVERITIES = {"CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO", "INFORMATIONAL", "UNKNOWN"}
 ALLOWED_RULE_KINDS = {"signal", "correlation", "list"}
@@ -286,7 +292,21 @@ def lambda_handler(event, context):
                 200,
                 {
                     "status": "ok",
+                    "product": PRODUCT,
                     "service": SERVICE,
+                    "core_version": CORE_VERSION,
+                    "management_contract_version": MANAGEMENT_CONTRACT_VERSION,
+                    "deployment": {
+                        "stage": DEPLOYMENT_STAGE,
+                        "account_id": DEPLOYMENT_ACCOUNT_ID,
+                        "home_region": DEPLOYMENT_HOME_REGION,
+                    },
+                    "capabilities": {
+                        "account_local": True,
+                        "multi_region_forwarding": True,
+                        "configuration_bundles": True,
+                        "alert_schema": "opencdr.alert/1.0.0",
+                    },
                     "lambda_name": LAMBDA_NAME,
                     "time": datetime.now(UTC).isoformat(),
                     "request_id": request_id,

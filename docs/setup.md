@@ -108,16 +108,11 @@ curl -X POST "$OPENCDR_API_URL/ir-roles" -H "x-api-key: $OPENCDR_API_KEY" \
 
 Full walkthrough (trust policy, kill-switch, keeping the permissions policy in sync): [`ir-role.md`](ir-role.md).
 
-## 9. Onboard an AWS Organization — only for a multi-account org routing events to one central deployment
+## 9. Repeat Core deployment for additional accounts
 
-Skip this unless you're deploying once in a central security account and want every member account's CloudTrail/GuardDuty events routed there. Different concern from step 8 above — this is about event *ingestion*, not incident-response permissions. Two parts: redeploy the central account with your org ID, then onboard each member account:
+OpenCDR Core's deployment unit is one AWS account. For an AWS Organization, repeat steps 1–8 in each protected account: deploy one home-region Core and add account-local collectors for that account's enabled regions. Organization discovery, coordinated rollout, drift, and fleet health are deliberately a separate control-plane concern; see [OpenCDR Core](core.md) and the [management contract](management-contract.md).
 
-```bash
-serverless deploy --stage dev --param="orgId=o-XXXXXXXXXX"
-./scripts/setup_org_forwarding.sh --stage dev --profiles member-a,member-b
-```
-
-Full detail, including exactly why this isn't a single `aws events put-permission --principal "*"` call: [Org-Wide Account Forwarding](org-forwarding.md).
+The previous central-ingestion workflow remains documented in [Org-Wide Account Forwarding](org-forwarding.md) for compatibility with existing installations, but is not recommended for new Core deployments.
 
 ## 10. Set up CI/CD — optional, recommended for anything beyond a one-off evaluation
 

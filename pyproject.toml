@@ -1,7 +1,7 @@
 [project]
 name = "opencdr"
-version = "1.1.0"
-description = "Open-source Cloud Detection & Response for AWS"
+version = "1.1.1"
+description = "OpenCDR Core — account-local Cloud Detection & Response for AWS"
 readme = "README.md"
 license = { text = "MPL-2.0" }
 requires-python = ">=3.11"

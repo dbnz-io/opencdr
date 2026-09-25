@@ -1,0 +1,50 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://opencdr.dev/schemas/alert/1.0.0",
+  "title": "OpenCDR Core alert",
+  "description": "Stable fleet-facing envelope for an account-local signal or correlation alert. Transports may add metadata outside the JSON body, but must not change this envelope.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "id",
+    "emitted_at",
+    "kind",
+    "severity",
+    "rule_id",
+    "deployment",
+    "payload"
+  ],
+  "properties": {
+    "schema": { "const": "opencdr.alert/1.0.0" },
+    "id": { "type": "string", "minLength": 1 },
+    "emitted_at": { "type": "string", "format": "date-time" },
+    "kind": { "type": "string", "enum": ["signal", "correlation"] },
+    "severity": {
+      "type": "string",
+      "enum": ["CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO", "INFORMATIONAL", "UNKNOWN"]
+    },
+    "rule_id": { "type": "string", "minLength": 1 },
+    "deployment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["account_id", "home_region", "stage", "core_version"],
+      "properties": {
+        "account_id": { "type": "string", "pattern": "^[0-9]{12}$" },
+        "home_region": { "type": "string", "minLength": 1 },
+        "stage": { "type": "string", "minLength": 1 },
+        "core_version": { "type": "string", "minLength": 1 }
+      }
+    },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "account_id": { "type": "string", "pattern": "^[0-9]{12}$" },
+        "region": { "type": "string" },
+        "event_id": { "type": "string" }
+      }
+    },
+    "payload": { "type": "object" }
+  }
+}

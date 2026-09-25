@@ -1,0 +1,25 @@
+{
+  "schema": "opencdr.alert/1.0.0",
+  "id": "8a687f20-b3bb-4657-8f04-58ac73ac90e3",
+  "emitted_at": "2026-09-25T18:00:00Z",
+  "kind": "signal",
+  "severity": "HIGH",
+  "rule_id": "009_admin_policy_attached",
+  "deployment": {
+    "account_id": "123456789012",
+    "home_region": "us-east-1",
+    "stage": "prod",
+    "core_version": "0.3.0"
+  },
+  "source": {
+    "account_id": "123456789012",
+    "region": "eu-west-1",
+    "event_id": "example-cloudtrail-event-id"
+  },
+  "payload": {
+    "detection_id": "8a687f20-b3bb-4657-8f04-58ac73ac90e3",
+    "activity_name": "AttachUserPolicy",
+    "cloud_account_id": "123456789012",
+    "cloud_region": "eu-west-1"
+  }
+}

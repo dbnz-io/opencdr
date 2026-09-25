@@ -1,5 +1,7 @@
 # Org-Wide Account Forwarding
 
+> **Legacy compatibility path.** New installations should deploy one OpenCDR Core per AWS account and use account-local regional collectors. This central-ingestion design remains documented for existing deployments while fleet management is developed as a separate control plane; it is not the recommended OpenCDR Core topology.
+
 *How to route every member account's CloudTrail/GuardDuty events into a central security account running OpenCDR — without granting `events:PutEvents` to anyone who happens to have a credential in the org.*
 
 ## The problem this replaces

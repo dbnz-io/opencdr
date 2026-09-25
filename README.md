@@ -1,4 +1,4 @@
-# OpenCDR
+# OpenCDR Core
 
 [![CI](https://github.com/dbnz-io/opencdr/actions/workflows/ci.yml/badge.svg)](https://github.com/dbnz-io/opencdr/actions/workflows/ci.yml)
 ![Coverage](coverage-badge.svg)
@@ -7,7 +7,9 @@
 ![Python 3.12](https://img.shields.io/badge/python-3.12-blue.svg)
 [![CodeQL](https://github.com/dbnz-io/opencdr/actions/workflows/github-code-scanning/codeql/badge.svg)](https://github.com/dbnz-io/opencdr/security/code-scanning)
 
-Open-source event-driven Cloud Detection & Response for AWS. OpenCDR ingests CloudTrail and GuardDuty events, evaluates them against configurable detection rules, correlates related activity, and delivers alerts to Slack, Discord, Email, AWS Security Hub, Jira, or any HTTPS webhook — with optional automated incident response.
+OpenCDR Core is an open-source, account-local Cloud Detection & Response data plane for AWS. One deployment protects one AWS account: it ingests CloudTrail and GuardDuty events, evaluates configurable rules, correlates activity, and delivers alerts with optional automated incident response. A home-region deployment plus lightweight regional collectors provides multi-region coverage without making detection depend on an organization-level service.
+
+The deployed service and resource names remain `opencdr` for upgrade compatibility. See [OpenCDR Core](docs/core.md) for the product boundary and [Management contract](docs/management-contract.md) for the stable interface an optional fleet manager can use.
 
 This README is a quickstart: enough to get a working deployment. Everything else — full architecture, every notification channel's setup, writing detection rules, the automated-response module reference, multi-account/multi-region setup, CI/CD, observability, cost tracking, SIEM integrations, the security model — lives in **[`docs/`](docs/README.md)**, which has a ["find what you need"](docs/README.md#find-what-you-need) index.
 
@@ -70,7 +72,7 @@ Or enable it in the AWS Console under **CloudTrail → Trails → Create trail**
 
 > Without CloudTrail enabled, the processor Lambda will never receive events and no signals will be generated.
 
-Deploying into an AWS Organization instead of a single account? See [`docs/org-forwarding.md`](docs/org-forwarding.md) — routes every member account's events into one central deployment.
+For more than one AWS account, deploy Core independently in each account. Organization discovery, rollout, drift, and fleet health belong in a separate control plane; the previous central-ingestion recipe is retained only for existing deployments in [`docs/org-forwarding.md`](docs/org-forwarding.md).
 
 ---
 

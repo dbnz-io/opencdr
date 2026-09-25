@@ -7,7 +7,9 @@ params:
     alarmEmail: ""
     alertEmail: ""  # email for security detection alerts; can match alarmEmail
     monthlyBudgetUsd: "50"  # threshold for the AWS Budgets cost alert -- override with --param="monthlyBudgetUsd=<amount>"
-    orgId: ""  # your AWS Organization ID (o-xxxxxxxxxx) -- only set this for an org-wide deployment, see docs/org-forwarding.md
+    orgId: ""  # legacy central-ingestion compatibility only; new installs deploy one Core per account
+    coreVersion: "0.3.0-dev"  # release-manifest.json; overridden for immutable releases
+    managementContractVersion: "1.0.0"
 
 package:
   patterns:
@@ -91,6 +93,11 @@ provider:
 
   environment:
     STAGE: "${self:provider.stage}"
+    OPENCDR_PRODUCT: "OpenCDR Core"
+    OPENCDR_CORE_VERSION: "${param:coreVersion}"
+    OPENCDR_MANAGEMENT_CONTRACT_VERSION: "${param:managementContractVersion}"
+    OPENCDR_ACCOUNT_ID: !Ref AWS::AccountId
+    OPENCDR_HOME_REGION: "${self:provider.region}"
     INGESTION_TABLE_NAME: "${self:service}-${self:provider.stage}-ingestion"
     INGESTION_BUCKET: !Sub "${self:service}-${self:provider.stage}-ingestion-${AWS::AccountId}-${AWS::Region}"
     CUSTOM_PARSER_ARNS: "${param:customParserArns}"
@@ -2811,6 +2818,11 @@ resources:
               Principal:
                 Service: events.amazonaws.com
               Action: sts:AssumeRole
+              Condition:
+                StringEquals:
+                  aws:SourceAccount: !Ref AWS::AccountId
+                ArnLike:
+                  aws:SourceArn: !Sub "arn:${AWS::Partition}:events:*:${AWS::AccountId}:rule/${self:service}-${self:provider.stage}-region-forwarder"
         Policies:
           - PolicyName: put-events-to-home-bus
             PolicyDocument:
@@ -2883,6 +2895,21 @@ resources:
               aws:PrincipalArn: !Sub "arn:aws:iam::*:role/${self:service}-${self:provider.stage}-account-forwarder-role"
 
   Outputs:
+    CoreProduct:
+      Description: "Stable product identity for fleet discovery"
+      Value: "OpenCDR Core"
+    CoreVersion:
+      Description: "OpenCDR Core release version"
+      Value: "${param:coreVersion}"
+    ManagementContractVersion:
+      Description: "Version of the fleet-facing management contract"
+      Value: "${param:managementContractVersion}"
+    CoreAccountId:
+      Description: "AWS account protected by this Core deployment"
+      Value: !Ref AWS::AccountId
+    CoreHomeRegion:
+      Description: "Home region containing the complete Core data plane"
+      Value: !Ref AWS::Region
     IngestionBucketName:
       Value: !Ref IngestionBucket
     IngestionWorkerRoleArn:

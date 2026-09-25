@@ -12,19 +12,20 @@
 # region-forwarding/cross-region-forwarder.yaml once per additional
 # region, each forwarding that region's events to the home region.
 #
-# Per-region failures are expected, not fatal: an account with AWS
+# Per-region failures are isolated so every requested region is attempted: an account with AWS
 # Control Tower or an SCP restricting the approved region list will
 # legitimately deny CloudFormation/EventBridge calls in blocked regions.
 # This script acts on each region independently, catches a failure in
-# one without aborting the rest, and prints a full per-region summary at
-# the end -- never a single all-or-nothing operation. Same guarantee
-# applies to --remove.
+# one without aborting the loop, and prints a full per-region summary at
+# the end. The final exit is nonzero if any region failed unless the operator
+# explicitly accepts incomplete coverage with --allow-partial.
 #
 # Usage:
 #   ./scripts/setup_region_forwarding.sh --region eu-west-1
 #   ./scripts/setup_region_forwarding.sh --regions us-west-2,eu-west-1
 #   ./scripts/setup_region_forwarding.sh --stage prod --home-region us-west-2 --regions eu-west-1,ap-southeast-1
 #   ./scripts/setup_region_forwarding.sh --regions eu-west-1 --dry-run
+#   ./scripts/setup_region_forwarding.sh --regions eu-west-1,ap-southeast-1 --allow-partial
 #   ./scripts/setup_region_forwarding.sh --region eu-west-1 --remove      # tear down one region
 #   ./scripts/setup_region_forwarding.sh --regions eu-west-1,ap-southeast-1 --remove
 #
@@ -38,6 +39,7 @@ HOME_REGION="us-east-1"
 REGIONS=""
 DRY_RUN=false
 REMOVE=false
+ALLOW_PARTIAL=false
 TEMPLATE="$(cd "$(dirname "$0")/.." && pwd)/region-forwarding/cross-region-forwarder.yaml"
 
 # ─── Argument parsing ────────────────────────────────────────────────────────
@@ -49,6 +51,7 @@ while [[ $# -gt 0 ]]; do
     --region)      REGIONS="$2";     shift 2 ;;  # singular shorthand -- identical to --regions with one value
     --remove)      REMOVE=true;      shift   ;;
     --dry-run)     DRY_RUN=true;     shift   ;;
+    --allow-partial) ALLOW_PARTIAL=true; shift ;;
     *) echo "Unknown argument: $1"; exit 1 ;;
   esac
 done
@@ -69,6 +72,7 @@ echo "  Stage       : ${STAGE}"
 echo "  Home region : ${HOME_REGION}"
 echo "  Target regions: ${REGIONS}"
 echo "  Dry run     : ${DRY_RUN}"
+echo "  Allow partial success: ${ALLOW_PARTIAL}"
 echo ""
 
 # ─── Verify dependencies ─────────────────────────────────────────────────────
@@ -181,8 +185,36 @@ for region in "${REGION_LIST[@]}"; do
         HomeForwarderRoleArn="$FORWARDER_ROLE_ARN" \
       --no-fail-on-empty-changeset \
       2>"/tmp/opencdr-region-forward-${region}.err"; then
-    echo "  OK"
-    SUCCEEDED+=("$region")
+    rule_state=$(aws events describe-rule \
+      --name "opencdr-${STAGE}-region-forwarder" \
+      --region "$region" \
+      --query State --output text 2>>"/tmp/opencdr-region-forward-${region}.err")
+    target=$(aws events list-targets-by-rule \
+      --rule "opencdr-${STAGE}-region-forwarder" \
+      --region "$region" \
+      --query "Targets[?Id=='HomeRegionBus'].[Arn,RoleArn,DeadLetterConfig.Arn,RetryPolicy.MaximumEventAgeInSeconds,RetryPolicy.MaximumRetryAttempts] | [0]" \
+      --output text 2>>"/tmp/opencdr-region-forward-${region}.err")
+    dlq_arn=$(aws cloudformation describe-stacks \
+      --stack-name "opencdr-${STAGE}-region-forwarder" \
+      --region "$region" \
+      --query "Stacks[0].Outputs[?OutputKey=='ForwardingDeadLetterQueueArn'].OutputValue" \
+      --output text 2>>"/tmp/opencdr-region-forward-${region}.err")
+
+    IFS=$'\t' read -r target_arn target_role target_dlq target_age target_attempts <<< "$target"
+    if [[ "$rule_state" == "ENABLED" \
+       && "$target_arn" == "$HOME_BUS_ARN" \
+       && "$target_role" == "$FORWARDER_ROLE_ARN" \
+       && -n "$dlq_arn" && "$dlq_arn" != "None" \
+       && "$target_dlq" == "$dlq_arn" \
+       && "$target_age" == "86400" \
+       && "$target_attempts" == "185" ]]; then
+      echo "  OK (deployed and verified)"
+      SUCCEEDED+=("$region")
+    else
+      reason="post-deploy verification failed (state=${rule_state}, target=${target_arn}, role=${target_role}, dlq=${target_dlq}, retry=${target_age}/${target_attempts})"
+      echo "  FAILED: ${reason}"
+      FAILED+=("$region: ${reason}")
+    fi
   else
     reason="$(tail -1 "/tmp/opencdr-region-forward-${region}.err" 2>/dev/null)"
     echo "  FAILED: ${reason}"
@@ -208,8 +240,8 @@ done
 echo "  Skipped   (${#SKIPPED[@]}): ${SKIPPED[*]:-none}"
 echo ""
 
-if [[ ${#SUCCEEDED[@]} -eq 0 && ${#FAILED[@]} -gt 0 ]]; then
-  echo "ERROR: every target region failed."
+if [[ ${#FAILED[@]} -gt 0 && "$ALLOW_PARTIAL" != true ]]; then
+  echo "ERROR: one or more target regions failed. Re-run after fixing them, or pass --allow-partial to accept incomplete coverage explicitly."
   exit 1
 fi
 

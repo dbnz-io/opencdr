@@ -1,0 +1,29 @@
+{
+  "contract_version": "1.0.0",
+  "bundle_id": "baseline-production",
+  "description": "Example desired configuration for one production Core deployment",
+  "minimum_core_version": "0.3.0",
+  "response_mode": "dry-run",
+  "rules": [
+    {
+      "rule_id": "example-console-login",
+      "rule_kind": "signal",
+      "enabled": true,
+      "severity": "MEDIUM",
+      "description": "Example fleet-managed signal rule",
+      "conditions": [
+        {
+          "field": "activity_name",
+          "op": "equals",
+          "value": "ConsoleLogin"
+        }
+      ]
+    }
+  ],
+  "settings": [
+    {
+      "setting_id": "global",
+      "notifications_enabled": true
+    }
+  ]
+}

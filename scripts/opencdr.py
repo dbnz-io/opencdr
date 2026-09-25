@@ -217,7 +217,17 @@ def cmd_status(args: argparse.Namespace) -> None:
     status, body = _request("GET", "/status", url, key)
     _die_on_error(status, body, "status")
     print(ok("  API online"))
+    print(f"  Product    : {body.get('product', 'OpenCDR Core')}")
     print(f"  Service    : {body.get('service', '')}")
+    print(f"  Version    : {body.get('core_version', '')}")
+    print(f"  Contract   : {body.get('management_contract_version', '')}")
+    deployment = body.get("deployment") or {}
+    print(
+        "  Deployment : "
+        f"{deployment.get('account_id', '')} / "
+        f"{deployment.get('home_region', '')} / "
+        f"{deployment.get('stage', '')}"
+    )
     print(f"  Time       : {body.get('time', '')}")
     print(f"  Request ID : {body.get('request_id', '')}")
 
