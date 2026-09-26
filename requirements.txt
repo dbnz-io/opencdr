@@ -10,7 +10,7 @@ typing_extensions>=4.10.0
 # per-call timeout= that raises TimeoutError instead of hanging -- the hard
 # bound against a catastrophic-backtracking (ReDoS) rule stalling detection
 # account-wide. See src/domain/detection_engine.py _bounded_regex_search.
-regex>=2024.5.15
+regex>=2026.9.10
 
 # provider.tracing in serverless.yml only traces the Lambda invocation
 # boundary; this is what makes DynamoDB/SQS/SNS calls show up as their own
