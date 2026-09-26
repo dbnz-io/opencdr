@@ -17,6 +17,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Regional forwarding DLQs, explicit retry settings, delivery-failure alarms, and source-scoped EventBridge role trust.
 - Deployment-contract tests for CloudFormation description limits, event-pattern parity, regional delivery resources, and manifest/version consistency.
 - PyPI Trusted Publishing with build validation and provenance attestations for every tagged release.
+- Publish the Python distribution under its registered PyPI project name, `ocdr`.
 
 ## [0.2.0] — 2026-08-12
 
