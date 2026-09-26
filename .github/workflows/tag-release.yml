@@ -14,6 +14,14 @@ on:
   pull_request:
     types: [closed]
     branches: [main]
+  # Recovery path for publishing a GitHub release that predates PyPI support.
+  # Normal releases still publish automatically after their release PR merges.
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Existing SemVer tag to publish (for example, v1.2.3)
+        required: true
+        type: string
 
 permissions:
   contents: write
@@ -22,6 +30,7 @@ permissions:
 jobs:
   tag-release:
     if: >
+      github.event_name == 'pull_request' &&
       github.event.pull_request.merged == true &&
       startsWith(github.event.pull_request.head.ref, 'release/')
     name: Tag and create release
@@ -95,3 +104,66 @@ jobs:
           gh release create "$VERSION" "sbom-${VERSION}.json" \
             --title "$VERSION" \
             --notes-file /tmp/release-notes.md
+
+  publish-pypi:
+    name: Publish Python distribution to PyPI
+    needs: tag-release
+    if: >
+      always() &&
+      (github.event_name == 'workflow_dispatch' || needs.tag-release.result == 'success')
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      contents: write # attach the distributions and publish attestations
+      id-token: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: main
+          persist-credentials: false
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Resolve and validate release version
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          DISPATCH_VERSION: ${{ inputs.version }}
+        run: |
+          if [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
+            VERSION="$DISPATCH_VERSION"
+          else
+            VERSION="${HEAD_REF#release/}"
+          fi
+          if [[ ! "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "ERROR: '${VERSION}' is not a valid SemVer tag"
+            exit 1
+          fi
+          git fetch --force origin "refs/tags/${VERSION}:refs/tags/${VERSION}"
+          git checkout --detach "$VERSION"
+          PACKAGE_VERSION=$(python -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")
+          if [[ "$VERSION" != "v$PACKAGE_VERSION" ]]; then
+            echo "ERROR: requested ${VERSION}, but pyproject.toml contains ${PACKAGE_VERSION}"
+            exit 1
+          fi
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+
+      - name: Build and validate distribution
+        run: |
+          python -m pip install --upgrade build twine
+          python -m build
+          python -m twine check dist/*
+          python -m venv /tmp/opencdr-wheel
+          /tmp/opencdr-wheel/bin/pip install --no-deps dist/*.whl
+          /tmp/opencdr-wheel/bin/python -c "from src.domain.ocsf_min_parser import NormalizedEvent"
+
+      - name: Publish to PyPI (Trusted Publishing)
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
+
+      - name: Attach Python distributions to GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "$VERSION" dist/* --clobber
