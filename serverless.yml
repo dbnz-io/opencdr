@@ -8,7 +8,7 @@ params:
     alertEmail: ""  # email for security detection alerts; can match alarmEmail
     monthlyBudgetUsd: "50"  # threshold for the AWS Budgets cost alert -- override with --param="monthlyBudgetUsd=<amount>"
     orgId: ""  # legacy central-ingestion compatibility only; new installs deploy one Core per account
-    coreVersion: "1.2.0"  # release-manifest.json; overridden for immutable releases
+    coreVersion: "1.2.1"  # release-manifest.json; overridden for immutable releases
     managementContractVersion: "1.0.0"
 
 package:
