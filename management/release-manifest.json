@@ -2,7 +2,7 @@
   "$schema": "./schemas/release-manifest.schema.json",
   "manifest_version": "1.0.0",
   "product": "OpenCDR Core",
-  "release_version": "1.2.0",
+  "release_version": "1.2.1",
   "management_contract_version": "1.0.0",
   "deployment_model": "single-account-home-region",
   "runtime": {
