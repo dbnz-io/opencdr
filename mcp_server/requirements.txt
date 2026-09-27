@@ -3,5 +3,5 @@
 # This server is small and stdio-only; the 1.x FastMCP quickstart API is
 # all it needs. Revisit the 2.x migration only if a feature here actually
 # requires it.
-mcp>=1.2.0,<2.0.0
+mcp>=2.2.0,<3.0.0
 requests>=2.32.0
