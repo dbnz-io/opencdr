@@ -11,7 +11,7 @@ from boto3.dynamodb.types import TypeDeserializer
 
 from ..domain.correlation_engine import CorrelationEngine
 from ..infra.aws_handler import AwsHandler
-from ..infra.detection_rules_repository import load_detection_rules
+from ..infra.detection_rules_repository import get_rule_catalog_metadata, load_detection_rules, mark_rule_catalog_observed
 from ..infra.logger import Logger
 from ..infra.metrics import emit_metric
 from ..infra.xray_setup import patch_boto3
@@ -62,14 +62,19 @@ CORR_RULES_TTL_SECONDS = int(os.getenv("ALERTER_CORR_RULES_TTL_SECONDS", "60"))
 
 CORR_RULES_CACHE: list[dict[str, Any]] | None = None
 CORR_RULES_CACHE_LOADED_AT: float = 0.0
+CORR_RULES_GENERATION = ""
 
 
 def get_correlation_rules(*, aws: AwsHandler, logger: Logger) -> list[dict[str, Any]]:
-    global CORR_RULES_CACHE, CORR_RULES_CACHE_LOADED_AT
+    global CORR_RULES_CACHE, CORR_RULES_CACHE_LOADED_AT, CORR_RULES_GENERATION
     now = time.time()
-    if CORR_RULES_CACHE is None or (now - CORR_RULES_CACHE_LOADED_AT) >= CORR_RULES_TTL_SECONDS:
+    catalog = get_rule_catalog_metadata(aws)
+    generation = str(catalog.get("generation") or "")
+    if CORR_RULES_CACHE is None or generation != CORR_RULES_GENERATION or (now - CORR_RULES_CACHE_LOADED_AT) >= CORR_RULES_TTL_SECONDS:
         CORR_RULES_CACHE = load_detection_rules(aws, logger, rule_kind="correlation")
         CORR_RULES_CACHE_LOADED_AT = now
+        CORR_RULES_GENERATION = generation
+        mark_rule_catalog_observed(aws, evaluator="correlation", generation=generation)
     return CORR_RULES_CACHE
 
 

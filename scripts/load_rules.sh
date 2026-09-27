@@ -7,8 +7,9 @@
 #   ./scripts/load_rules.sh --stage prod --region eu-west-1
 #   ./scripts/load_rules.sh --dry-run                # print items without writing
 #   ./scripts/load_rules.sh --with-response-modules  # arm automated response (see below)
+#   ./scripts/load_rules.sh --force-managed-overwrite # explicit break-glass overwrite
 #
-# Requirements: AWS CLI v2, jq
+# Requirements: AWS CLI v2, jq, Python 3 with the project dependencies
 #
 # Rules load UNARMED by default: any response_module set in a rule's own
 # JSON is stripped to "" before it's written, regardless of DREDGE_DRY_RUN.
@@ -28,7 +29,9 @@ STAGE="dev"
 REGION="us-east-1"
 DRY_RUN=false
 WITH_RESPONSE_MODULES=false
+FORCE_MANAGED_OVERWRITE=false
 RULES_DIR="$(cd "$(dirname "$0")/.." && pwd)/support_files/detection_rules"
+VALIDATOR="$(cd "$(dirname "$0")" && pwd)/validate_rule.py"
 
 # ─── Argument parsing ────────────────────────────────────────────────────────
 while [[ $# -gt 0 ]]; do
@@ -37,6 +40,7 @@ while [[ $# -gt 0 ]]; do
     --region)                 REGION="$2";  shift 2 ;;
     --dry-run)                DRY_RUN=true; shift   ;;
     --with-response-modules)  WITH_RESPONSE_MODULES=true; shift ;;
+    --force-managed-overwrite) FORCE_MANAGED_OVERWRITE=true; shift ;;
     *) echo "Unknown argument: $1"; exit 1 ;;
   esac
 done
@@ -65,6 +69,11 @@ fi
 
 if ! command -v jq &>/dev/null; then
   echo "ERROR: jq not found. Install with: brew install jq / apt install jq"
+  exit 1
+fi
+
+if ! command -v python3 &>/dev/null; then
+  echo "ERROR: Python 3 not found. Install Python 3.12 and the project dependencies."
   exit 1
 fi
 
@@ -104,14 +113,25 @@ while IFS= read -r -d '' rule_file; do
     continue
   fi
 
+  # Validate the complete source document before transforming or writing it.
+  # This catches malformed conditions, unsupported operators/response modules,
+  # invalid correlation bounds, and incorrect field types. Validation happens
+  # before the response module is stripped so catalog mistakes cannot hide
+  # behind the loader's safe-by-default unarmed mode.
+  if ! validation_error=$(python3 "$VALIDATOR" "$rule_file" 2>&1); then
+    echo "  [ERROR]  $filename — schema validation failed: ${validation_error}"
+    ((failed++)) || true
+    continue
+  fi
+
   # Strip response_module unless explicitly armed -- see the header comment.
   # rule_kind "list" rules have no response_module field at all; this is a
   # no-op for them either way.
   if [[ "$WITH_RESPONSE_MODULES" == true ]]; then
-    rule_json="$(cat "$rule_file")"
+    rule_json="$(jq --arg path "$filename" '. + {source_type:"catalog-seed", source_path:$path}' "$rule_file")"
     armed_note=""
   else
-    rule_json="$(jq 'if has("response_module") then .response_module = "" else . end' "$rule_file")"
+    rule_json="$(jq --arg path "$filename" '(if has("response_module") then .response_module = "" else . end) + {source_type:"catalog-seed", source_path:$path}' "$rule_file")"
     original_module=$(jq -r '.response_module // empty' "$rule_file")
     if [[ -n "$original_module" ]]; then
       armed_note="  [unarmed, was: ${original_module}]"
@@ -123,6 +143,16 @@ while IFS= read -r -d '' rule_file; do
   if [[ "$DRY_RUN" == true ]]; then
     echo "  [DRY]    $filename  (${rule_kind} / ${rule_id})${armed_note}"
     ((loaded++)) || true
+    continue
+  fi
+
+  # A bootstrap loader must never silently replace content owned by Git, the
+  # control plane, or a customer fork. Existing legacy rows have no source.
+  existing=$(aws dynamodb get-item --table-name "$TABLE" --key "{\"rule_kind\":{\"S\":\"${rule_kind}\"},\"rule_id\":{\"S\":\"${rule_id}\"}}" --projection-expression "rule_body,source_type" --region "$REGION" --output json)
+  existing_source=$(jq -r '.Item.source_type.S // (.Item.rule_body.S | fromjson? | .source_type) // empty' <<<"$existing")
+  if [[ -n "$existing_source" && "$existing_source" != "catalog-seed" && "$FORCE_MANAGED_OVERWRITE" != true ]]; then
+    echo "  [ERROR]  $filename — owned by ${existing_source}; use a release or explicit --force-managed-overwrite"
+    ((failed++)) || true
     continue
   fi
 

@@ -82,6 +82,7 @@ For more than one AWS account, deploy Core independently in each account. Organi
 # 1. Install dependencies
 npm install -g serverless
 npm install
+# Docker must be running while Serverless packages Linux-native Python dependencies.
 
 # 2. Deploy
 serverless deploy --stage dev

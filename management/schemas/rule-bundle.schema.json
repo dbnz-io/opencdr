@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://opencdr.dev/schemas/rule-bundle/2.0.0",
+  "title": "OpenCDR rules-as-code bundle",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["contract_version", "commit", "artifact_digest", "rules", "fixtures", "package"],
+  "properties": {
+    "contract_version": { "type": "string", "const": "2.0.0" },
+    "commit": { "type": "string", "minLength": 7 },
+    "artifact_digest": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "rules": {
+      "type": "array", "minItems": 1,
+      "items": { "type": "object", "required": ["rule_kind", "rule_id"], "properties": { "rule_kind": { "enum": ["signal", "correlation", "list"] }, "rule_id": { "type": "string", "minLength": 1 } }, "additionalProperties": true }
+    },
+    "fixtures": {
+      "type": "array",
+      "items": { "type": "object", "additionalProperties": false, "required": ["rule_id", "name", "kind", "events", "expected_match"], "properties": { "rule_id": { "type": "string" }, "name": { "type": "string" }, "kind": { "enum": ["positive", "negative", "correlation-sequence"] }, "events": { "type": "array", "minItems": 1, "maxItems": 500, "items": { "type": "object" } }, "expected_match": { "type": "boolean" } } }
+    },
+    "package": { "type": "object", "additionalProperties": false, "required": ["name"], "properties": { "name": { "type": "string", "minLength": 2 }, "description": { "type": "string" }, "release_notes": { "type": "string" }, "removal_policy": { "enum": ["ignore", "disable", "delete"], "default": "disable" } } }
+  }
+}
