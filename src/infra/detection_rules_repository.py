@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+from datetime import UTC, datetime
 from typing import Any
 
 from boto3.dynamodb.types import TypeDeserializer
@@ -12,6 +13,7 @@ from .aws_handler import AwsHandler
 from .logger import Logger
 
 _deser = TypeDeserializer()
+_CATALOG_KEY = {"rule_kind": {"S": "_meta"}, "rule_id": {"S": "catalog"}}
 
 
 def unpack_rule_body(raw: dict[str, Any]) -> dict[str, Any]:
@@ -56,6 +58,32 @@ def _unmarshal_item(item: dict[str, Any]) -> dict[str, Any]:
     # DynamoDB AttributeValue map -> plain python dict
     raw = {k: _deser.deserialize(v) for k, v in (item or {}).items()}
     return unpack_rule_body(raw)
+
+
+def get_rule_catalog_metadata(aws: AwsHandler) -> dict[str, Any]:
+    table_name = os.environ.get("DETECTION_RULES_TABLE_NAME", "")
+    if not table_name:
+        return {}
+    response = aws._ddb.get_item(TableName=table_name, Key=_CATALOG_KEY, ConsistentRead=True)
+    item = response.get("Item")
+    return _unmarshal_item(item) if item else {}
+
+
+def mark_rule_catalog_observed(aws: AwsHandler, *, evaluator: str, generation: str) -> None:
+    if evaluator not in {"signal", "correlation"}:
+        raise ValueError("evaluator must be signal or correlation")
+    table_name = os.environ.get("DETECTION_RULES_TABLE_NAME", "")
+    if not table_name or not generation:
+        return
+    aws._ddb.update_item(
+        TableName=table_name,
+        Key=_CATALOG_KEY,
+        UpdateExpression=f"SET {evaluator}_observed_generation = :generation, {evaluator}_observed_at = :observed",
+        ExpressionAttributeValues={
+            ":generation": {"S": generation},
+            ":observed": {"S": datetime.now(UTC).isoformat()},
+        },
+    )
 
 
 def load_detection_rules(

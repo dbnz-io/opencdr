@@ -60,11 +60,19 @@ git commit -m "chore: bump detection rules submodule"
 
 Sample events for 23 of the 24 signal rules live in `support_files/test_events/` — one JSON fixture per rule, in the exact normalized-event shape `processor` expects (`028_guardduty_catchall` has no dedicated fixture by design — its whole purpose is to catch findings the curated fixtures don't cover). These fixtures stay in *this* repo (they exercise this repo's parser, not the rules repo), so contributing a new rule that needs one is a two-repo change: the rule itself as a PR to opencdr-detection-rules, plus a companion PR here adding the fixture and bumping the submodule pin — see that repo's [Contributing](https://github.com/dbnz-io/opencdr-detection-rules#contributing) section for the exact flow.
 
-`./scripts/load_rules.sh` does a plain upsert of everything under `support_files/detection_rules/` (recursively, across every source folder) — no merge logic. Running it against a stage where a rule has since been edited live via the API will silently overwrite that edit back to the file's version. It's meant for initial seeding and intentional bulk updates, not something to wire into a deploy pipeline that runs on every push (this repo's own CI deliberately does not call it on deploy, for exactly that reason).
+`./scripts/load_rules.sh` is a legacy seeding tool and is meant for initial bootstrap only. It stamps `source_type=catalog-seed` and refuses to overwrite a rule owned by Git, the control plane, or a customer fork. The break-glass `--force-managed-overwrite` flag makes an exceptional overwrite explicit. Managed environments should import a bundle conforming to `management/schemas/rule-bundle.schema.json` into the control plane and promote an immutable release manifest.
+
+Before writing each item, the loader validates the complete source document against the shared
+OpenCDR rule contract. Invalid kinds, field roots, operators, regular expressions, response
+modules, types, list values, or correlation bounds are reported per file and are never written.
+Validation also runs during `--dry-run`, so use that mode to check a catalog safely before loading
+it. A validation failure makes the loader exit non-zero after it has inspected every file.
 
 ## Managing rules at runtime
 
 The full CRUD surface is also available over the API — see [API Reference](api-reference.md#rules) — for editing a single rule without touching files, or building your own tooling on top.
+
+For lifecycle automation, prefer the management endpoints: read the contract from `/rules/schema`, validate and evaluate candidates without side effects, plan a complete manifest, apply it with revision guards, then poll `/rules/runtime-status` until both evaluators have observed the new catalog generation. Detections and correlation alerts carry rule version, content fingerprint, release identity, contract version, and evaluation mode so production outcomes can be attributed to an exact artifact.
 
 ## Related pages
 

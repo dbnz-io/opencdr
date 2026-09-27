@@ -355,6 +355,32 @@ components:
         has_next: { type: boolean }
         notes: { type: string }
 
+    RuleValidation:
+      type: object
+      additionalProperties: true
+      required: [valid, contract_version, errors, warnings]
+      properties:
+        valid: { type: boolean }
+        contract_version: { type: string }
+        errors: { type: array, items: { type: object, additionalProperties: true } }
+        warnings: { type: array, items: { type: object, additionalProperties: true } }
+
+    RuleReleaseManifest:
+      type: object
+      required: [release_id, release_version, contract_version, rules]
+      properties:
+        release_id: { type: string }
+        release_version: { type: integer, minimum: 1 }
+        contract_version: { type: string }
+        manifest_digest: { type: string }
+        removal_policy: { type: string, enum: [ignore, disable, delete], default: disable }
+        source_type: { type: string }
+        source_commit: { type: string }
+        rules:
+          type: array
+          minItems: 1
+          items: { $ref: "#/components/schemas/RuleWrite" }
+
     Signal:
       type: object
       description: A detection signal. Event-derived; only stable keys are enumerated.
@@ -901,6 +927,122 @@ paths:
               schema: { $ref: "#/components/schemas/Rule" }
         "400": { $ref: "#/components/responses/BadRequest" }
         "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/Conflict" }
+
+  /rules/schema:
+    get:
+      summary: Read the versioned rule-management contract
+      responses:
+        "200":
+          description: Rule schema catalog and supported bounds
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+
+  /rules/validate:
+    post:
+      summary: Validate a candidate rule without changing runtime state
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [rule]
+              properties:
+                rule: { $ref: "#/components/schemas/RuleWrite" }
+                available_lists: { type: array, items: { type: string } }
+      responses:
+        "200":
+          description: Structured validation result
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/RuleValidation" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+
+  /rules/evaluate:
+    post:
+      summary: Evaluate a candidate rule against supplied fixtures without side effects
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [rule, events]
+              properties:
+                rule: { $ref: "#/components/schemas/RuleWrite" }
+                events: { type: array, maxItems: 500, items: { type: object, additionalProperties: true } }
+                lists: { type: object, additionalProperties: { type: array, items: { type: string } } }
+      responses:
+        "200":
+          description: Analysis-only evaluation result
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - { $ref: "#/components/schemas/RuleValidation" }
+                  - { type: object, additionalProperties: true }
+        "400": { $ref: "#/components/responses/BadRequest" }
+
+  /rules/runtime-status:
+    get:
+      summary: Compare stored catalog generation with evaluator-observed generations
+      responses:
+        "200":
+          description: Runtime activation status
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+
+  /rules/metrics:
+    get:
+      summary: Privacy-preserving aggregates by exact rule and release version
+      parameters:
+        - { in: query, name: rule_id, schema: { type: string } }
+        - { in: query, name: rule_version, schema: { type: string } }
+        - { in: query, name: release_id, schema: { type: string } }
+        - { in: query, name: date_from, schema: { type: string, format: date } }
+        - { in: query, name: date_to, schema: { type: string, format: date } }
+      responses:
+        "200":
+          description: Aggregate-only rule performance; partial is true when a bounded bucket was truncated
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        "400": { $ref: "#/components/responses/BadRequest" }
+
+  /rule-releases/plan:
+    post:
+      summary: Plan exact convergence for an immutable release manifest
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/RuleReleaseManifest" }
+      responses:
+        "200":
+          description: Ordered create, update, disable, delete and unchanged operations
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        "400": { $ref: "#/components/responses/BadRequest" }
+
+  /rule-releases/apply:
+    post:
+      summary: Apply an immutable release manifest with revision guards
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/RuleReleaseManifest" }
+      responses:
+        "200":
+          description: Applied operations and new catalog generation
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        "400": { $ref: "#/components/responses/BadRequest" }
         "409": { $ref: "#/components/responses/Conflict" }
 
   /rules/{rule_id}:

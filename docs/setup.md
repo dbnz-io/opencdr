@@ -6,7 +6,7 @@ Not every step applies to every deployment — single-account, single-region set
 
 ## 1. Prerequisites
 
-- [Node.js](https://nodejs.org/) >= 18, [Serverless Framework](https://www.serverless.com/) v4, Python 3.12 (matches `provider.runtime` in `serverless.yml`)
+- [Node.js](https://nodejs.org/) >= 18, [Serverless Framework](https://www.serverless.com/) v4, Python 3.12 (matches `provider.runtime` in `serverless.yml`), and Docker for packaging Lambda-compatible Linux native dependencies
 - A Serverless Framework license key (free under $2M annual revenue) — v4 requires CLI authentication for every invocation, see [Deployment](deployment.md#prerequisites)
 - AWS credentials for the target account (`aws configure`, environment variables, or CI's OIDC role — see step 9)
 - `jq` (used by the rule-loading and integration-test scripts)

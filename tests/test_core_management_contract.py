@@ -57,7 +57,8 @@ def test_contract_schemas_are_versioned_json_schema_documents():
     for path in sorted((ROOT / "management/schemas").glob("*.schema.json")):
         schema = json.loads(path.read_text())
         assert schema["$schema"] == "https://json-schema.org/draft/2020-12/schema"
-        assert schema["$id"].endswith("/1.0.0")
+        version = schema["$id"].rsplit("/", 1)[-1]
+        assert version.count(".") == 2 and all(part.isdigit() for part in version.split("."))
         assert schema["type"] == "object"
         Draft202012Validator.check_schema(schema)
 

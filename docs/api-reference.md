@@ -49,12 +49,12 @@ claude mcp add opencdr \
 
 ## A note on `openapi.yml`
 
-`openapi.yml` documents `/status`, `/help`, `/swagger.json`, `/docs`, `/signals`, `/logs`, `/rules`, and `/settings`. Two things are worth knowing before trusting it as complete:
+`openapi.yml` is the canonical machine-readable API contract, including detection-rule validation, evaluation, release, and runtime-verification endpoints.
 
 - It **omits `/ir-roles`, `/ir-actions`, and `/signals/stats` entirely** — all three are fully implemented in `src/handlers/api.py` and wired in `serverless.yml`, added after `openapi.yml` was last regenerated.
 - `/swagger.json` and `/docs` are documented but **not implemented** — `api.py`'s routing table has no handler for either path; a request to them returns the same 404 as any unrouted path.
 
-Use it for the endpoints it does cover (query parameters and enums for `/signals`, `/logs`, `/rules`, `/settings` are accurate), but don't rely on it for `/ir-roles`, `/ir-actions`, `/signals/stats`, or assume `/docs`/`/swagger.json` work — this page and direct reading of `src/handlers/api.py` are more current.
+The embedded `/docs` page is informational; use the repository `openapi.yml` for generated clients and drift checks.
 
 ## Endpoints
 
@@ -113,6 +113,12 @@ curl "$OPENCDR_API_URL/logs?service=OPENCDR-PROCESSOR&date_from=2026-08-01&date_
 | `GET` | `/rules/{rule_id}` | `rule_kind` query param required to know which partition to read |
 | `PUT` | `/rules/{rule_id}` | Update a rule |
 | `DELETE` | `/rules/{rule_id}` | Delete a rule |
+| `GET` | `/rules/schema` | Versioned authoring and compatibility contract |
+| `POST` | `/rules/validate` | Structured, side-effect-free candidate validation |
+| `POST` | `/rules/evaluate` | Candidate evaluation against supplied fixtures; no notifications, response, or writes |
+| `GET` | `/rules/runtime-status` | Stored catalog versus signal/correlation evaluator observation |
+| `POST` | `/rule-releases/plan` | Preview exact manifest convergence |
+| `POST` | `/rule-releases/apply` | Idempotent revision-guarded exact release application |
 
 ```bash
 curl -X POST "$OPENCDR_API_URL/rules" -H "x-api-key: $OPENCDR_API_KEY" \

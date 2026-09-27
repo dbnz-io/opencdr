@@ -8,11 +8,29 @@ params:
     alertEmail: ""  # email for security detection alerts; can match alarmEmail
     monthlyBudgetUsd: "50"  # threshold for the AWS Budgets cost alert -- override with --param="monthlyBudgetUsd=<amount>"
     orgId: ""  # legacy central-ingestion compatibility only; new installs deploy one Core per account
-    coreVersion: "0.3.0-dev"  # release-manifest.json; overridden for immutable releases
+    coreVersion: "1.2.0"  # release-manifest.json; overridden for immutable releases
     managementContractVersion: "1.0.0"
 
 package:
   patterns:
+    # Never package a developer workstation's virtualenv or repository-only
+    # files. In particular, a macOS .venv can contain Mach-O native modules
+    # that import as "invalid ELF" in Lambda. Runtime dependencies are built
+    # for Linux by serverless-python-requirements below.
+    - '!.venv/**'
+    - '!venv/**'
+    - '!.ruff_cache/**'
+    - '!**/__pycache__/**'
+    - '!**/*.pyc'
+    - '!tests/**'
+    - '!docs/**'
+    - '!artifacts/**'
+    - '!.github/**'
+    - '!management/**'
+    - '!scripts/**'
+    - '!ci-bootstrap/**'
+    - '!org-forwarding/**'
+    - '!region-forwarding/**'
     - src/openapi/swagger.json
 
 provider:
@@ -175,6 +193,7 @@ functions:
           - dynamodb:PutItem
           - dynamodb:GetItem
           - dynamodb:Query
+          - dynamodb:UpdateItem
         Resource:
           - arn:aws:dynamodb:${self:provider.region}:*:table/${self:service}-${self:provider.stage}-detection-rules-table
           - arn:aws:dynamodb:${self:provider.region}:*:table/${self:service}-${self:provider.stage}-logs-table-v2
@@ -823,6 +842,40 @@ functions:
           cors: true
       - http:
           path: rules
+          method: post
+          private: true
+          cors: true
+      - http:
+          path: rules/schema
+          method: get
+          private: true
+          cors: true
+      - http:
+          path: rules/validate
+          method: post
+          private: true
+          cors: true
+      - http:
+          path: rules/evaluate
+          method: post
+          private: true
+          cors: true
+      - http:
+          path: rules/runtime-status
+          method: get
+          private: true
+      - http:
+          path: rules/metrics
+          method: get
+          private: true
+          cors: true
+      - http:
+          path: rule-releases/plan
+          method: post
+          private: true
+          cors: true
+      - http:
+          path: rule-releases/apply
           method: post
           private: true
           cors: true
@@ -2939,6 +2992,11 @@ plugins:
 
 custom:
   pythonRequirements:
-    dockerizePip: false
-    pythonBin: python3
+    # Native wheels must match Lambda's Linux/Python 3.12 runtime even when
+    # packaging from an ARM macOS workstation.
+    dockerizePip: true
+    pythonBin: python3.12
+    # Do not reuse a cache produced before dockerized packaging was enabled;
+    # that cache can contain macOS/ARM native extensions.
+    invalidateCaches: true
     slim: true

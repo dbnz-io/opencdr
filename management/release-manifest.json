@@ -2,7 +2,7 @@
   "$schema": "./schemas/release-manifest.schema.json",
   "manifest_version": "1.0.0",
   "product": "OpenCDR Core",
-  "release_version": "0.3.0-dev",
+  "release_version": "1.2.0",
   "management_contract_version": "1.0.0",
   "deployment_model": "single-account-home-region",
   "runtime": {
@@ -13,12 +13,17 @@
   "contracts": {
     "health_endpoint": "GET /status",
     "configuration_bundle_schema": "management/schemas/configuration-bundle.schema.json",
-    "alert_schema": "management/schemas/alert.schema.json"
+    "alert_schema": "management/schemas/alert.schema.json",
+    "rule_bundle_schema": "management/schemas/rule-bundle.schema.json",
+    "rule_contract_version": "2.0.0"
   },
   "capabilities": [
     "account-local-processing",
     "multi-region-forwarding",
     "configuration-bundles",
-    "versioned-alert-schema"
+    "versioned-alert-schema",
+    "immutable-rule-releases",
+    "side-effect-free-rule-evaluation",
+    "evaluator-generation-verification"
   ]
 }

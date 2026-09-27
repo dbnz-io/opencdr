@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import logging
 import os
@@ -16,6 +17,28 @@ import boto3
 import regex
 from boto3.dynamodb.conditions import Attr, Key
 
+from ..domain.rule_schema import (
+    ALLOWED_CONDITION_OPS,
+    ALLOWED_FIELD_ROOTS,
+    ALLOWED_RESPONSE_MODULES,
+    ALLOWED_RULE_KINDS,
+    ALLOWED_SEVERITIES,
+    MAX_THRESHOLD,
+    MAX_TIME_WINDOW_SECONDS,
+    MIN_THRESHOLD,
+    MIN_TIME_WINDOW_SECONDS,
+)
+from ..domain.rule_management import RULE_CONTRACT_VERSION, evaluate_candidate, rule_contract, validate_candidate
+from ..domain.rule_release import plan_release, validate_manifest
+from ..domain.rule_schema import (
+    LIST_CONDITION_OPS as _LIST_CONDITION_OPS,
+)
+from ..domain.rule_schema import (
+    NO_VALUE_CONDITION_OPS as _NO_VALUE_CONDITION_OPS,
+)
+from ..domain.rule_schema import (
+    REGEX_CONDITION_OPS as _REGEX_CONDITION_OPS,
+)
 from ..domain.settings_secrets import (
     SECRET_CHANNEL_FIELDS,
     is_ssm_ref,
@@ -72,44 +95,6 @@ DEPLOYMENT_STAGE = os.getenv("STAGE", "dev")
 DEPLOYMENT_ACCOUNT_ID = os.getenv("OPENCDR_ACCOUNT_ID", "")
 DEPLOYMENT_HOME_REGION = os.getenv("OPENCDR_HOME_REGION", os.getenv("AWS_REGION", ""))
 
-ALLOWED_SEVERITIES = {"CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO", "INFORMATIONAL", "UNKNOWN"}
-ALLOWED_RULE_KINDS = {"signal", "correlation", "list"}
-
-# Field roots a rule condition may reference: the public fields of
-# NormalizedEvent (src/domain/ocsf_min_parser.py) plus `rule_id`, which
-# correlation rules reference. A `field` whose first dot-segment is outside
-# this set cannot match a real event, and is how a malicious rule tries to
-# getattr into Python internals (see detection_engine.get_field's underscore
-# guard, which is the actual runtime security control). This write-time check
-# is enforced as a hard reject ONLY under STRICT_RULE_VALIDATION; otherwise the
-# offending root is logged and the rule is still accepted, so a customer's
-# existing off-root rule is never silently rejected mid-release. Published via
-# GET /help so consumers can build a field picker instead of a raw textarea.
-ALLOWED_FIELD_ROOTS = frozenset(
-    {
-        "event_id",
-        "source",
-        "time",
-        "category",
-        "class_name",
-        "activity_name",
-        "severity",
-        "actor",
-        "api",
-        "network",
-        "resources",
-        "cloud_provider",
-        "cloud_account_id",
-        "cloud_region",
-        "gd_resource_type",
-        "raw_event",
-        "rule_id",
-        "host", "process", "container", "kubernetes", "finding", "vendor",
-        "integration_id", "provenance", "runtime_entity",
-    }
-)
-
-
 def _strict_rule_validation() -> bool:
     """Whether write-time rule validation rejects (vs. warns) on soft failures.
 
@@ -129,35 +114,6 @@ _IR_ROLE_ARN_RE = re.compile(r"^arn:aws:iam::(\d{12}):role/.+$")
 # runtime timeout in detection_engine is the real guarantee); used only for a
 # write-time advisory warning (reject under STRICT_RULE_VALIDATION).
 _NESTED_QUANTIFIER_RE = re.compile(r"\([^)]*[+*][^)]*\)[+*]")
-
-# Every handler src/handlers/responder.py's RESPONSE_MODULE_HANDLERS actually
-# registers. Kept in sync by hand -- api.py deliberately doesn't import
-# responder.py (that would pull dredge and its transitive closure into the
-# api Lambda's cold start for a set of string literals) -- but drifting
-# is exactly the ALLOWED_CONDITION_OPS/engine class of bug this repo has
-# already hit once, so tests/handlers/test_api.py asserts this set equals
-# responder.RESPONSE_MODULE_HANDLERS.keys() exactly.
-ALLOWED_RESPONSE_MODULES = {
-    "disable_access_key",
-    "disable_user",
-    "delete_user",
-    "disable_role",
-    "revoke_active_sessions",
-    "delete_inline_policy",
-    "block_s3_public_access",
-    "block_s3_bucket_public_access",
-    "block_s3_object_public_access",
-    "quarantine_s3_bucket",
-    "isolate_ec2_instances",
-    "deauthorize_security_group_rules",
-    "disable_lambda_function",
-    "disable_secrets_manager_secret",
-    "revoke_rds_snapshot_public_access",
-    "enable_cloudtrail_logging",
-    "enable_guardduty_detector",
-    "start_config_recorder",
-    "enable_security_hub",
-}
 
 # Same hand-synced-and-tested pattern as ALLOWED_RESPONSE_MODULES above, this
 # time mirroring responder.ROLLBACK_UNDO_MODULE.keys() -- the subset of
@@ -193,48 +149,6 @@ MAX_DATE_RANGE_DAYS = 31
 # via the single-partition branch in _handle_list_rules, which validates
 # against ALLOWED_RULE_KINDS directly.
 _DEFAULT_RULE_LISTING_KINDS = {"signal", "correlation"}
-
-# Every op detection_engine.evaluate_condition actually implements. Kept in
-# sync by hand (INFORME-AUTOR-ES.md §3.1 found this had drifted from the
-# engine in both directions: wildcard/in_list/not_in_list were implemented
-# but rejected here, not_prefix/not_suffix were accepted here but not
-# implemented -- silently never matching, with no error either side).
-ALLOWED_CONDITION_OPS = {
-    "equals",
-    "not_equals",
-    "in",
-    "not_in",
-    "in_list",
-    "not_in_list",
-    "exists",
-    "not_exists",
-    "matches",
-    "not_matches",
-    "contains",
-    "not_contains",
-    "prefix",
-    "not_prefix",
-    "suffix",
-    "not_suffix",
-    "wildcard",
-}
-
-# Ops that don't take a "value" at all -- exists/not_exists check presence,
-# wildcard always matches.
-_NO_VALUE_CONDITION_OPS = {"exists", "not_exists", "wildcard"}
-# Ops that reference a rule_kind="list" rule by id instead of an inline value.
-_LIST_CONDITION_OPS = {"in_list", "not_in_list"}
-
-_REGEX_CONDITION_OPS = {"matches", "not_matches"}
-
-# Sane, generous bounds for correlation rules -- not business-tuned, just
-# enough to catch an obviously-wrong value (e.g. a typo'd extra zero)
-# before it reaches production. Defaults in correlation_engine.py are
-# threshold=5, time_window_seconds=300.
-MIN_THRESHOLD = 1
-MAX_THRESHOLD = 1000
-MIN_TIME_WINDOW_SECONDS = 1
-MAX_TIME_WINDOW_SECONDS = 86400  # 24h
 
 # ---------------------------------------------------------------------------
 # API key route scoping
@@ -306,6 +220,9 @@ def lambda_handler(event, context):
                         "multi_region_forwarding": True,
                         "configuration_bundles": True,
                         "alert_schema": "opencdr.alert/1.0.0",
+                        "rule_contract": RULE_CONTRACT_VERSION,
+                        "immutable_rule_releases": True,
+                        "runtime_rule_verification": True,
                     },
                     "lambda_name": LAMBDA_NAME,
                     "time": datetime.now(UTC).isoformat(),
@@ -367,6 +284,43 @@ def lambda_handler(event, context):
         # /rules/{rule_id} -- every method these handlers support is a real,
         # exposed route, not just a subset.
         # ------------------------------------------------------------------
+        if path == "/rules/schema" and method == "GET":
+            return _response(200, rule_contract())
+
+        if path == "/rules/validate" and method == "POST":
+            body = _parse_json_body(event)
+            rule = body.get("rule", body)
+            available_lists = body.get("available_lists")
+            parsed_lists = set(str(item) for item in available_lists) if isinstance(available_lists, list) else None
+            return _response(200, validate_candidate(rule, available_lists=parsed_lists))
+
+        if path == "/rules/evaluate" and method == "POST":
+            body = _parse_json_body(event)
+            rule = body.get("rule")
+            events = body.get("events", [])
+            lists = body.get("lists", {})
+            if not isinstance(rule, dict):
+                raise ValueError("rule must be an object")
+            if not isinstance(events, list) or not all(isinstance(item, dict) for item in events):
+                raise ValueError("events must be a list of objects")
+            if not isinstance(lists, dict) or not all(isinstance(key, str) and isinstance(value, list) for key, value in lists.items()):
+                raise ValueError("lists must be an object of list_id to values")
+            if len(events) > 500:
+                raise ValueError("events must contain at most 500 records")
+            return _response(200, evaluate_candidate(rule, events, lists=lists))
+
+        if path == "/rules/runtime-status" and method == "GET":
+            return _handle_rule_runtime_status()
+
+        if path == "/rules/metrics" and method == "GET":
+            return _handle_rule_metrics(qs)
+
+        if path == "/rule-releases/plan" and method == "POST":
+            return _handle_plan_rule_release(_parse_json_body(event))
+
+        if path == "/rule-releases/apply" and method == "POST":
+            return _handle_apply_rule_release(_parse_json_body(event), _get_api_key_id(event))
+
         if path == "/rules" and method == "GET":
             return _handle_list_rules(qs)
 
@@ -498,6 +452,8 @@ def _required_scope_for(method: str, path: str) -> str | None:
         return None
     if path == "/rules" or path.startswith("/rules/"):
         return "read" if method == "GET" else "rules"
+    if path.startswith("/rule-releases/"):
+        return "rules"
     if path == "/integrations" or path.startswith("/integrations/"):
         return "read" if method == "GET" else "settings"
     if path == "/settings" or path.startswith("/settings/"):
@@ -1000,6 +956,55 @@ def _handle_signal_stats(qs: dict[str, str]) -> dict:
     )
 
 
+def _handle_rule_metrics(qs: dict[str, str]) -> dict:
+    """Return bounded aggregates only; raw customer evidence never leaves Core."""
+    date_from, date_to = _parse_date_range(qs)
+    days = _date_range_days(date_from, date_to, descending=False)
+    groups: dict[tuple[str, str, str, str, str], dict[str, Any]] = {}
+    detection_groups: dict[str, tuple[str, str, str, str, str]] = {}
+    partial = False
+    for severity in ALLOWED_SEVERITIES:
+        items, _cursor, has_next = _query_bucketed_range(signals_table, "severity_bucket", severity, days, scan_forward=True, limit=1000, cursor=None)
+        partial = partial or has_next
+        for item in items:
+            rule_id = str(item.get("rule_id") or "unknown")
+            rule_version = str(item.get("rule_version") or "legacy")
+            release_id = str(item.get("release_id") or "legacy")
+            evaluation_mode = str(item.get("evaluation_mode") or "production")
+            if qs.get("rule_id") and qs["rule_id"] != rule_id:
+                continue
+            if qs.get("rule_version") and qs["rule_version"] != rule_version:
+                continue
+            if qs.get("release_id") and qs["release_id"] != release_id:
+                continue
+            key = (rule_id, rule_version, release_id, severity, evaluation_mode)
+            aggregate = groups.setdefault(key, {"rule_id": rule_id, "rule_version": rule_version, "release_id": release_id, "severity": severity, "evaluation_mode": evaluation_mode, "detections": 0, "notification_requested": 0, "response_requested": 0, "response_succeeded": 0, "response_outcome_unknown": 0})
+            aggregate["detections"] += 1
+            aggregate["notification_requested"] += 1 if item.get("notify") is not False else 0
+            aggregate["response_requested"] += 1 if item.get("response_module") else 0
+            if item.get("detection_id"):
+                detection_groups[str(item["detection_id"])] = key
+    # IR action records exist only after a rollback-eligible response succeeds.
+    # Requested responses with no matching record remain explicitly unknown;
+    # they are never guessed as failed.
+    succeeded: set[str] = set()
+    scan_kwargs: dict[str, Any] = {"ProjectionExpression": "detection_id", "Limit": 1000}
+    for _page in range(5):
+        response = ir_actions_table.scan(**scan_kwargs)
+        actions = response.get("Items", []) if isinstance(response, dict) else []
+        if isinstance(actions, list):
+            succeeded.update(str(item["detection_id"]) for item in actions if isinstance(item, dict) and item.get("detection_id") in detection_groups)
+        token = response.get("LastEvaluatedKey") if isinstance(response, dict) else None
+        if not isinstance(token, dict) or not token:
+            break
+        scan_kwargs["ExclusiveStartKey"] = token
+    for detection_id in succeeded:
+        groups[detection_groups[detection_id]]["response_succeeded"] += 1
+    for aggregate in groups.values():
+        aggregate["response_outcome_unknown"] = max(0, aggregate["response_requested"] - aggregate["response_succeeded"])
+    return _response(200, {"date_from": date_from, "date_to": date_to, "partial": partial, "privacy": "aggregate-only", "groups": sorted(groups.values(), key=lambda item: (item["rule_id"], str(item["rule_version"]), item["severity"]))})
+
+
 # ---------------------------------------------------------------------------
 # /logs
 # ---------------------------------------------------------------------------
@@ -1106,6 +1111,126 @@ def _handle_list_logs(qs: dict[str, str]) -> dict:
 # ---------------------------------------------------------------------------
 # /rules (new DB model: PK rule_kind, SK rule_id)
 # ---------------------------------------------------------------------------
+
+_RULE_OBSERVATION_FIELDS = {"rev", "timestamp", "created_by", "updated_by", "expected_rev"}
+
+
+def _canonical_rule(value: Any) -> Any:
+    if isinstance(value, list):
+        return [_canonical_rule(item) for item in value]
+    if isinstance(value, dict):
+        return {key: _canonical_rule(value[key]) for key in sorted(value) if key not in _RULE_OBSERVATION_FIELDS}
+    return value
+
+
+def _rule_catalog_digest() -> str:
+    items: list[dict[str, Any]] = []
+    for kind in sorted(ALLOWED_RULE_KINDS):
+        response = detection_rules_table.query(KeyConditionExpression=Key("rule_kind").eq(kind))
+        page_items = response.get("Items", []) if isinstance(response, dict) else []
+        if isinstance(page_items, list):
+            items.extend(unpack_rule_body(item) for item in page_items if isinstance(item, dict))
+        last_evaluated_key = response.get("LastEvaluatedKey") if isinstance(response, dict) else None
+        while isinstance(last_evaluated_key, dict) and last_evaluated_key:
+            response = detection_rules_table.query(KeyConditionExpression=Key("rule_kind").eq(kind), ExclusiveStartKey=last_evaluated_key)
+            page_items = response.get("Items", []) if isinstance(response, dict) else []
+            if isinstance(page_items, list):
+                items.extend(unpack_rule_body(item) for item in page_items if isinstance(item, dict))
+            last_evaluated_key = response.get("LastEvaluatedKey") if isinstance(response, dict) else None
+    authored = sorted((_canonical_rule(item) for item in items), key=lambda item: (str(item.get("rule_kind")), str(item.get("rule_id"))))
+    return hashlib.sha256(json.dumps(authored, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")).hexdigest()
+
+
+def _bump_rule_catalog() -> dict[str, Any]:
+    generation = str(uuid.uuid4())
+    digest = _rule_catalog_digest()
+    now = datetime.now(UTC).isoformat()
+    detection_rules_table.update_item(
+        Key={"rule_kind": "_meta", "rule_id": "catalog"},
+        UpdateExpression="SET generation = :generation, stored_digest = :digest, updated_at = :updated",
+        ExpressionAttributeValues={":generation": generation, ":digest": digest, ":updated": now},
+    )
+    return {"generation": generation, "stored_digest": digest, "updated_at": now}
+
+
+def _handle_rule_runtime_status() -> dict:
+    response = detection_rules_table.get_item(Key={"rule_kind": "_meta", "rule_id": "catalog"}, ConsistentRead=True)
+    item = response.get("Item") or {}
+    stored_digest = str(item.get("stored_digest") or _rule_catalog_digest())
+    generation = str(item.get("generation") or "")
+    signal_generation = str(item.get("signal_observed_generation") or "")
+    correlation_generation = str(item.get("correlation_observed_generation") or "")
+    return _response(200, {
+        "contract_version": MANAGEMENT_CONTRACT_VERSION,
+        "generation": generation,
+        "stored_digest": stored_digest,
+        "signal_evaluator": {"generation": signal_generation, "observed_at": item.get("signal_observed_at"), "current": bool(generation and signal_generation == generation)},
+        "correlation_evaluator": {"generation": correlation_generation, "observed_at": item.get("correlation_observed_at"), "current": bool(generation and correlation_generation == generation)},
+        "status": "verified" if generation and signal_generation == generation and correlation_generation == generation else "propagating",
+    })
+
+
+def _all_stored_rules() -> list[dict[str, Any]]:
+    items: list[dict[str, Any]] = []
+    for kind in sorted(ALLOWED_RULE_KINDS):
+        response = detection_rules_table.query(KeyConditionExpression=Key("rule_kind").eq(kind))
+        items.extend(unpack_rule_body(item) for item in response.get("Items", []))
+        while response.get("LastEvaluatedKey"):
+            response = detection_rules_table.query(KeyConditionExpression=Key("rule_kind").eq(kind), ExclusiveStartKey=response["LastEvaluatedKey"])
+            items.extend(unpack_rule_body(item) for item in response.get("Items", []))
+    return items
+
+
+def _handle_plan_rule_release(manifest: dict[str, Any]) -> dict:
+    validation = validate_manifest(manifest)
+    if not validation["valid"]:
+        return _response(400, validation)
+    operations = plan_release(_all_stored_rules(), manifest)
+    return _response(200, {
+        **validation,
+        "release_id": manifest["release_id"],
+        "release_version": manifest["release_version"],
+        "operations": [{key: value for key, value in item.items() if key != "payload"} for item in operations],
+        "counts": {action: sum(item["action"] == action for item in operations) for action in ("create", "update", "disable", "delete", "unchanged")},
+    })
+
+
+def _handle_apply_rule_release(manifest: dict[str, Any], api_key_id: str | None) -> dict:
+    validation = validate_manifest(manifest)
+    if not validation["valid"]:
+        return _response(400, validation)
+    operations = plan_release(_all_stored_rules(), manifest)
+    completed: list[dict[str, Any]] = []
+    try:
+        for operation in operations:
+            action = operation["action"]
+            key = {"rule_kind": operation["rule_kind"], "rule_id": operation["rule_id"]}
+            if action == "unchanged":
+                completed.append({**key, "action": action})
+                continue
+            if action == "delete":
+                expected = operation.get("expected_rev")
+                kwargs: dict[str, Any] = {"Key": key}
+                if expected is not None:
+                    kwargs.update({"ConditionExpression": Attr("rev").eq(expected), "ReturnValues": "ALL_OLD"})
+                detection_rules_table.delete_item(**kwargs)
+            else:
+                normalized = _normalize_rule_payload(operation["payload"], force_rule_id=operation["rule_id"], actor=api_key_id)
+                _put_with_rev(detection_rules_table, normalized, operation.get("expected_rev") or 0)
+            completed.append({**key, "action": action})
+    except Exception as exc:
+        if "ConditionalCheckFailed" in repr(exc) or isinstance(exc, OptimisticLockError):
+            return _response(409, {**validation, "message": "Release conflicted with a concurrent rule change", "completed": completed})
+        raise
+    catalog = _bump_rule_catalog()
+    return _response(200, {
+        **validation,
+        "release_id": manifest["release_id"],
+        "release_version": manifest["release_version"],
+        "completed": completed,
+        "catalog": catalog,
+        "status": "propagating",
+    })
 
 
 def _handle_list_rules(qs: dict[str, str]) -> dict:
@@ -1273,7 +1398,8 @@ def _handle_create_rule(body: dict, api_key_id: str | None = None) -> dict:
             )
         raise
 
-    return _response(201, normalized)
+    catalog = _bump_rule_catalog()
+    return _response(201, {**normalized, "catalog_generation": catalog["generation"]})
 
 
 def _handle_update_rule(rule_id: str, body: dict, api_key_id: str | None = None) -> dict:
@@ -1300,7 +1426,8 @@ def _handle_update_rule(rule_id: str, body: dict, api_key_id: str | None = None)
                 "rule_id": rule_id,
             },
         )
-    return _response(200, written)
+    catalog = _bump_rule_catalog()
+    return _response(200, {**written, "catalog_generation": catalog["generation"]})
 
 
 def _handle_delete_rule(rule_id: str, qs: dict[str, str]) -> dict:
@@ -1321,7 +1448,8 @@ def _handle_delete_rule(rule_id: str, qs: dict[str, str]) -> dict:
         return _response(404, {"message": "Rule not found", "rule_kind": rk, "rule_id": rule_id})
 
     detection_rules_table.delete_item(Key={"rule_kind": rk, "rule_id": rule_id})
-    return _response(200, {"message": "Rule deleted", "rule": unpack_rule_body(item)})
+    catalog = _bump_rule_catalog()
+    return _response(200, {"message": "Rule deleted", "rule": unpack_rule_body(item), "catalog_generation": catalog["generation"]})
 
 
 def _normalize_rule_payload(payload: dict, *, force_rule_id: str | None, actor: str | None = None) -> dict:
@@ -1373,14 +1501,7 @@ def _normalize_rule_payload(payload: dict, *, force_rule_id: str | None, actor: 
         values = data.get("values")
         if not isinstance(values, list) or not values:
             raise ValueError("values must be a non-empty list for rule_kind=list")
-        return {
-            "rule_kind": "list",
-            "rule_id": data["rule_id"],
-            "created_by": data["created_by"],
-            "updated_by": data["updated_by"],
-            "timestamp": data["timestamp"],
-            "values": [str(v) for v in values],
-        }
+        return {**data, "rule_kind": "list", "rule_id": data["rule_id"], "values": [str(v) for v in values]}
 
     # enabled / notify defaults
     if "enabled" not in data:
@@ -2067,7 +2188,7 @@ def _help_payload() -> dict:
                 "methods": ["GET", "POST"],
                 "description": "Rules live in DynamoDB keyed by (rule_kind, rule_id).",
                 "query_params": {
-                    "rule_kind": "Optional. One of signal|correlation. If omitted, every partition "
+                    "rule_kind": "Optional. One of signal|correlation|list. If omitted, signal and correlation partitions "
                     "is queried directly (never a table scan) and merged -- page_size then caps "
                     "each partition independently, so a response can hold more than page_size items.",
                     "order": "asc|desc affects rule_id ordering within a kind (sort key is rule_id).",
@@ -2085,6 +2206,13 @@ def _help_payload() -> dict:
                     "rule_kind": "Required (because PK is rule_kind).",
                 },
             },
+            "/rules/schema": {"methods": ["GET"], "notes": "Versioned detection-content authoring contract."},
+            "/rules/validate": {"methods": ["POST"], "notes": "Side-effect-free structured candidate validation."},
+            "/rules/evaluate": {"methods": ["POST"], "notes": "Analysis-only fixture evaluation; never notifies, responds, or persists fixtures."},
+            "/rules/metrics": {"methods": ["GET"], "notes": "Aggregate-only performance grouped by exact rule/release provenance."},
+            "/rules/runtime-status": {"methods": ["GET"], "notes": "Stored catalog generation versus signal and correlation evaluator observations."},
+            "/rule-releases/plan": {"methods": ["POST"], "notes": "Preview exact immutable-manifest convergence."},
+            "/rule-releases/apply": {"methods": ["POST"], "notes": "Idempotent revision-guarded apply; lists precede dependent rules."},
             "/settings": {
                 "methods": ["GET", "POST"],
                 "notes": "GET/POST global settings (setting_id=global).",
@@ -2118,6 +2246,6 @@ def _help_payload() -> dict:
         },
         "schema_notes": [
             "Signals table is time-ordered by timestamp sort key for base queries and GSIs.",
-            "Rules table is NOT time-versioned in your current schema (SK is rule_id). If you want version history, add timestamp as SK or add a timestamp/version GSI.",
+            "Core stores only current runtime state. Immutable authoring versions, approval evidence, and releases belong in the management plane; runtime rows retain exact provenance.",
         ],
     }

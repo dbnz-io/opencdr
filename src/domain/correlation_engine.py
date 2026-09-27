@@ -196,6 +196,12 @@ class CorrelationRule:
     notify: bool = True
     response_module: str = ""
     playbook: str = ""
+    rule_version: int | None = None
+    content_fingerprint: str = ""
+    release_id: str = ""
+    release_version: int | None = None
+    evaluation_mode: str = "production"
+    contract_version: str = ""
 
 
 def parse_correlation_rule(rule: dict[str, Any]) -> CorrelationRule | None:
@@ -217,6 +223,12 @@ def parse_correlation_rule(rule: dict[str, Any]) -> CorrelationRule | None:
         notify=bool(rule.get("notify", True)),
         response_module=str(rule.get("response_module", "") or ""),
         playbook=str(rule.get("playbook", "") or ""),
+        rule_version=rule.get("rule_version") or rule.get("version"),
+        content_fingerprint=str(rule.get("content_fingerprint", "") or ""),
+        release_id=str(rule.get("release_id", "") or ""),
+        release_version=rule.get("release_version"),
+        evaluation_mode=str(rule.get("evaluation_mode", "production") or "production"),
+        contract_version=str(rule.get("contract_version", "") or ""),
     )
 
 
@@ -461,6 +473,12 @@ class CorrelationEngine:
             "alert_key": alert_key,
             "timestamp": now.isoformat(),
             "rule_id": _s(getattr(rule, "rule_id", "")),
+            "rule_version": getattr(rule, "rule_version", None),
+            "content_fingerprint": _s(getattr(rule, "content_fingerprint", "")),
+            "release_id": _s(getattr(rule, "release_id", "")),
+            "release_version": getattr(rule, "release_version", None),
+            "evaluation_mode": _s(getattr(rule, "evaluation_mode", "production")),
+            "contract_version": _s(getattr(rule, "contract_version", "")),
             "severity": _s(getattr(rule, "severity", "UNKNOWN")),
             "notify": bool(getattr(rule, "notify", True)),
             "response_module": _s(getattr(rule, "response_module", "")),

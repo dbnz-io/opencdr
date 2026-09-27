@@ -6,6 +6,7 @@
 
 - [Node.js](https://nodejs.org/) >= 18 and [Serverless Framework](https://www.serverless.com/) v4 (`npm install -g serverless`)
 - Python 3.12 (matches `provider.runtime` in `serverless.yml`)
+- Docker available during packaging. Serverless builds native Python dependencies inside the AWS Python 3.12 Linux image so a macOS/ARM virtualenv can never leak incompatible Mach-O modules into Lambda.
 - AWS credentials for the target account (`aws configure`, or environment variables, or — for CI — the OIDC role below)
 - `jq` (used by the rule-loading and integration-test scripts)
 - **CloudTrail enabled** in the target account/region. OpenCDR receives events via EventBridge, and CloudTrail management events are only delivered to EventBridge once a trail is active — without one, `processor` never receives anything and no signals are ever generated. See the root [README](../README.md#cloudtrail-must-be-enabled) for the exact `aws cloudtrail create-trail` commands, including the multi-account/AWS-Organizations variant.
