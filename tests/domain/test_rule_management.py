@@ -31,6 +31,8 @@ def test_contract_exposes_authoritative_bounds_and_catalogs():
     assert contract["bounds"]["threshold"]["maximum"] == 1000
     assert "in_list" in contract["condition_operators"]
     assert "actor" in contract["field_roots"]
+    assert contract["rule_kinds"] == ["correlation", "signal"]
+    assert contract["legacy_read_only_rule_kinds"] == ["list"]
 
 
 def test_validation_returns_structured_missing_list_error():

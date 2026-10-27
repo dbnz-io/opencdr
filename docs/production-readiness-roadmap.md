@@ -1,8 +1,11 @@
 # Production readiness roadmap
 
-This roadmap separates controls owned by OpenCDR Core from controls owned by the
-external production-promotion repository. A production deployment is approved only
-when both sides satisfy their gates.
+OpenCDR Core is production-ready within its documented boundary. This roadmap
+separates completed Core engineering from optional customer-owned controls and the
+external production-promotion repository. Customer-owned items are not incomplete
+Core work; they are tracked here so installation owners can make explicit risk,
+cost, and operability decisions. See the [security shared-responsibility
+model](shared-responsibility.md).
 
 ## P0 — repository and build integrity
 
@@ -67,7 +70,7 @@ or account-level security products. The deployer chooses those controls, their
 cost, and their operational procedures.
 
 - Add `DeletionPolicy: Retain` and `UpdateReplacePolicy: Retain` to configuration,
-  audit, and investigative DynamoDB tables.
+  audit, and investigative DynamoDB tables by selecting `securityProfile=hardened`.
 - Enable DynamoDB point-in-time recovery for detection rules, settings, IR role
   mappings, IR actions, signals, alerts, and logs. Decide separately whether the
   transient outbox and delivery-state tables need PITR.

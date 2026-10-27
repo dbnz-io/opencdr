@@ -4,7 +4,38 @@
 
 ## Response modules
 
-Set `response_module` on any detection rule to trigger an automated action when it fires. Nineteen modules exist, registered in `RESPONSE_MODULE_HANDLERS` in `src/handlers/responder.py`. **`api.py` validates `response_module` against this exact list** (`ALLOWED_RESPONSE_MODULES`, kept in sync with the registry by a dedicated test) — a typo or an unregistered name is rejected with a `400` at write time, not silently accepted and only discovered later as `IR_UNKNOWN_RESPONSE_MODULE` in `responder`'s logs the first time the rule actually fires:
+Use `response_actions` to run one or more ordered actions and explicitly select each action's target from the triggering event. The older single-string `response_module` field remains supported for existing rules, but the two fields are mutually exclusive. Nineteen modules exist, registered in `RESPONSE_MODULE_HANDLERS` in `src/handlers/responder.py`; unknown modules and invalid target keys are rejected when a rule is written.
+
+```json
+{
+  "response_actions": [
+    {
+      "module": "disable_access_key",
+      "target": {
+        "user_name": "raw_event.detail.responseElements.accessKey.userName",
+        "access_key_id": "raw_event.detail.responseElements.accessKey.accessKeyId"
+      }
+    },
+    {
+      "module": "disable_user",
+      "target": {
+        "user_name": "actor.user_name"
+      }
+    }
+  ]
+}
+```
+
+The keys inside `target` are fixed by the response module; rule authors choose only the event field path supplying each value. `GET /rules/schema` returns the required and optional keys and value type for every module. Paths are resolved when the detection or correlation alert is created, and resolved values are stored with it. A missing or wrong-type value produces `IR_TARGET_RESOLUTION_FAILED` and skips only that action—OpenCDR does not guess or fall back to a different asset. Up to ten actions may be configured per rule.
+
+The bundled root-access-key rule is visibility-only: Dredge's current `disable_access_key`
+operation requires an IAM username, but root keys have no username and AWS expects that argument
+to be omitted. Passing the account ID as a username is incorrect, so OpenCDR now leaves root-key
+deletion to the rule's manual playbook until the response library supports it safely.
+
+Each action receives a stable ID such as `<detection-id>--r1`. Rollback-capable actions are stored in the existing IR-actions table under that action ID, with `source_detection_id` linking back to the triggering detection. No additional database is required. Use the action ID, rather than the source detection ID, with the IR-action read and rollback endpoints.
+
+Legacy `response_module` rules still use the built-in extractors described below:
 
 | Module | Action | Needs on the detection event |
 |---|---|---|
@@ -13,22 +44,22 @@ Set `response_module` on any detection rule to trigger an automated action when 
 | `delete_user` | Delete the IAM user | `user_name` |
 | `disable_role` | Detach managed policies, delete inline policies, and clear the role's trust policy | `role_name` |
 | `revoke_active_sessions` | Attach a deny-all inline policy conditioned on `aws:TokenIssueTime` — invalidates active STS sessions without touching permanent access keys | `user_name` |
-| `delete_inline_policy` | Remove a single offending inline policy — surgical, doesn't touch the principal's other permissions or (unlike `revoke_active_sessions`) their active sessions | `user_name` **or** `role_name` (not `group_name` — see below) + `policy_name` |
-| `block_s3_public_access` | Enable account-level S3 public access block | `aws_account_id` |
+| `delete_inline_policy` | Remove a single offending inline policy — surgical, doesn't touch the principal's other permissions or (unlike `revoke_active_sessions`) their active sessions | `user_name`, `role_name`, **or** activity-routed `principal_name` (not groups) + `policy_name` |
+| `block_s3_public_access` | Enable account-level S3 public access block | `account_id` |
 | `block_s3_bucket_public_access` | Block public access on a specific bucket | `bucket_name` |
 | `block_s3_object_public_access` | Block public access on a specific object | `bucket_name` + `key` |
-| `quarantine_s3_bucket` | Block public access + a deny-all bucket policy for any principal outside the account — broader containment than `block_s3_bucket_public_access` | `bucket_name` (`aws_account_id` optional, narrows the deny policy) |
+| `quarantine_s3_bucket` | Block public access + a deny-all bucket policy for any principal outside the account — broader containment than `block_s3_bucket_public_access` | `bucket_name` (`account_id` optional, narrows the deny policy) |
 | `isolate_ec2_instances` | Replace instance security groups with an isolation group | `instance_ids` (one or more) |
-| `deauthorize_security_group_rules` | Revoke the specific ingress/egress rule that was added — narrower than `isolate_ec2_instances`, doesn't touch instances | `group_id` + a CIDR-based ingress/egress rule |
+| `deauthorize_security_group_rules` | Revoke the specific ingress/egress rule that was added — narrower than `isolate_ec2_instances`, doesn't touch instances | `group_id` + activity-routed `rules`, or explicit `ingress_rules`/`egress_rules` |
 | `disable_lambda_function` | Throttle a function to zero reserved concurrency (reversible — new invocations fail, in-flight ones aren't interrupted) | `function_name` |
 | `disable_secrets_manager_secret` | **Schedule** a secret for deletion (7-day default recovery window, still restorable via `RestoreSecret` until it elapses — not an instant delete) | `secret_id` |
-| `revoke_rds_snapshot_public_access` | Remove `"all"` from a DB/cluster snapshot's `restore` attribute, without touching any other explicit account IDs already granted restore access | `dBSnapshotIdentifier` **or** `dBClusterSnapshotIdentifier` |
-| `enable_cloudtrail_logging` | Re-enable a stopped CloudTrail trail | trail `name` |
-| `enable_guardduty_detector` | Re-enable a disabled GuardDuty detector | `detectorId` |
-| `start_config_recorder` | Re-start a stopped AWS Config recorder | `configurationRecorderName` |
+| `revoke_rds_snapshot_public_access` | Remove `"all"` from a DB/cluster snapshot's `restore` attribute, without touching any other explicit account IDs already granted restore access | `snapshot_id` (`snapshot_type` optional) |
+| `enable_cloudtrail_logging` | Re-enable a stopped CloudTrail trail | `trail_name` |
+| `enable_guardduty_detector` | Re-enable a disabled GuardDuty detector | `detector_id` |
+| `start_config_recorder` | Re-start a stopped AWS Config recorder | `recorder_name` |
 | `enable_security_hub` | Re-enable Security Hub for this account/region | nothing — account/region-scoped |
 
-The "Needs" column is what `responder.py`'s own field extractors pull from the detection event. **Not every extractor understands both sources** — worth checking before wiring `response_module` onto a new rule during setup, since a rule that matches but whose source doesn't carry the needed field will fire and then no-op (logged, not a crash):
+The "Needs" column lists both the fixed `response_actions[].target` keys and what the legacy `response_module` extractors pull from an event. **Not every legacy extractor understands both sources**; explicit target mappings avoid that ambiguity:
 
 - `_extract_user_name`/`_extract_user_and_access_key` (→ `disable_access_key`, `disable_user`, `delete_user`, `revoke_active_sessions`) and `_extract_bucket_name`/`_extract_instance_ids` (→ `block_s3_bucket_public_access`, `quarantine_s3_bucket`, `isolate_ec2_instances`) handle **both** the CloudTrail-shaped path (`raw_event.detail.*`) and the GuardDuty-shaped fallback (`resources[]` by type) — these work regardless of which source triggered the rule.
 - `_extract_role_name` (→ `disable_role`) and the `key` half of `_extract_bucket_and_key` (→ `block_s3_object_public_access`) are **CloudTrail-only** today — no GuardDuty `resources[]` fallback exists for either. A GuardDuty-sourced rule using either of these two modules will match and fire, then no-op on missing `role_name`/`key`.
@@ -77,7 +108,7 @@ Only successful actions notify this way today — a failed action is still visib
 
 ## Rollback
 
-`POST /ir-actions/{detection_id}/rollback` doesn't execute the undo synchronously — it enqueues onto `ir-rollback-queue` and returns `202`, and `rollbackHandler` (`src/handlers/ir_rollback.py`) does the actual work asynchronously, same decoupled shape as the original `processor` → outbox → `responder` pipeline (and the same rate-limit/circuit-breaker/dry-run wiring for free, by going through an equivalent consumer instead of a bespoke synchronous call). Only rollback-*eligible* actions can be rolled back at all — see `ROLLBACK_UNDO_MODULE` in `responder.py` and the "Response modules" table above for which ones capture enough prior state to be reversible.
+`POST /ir-actions/{detection_id}/rollback` (where the path value is the action ID for a multi-action rule) doesn't execute the undo synchronously — it enqueues onto `ir-rollback-queue` and returns `202`, and `rollbackHandler` (`src/handlers/ir_rollback.py`) does the actual work asynchronously, same decoupled shape as the original `processor` → outbox → `responder` pipeline (and the same rate-limit/circuit-breaker/dry-run wiring for free, by going through an equivalent consumer instead of a bespoke synchronous call). Only rollback-*eligible* actions can be rolled back at all — see `ROLLBACK_UNDO_MODULE` in `responder.py` and the "Response modules" table above for which ones capture enough prior state to be reversible.
 
 **`rollback_status` on the IR Action record is what the UI actually reads** — `rolled_back`/`rolled_back_at` (booleans, set together on success) still exist for backward compatibility, but `rollback_status` is the field with real states:
 
@@ -125,7 +156,7 @@ A single malformed record in a response batch doesn't take the rest of the batch
 ## Related pages
 
 - [`docs/ir-role.md`](ir-role.md) — full IAM setup walkthrough for onboarding additional accounts
-- [Detection Rules](detection-rules.md) — where `response_module` is set
+- [Detection Rules](detection-rules.md) — how `response_actions` and legacy `response_module` are configured
 - [API Reference](api-reference.md#ir-roles) — the `/ir-roles` endpoints
 - [Security](security.md) — the IAM model this all sits on top of
 - [Notifications](notifications.md#remediation-success-notifications) — how a successful remediation actually gets delivered

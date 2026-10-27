@@ -2,8 +2,9 @@
 
 The control plane generates types from this spec; a stale or schema-less spec
 is how hand-copied shapes reached production. This asserts the spec parses,
-every $ref resolves, the routes the API actually serves are documented (with
-rule_kind=list), and every success response carries a schema (not a bare
+every $ref resolves, the routes the API actually serves are documented,
+legacy list records are read-only, the packaged JSON copy is synchronized,
+and every success response carries a schema (not a bare
 "200: OK").
 """
 
@@ -61,6 +62,8 @@ def test_documented_paths_cover_served_routes():
         "/signals",
         "/signals/stats",
         "/logs",
+        "/lists",
+        "/lists/{list_id}",
         "/rules",
         "/rules/schema",
         "/rules/validate",
@@ -89,7 +92,7 @@ def test_no_phantom_routes_documented():
     assert "/docs" not in paths
 
 
-def test_rule_kind_enum_includes_list():
+def test_legacy_list_kind_is_read_only_in_rule_routes():
     spec = _spec()
     # GET /rules query param
     get_params = spec["paths"]["/rules"]["get"]["parameters"]
@@ -99,6 +102,15 @@ def test_rule_kind_enum_includes_list():
     get_one = spec["paths"]["/rules/{rule_id}"]["get"]["parameters"]
     rk1 = next(p for p in get_one if p.get("name") == "rule_kind")
     assert "list" in rk1["schema"]["enum"]
+    # PUT takes rule_kind from the body, whose Rule schema excludes list.
+    assert "list" not in spec["components"]["schemas"]["Rule"]["properties"]["rule_kind"]["enum"]
+
+
+def test_packaged_json_contract_matches_yaml_source():
+    import json
+
+    packaged = _SPEC_PATH.parent / "src" / "openapi" / "swagger.json"
+    assert json.loads(packaged.read_text()) == _spec()
 
 
 def test_success_responses_have_schemas():

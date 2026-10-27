@@ -62,6 +62,8 @@ class OpenCDRConfigError(Exception):
 # ---------------------------------------------------------------------------
 
 RuleKind = Literal["signal", "correlation"]
+ListMatcher = Literal["exact", "cidr"]
+ListValueType = Literal["string", "ip", "cidr", "iam_user", "arn", "aws_account_id", "resource_id"]
 Order = Literal["asc", "desc"]
 Severity = Literal["CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO", "INFORMATIONAL", "UNKNOWN"]
 
@@ -230,9 +232,8 @@ def opencdr_status() -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Rules (detection + correlation). Lists (rule_kind="list") have their own
-# tool group below -- same underlying /rules resource, different shape and
-# merge semantics, same split scripts/opencdr.py's CLI already makes.
+# Rules (detection + correlation). Reusable lists have their own /lists
+# resource and tool group below.
 # ---------------------------------------------------------------------------
 
 
@@ -313,14 +314,12 @@ def opencdr_rules_delete(rule_id: str, kind: RuleKind) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Lists (IoCs, critical assets, etc.) -- rule_kind="list" items, referenced
-# by in_list/not_in_list rule conditions.
+# Reusable, independently versioned lists referenced by rule conditions.
 # ---------------------------------------------------------------------------
 
 
 def _get_list_or_raise(url: str, key: str, list_id: str) -> dict:
-    query = _qs(rule_kind="list")
-    status, body = opencdr._request("GET", f"/rules/{_seg(list_id, 'list_id')}?{query}", url, key)
+    status, body = opencdr._request("GET", f"/lists/{_seg(list_id, 'list_id')}", url, key)
     if status == 404:
         raise RuntimeError(f"List not found: {list_id}")
     _raise_on_error(status, body, "lists get")
@@ -331,8 +330,7 @@ def _get_list_or_raise(url: str, key: str, list_id: str) -> dict:
 def opencdr_lists_list() -> dict:
     """List all detection lists. Read-only."""
     url, key = _resolve_api()
-    query = _qs(rule_kind="list", page_size=100)
-    status, body = opencdr._request("GET", f"/rules?{query}", url, key)
+    status, body = opencdr._request("GET", "/lists?page_size=100", url, key)
     _raise_on_error(status, body, "lists list")
     return body
 
@@ -346,7 +344,11 @@ def opencdr_lists_show(list_id: str) -> dict:
 
 @_tool(CAP_RULES, annotations=_DESTRUCTIVE)
 def opencdr_lists_replace(
-    list_id: str, description: str = "", values: list[str] | None = None
+    list_id: str,
+    description: str = "",
+    values: list[str] | None = None,
+    matcher: ListMatcher = "exact",
+    value_type: ListValueType = "string",
 ) -> dict:
     """Create a list, or COMPLETELY REPLACE an existing one. DESTRUCTIVE.
 
@@ -357,15 +359,20 @@ def opencdr_lists_replace(
     opencdr_lists_remove instead. Creates the list if it does not exist.
     """
     url, key = _resolve_api()
-    payload = {
-        "rule_id": list_id,
-        "rule_kind": "list",
+    payload: dict[str, Any] = {
+        "list_id": list_id,
+        "matcher": matcher,
+        "value_type": value_type,
         "description": description,
         "values": values or [],
     }
-    query = _qs(rule_kind="list")
+    get_status, current = opencdr._request("GET", f"/lists/{_seg(list_id, 'list_id')}", url, key)
+    if get_status == 200:
+        payload["expected_rev"] = int(current.get("rev") or 0)
+    elif get_status != 404:
+        _raise_on_error(get_status, current, "lists replace read")
     status, body = opencdr._request(
-        "PUT", f"/rules/{_seg(list_id, 'list_id')}?{query}", url, key, json=payload
+        "PUT", f"/lists/{_seg(list_id, 'list_id')}", url, key, json=payload
     )
     _raise_on_error(status, body, "lists replace")
     return body
@@ -381,7 +388,6 @@ def _list_compare_and_set(list_id: str, value: str, *, add: bool, context: str) 
     already present / already absent) short-circuit without a write.
     """
     url, key = _resolve_api()
-    query = _qs(rule_kind="list")
     for _ in range(_CAS_MAX_ATTEMPTS):
         item = _get_list_or_raise(url, key, list_id)
         values = list(item.get("values") or [])
@@ -394,10 +400,12 @@ def _list_compare_and_set(list_id: str, value: str, *, add: bool, context: str) 
             values.append(value)
         else:
             values.remove(value)
+            if not values:
+                raise RuntimeError("A list must retain at least one value; delete it instead")
         item["values"] = values
         item["expected_rev"] = int(item.get("rev") or 0)
         status, body = opencdr._request(
-            "PUT", f"/rules/{_seg(list_id, 'list_id')}?{query}", url, key, json=item
+            "PUT", f"/lists/{_seg(list_id, 'list_id')}", url, key, json=item
         )
         if status == 409:
             continue  # concurrent write -- re-read the current rev and retry
@@ -434,10 +442,7 @@ def opencdr_lists_remove(list_id: str, value: str) -> dict:
 def opencdr_lists_delete(list_id: str) -> dict:
     """Delete a list entirely. DESTRUCTIVE and irreversible."""
     url, key = _resolve_api()
-    query = _qs(rule_kind="list")
-    status, body = opencdr._request(
-        "DELETE", f"/rules/{_seg(list_id, 'list_id')}?{query}", url, key
-    )
+    status, body = opencdr._request("DELETE", f"/lists/{_seg(list_id, 'list_id')}", url, key)
     if status == 404:
         return {"found": False, "list_id": list_id}
     _raise_on_error(status, body, "lists delete")

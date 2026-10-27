@@ -31,6 +31,7 @@ Expect `service`, `lambda_name`, and a current `time`. A `403` here means the ke
 
 ```bash
 python3 scripts/opencdr.py rules list --rule-kind signal | head -5
+python3 scripts/opencdr.py lists list
 ```
 
 If empty, rules were never loaded — run `./scripts/load_rules.sh --stage <stage> --dry-run` first to preview, then without `--dry-run` to actually write them. Rule content itself lives in [dbnz-io/opencdr-detection-rules](https://github.com/dbnz-io/opencdr-detection-rules), pulled in here as a git submodule at `support_files/detection_rules` — if that directory looks empty in your checkout, run `git submodule update --init` first.
@@ -76,9 +77,9 @@ GuardDuty-sourced findings default to **not** notifying (see [GuardDuty notifica
 
 ## 7. An automated response fires, and can be rolled back
 
-Only meaningful if at least one rule you loaded has a `response_module` set and you've reviewed [Response modules](incident-response.md#response-modules) — this step takes a real, if synthetic-triggered, action in the target AWS account. Skip it in an account you're not prepared to see IAM/network changes in.
+Only meaningful if at least one rule you loaded has `response_actions` or legacy `response_module` configured and you've reviewed [Response modules](incident-response.md#response-modules) — this step takes a real, if synthetic-triggered, action in the target AWS account. Skip it in an account you're not prepared to see IAM/network changes in.
 
-1. Re-run step 3 filtered to a fixture whose rule has a `response_module` (e.g. `--event 011`, security group ingress rule → `deauthorize_security_group_rules`, if wired) — **only after** loading rules with `--with-response-modules` (rules load with `response_module` stripped by default, see [Detection Rules](detection-rules.md)).
+1. Re-run step 3 filtered to a fixture whose rule has a response action (e.g. `--event 011`, security group ingress rule → `deauthorize_security_group_rules`, if wired) — **only after** loading rules with `--with-response-modules` (the loader strips both `response_actions` and legacy `response_module` by default; see [Detection Rules](detection-rules.md)).
 2. Confirm the action landed:
    ```bash
    python3 scripts/opencdr.py ir-actions list --page-size 5
@@ -93,7 +94,7 @@ Only meaningful if at least one rule you loaded has a `response_module` set and 
 
 ## 8. The MCP server (if you're using it as the management plane)
 
-Point an MCP-compatible client at `mcp_server/server.py` using its own dedicated API key (see [API Reference](api-reference.md#mcp-server-default-management-plane) for setup). Run its `status` tool first — same check as step 1, proves the MCP server's own key and connection are valid independently of anything else in this doc. Then spot-check one tool per surface it covers (a rules list, a signals query, a settings read) rather than every tool — if `status` and one tool per surface work, the rest follow the same code path.
+Point an MCP-compatible client at `mcp_server/server.py` using its own dedicated API key (see [API Reference](api-reference.md#mcp-server-default-management-plane) for setup). Run its `status` tool first — same check as step 1, proves the MCP server's own key and connection are valid independently of anything else in this doc. Then spot-check one tool per surface it covers (rules, reusable lists, signals, and settings) rather than every tool — if `status` and one tool per surface work, the rest follow the same code path.
 
 ## Summary checklist
 
@@ -101,6 +102,7 @@ Point an MCP-compatible client at `mcp_server/server.py` using its own dedicated
 |---|---|---|---|
 | 1 | API reachable, key valid | `opencdr.py status` | service/time returned, no 403 |
 | 2 | Rules loaded | `opencdr.py rules list` | non-empty |
+| 2a | Reusable lists reachable | `opencdr.py lists list` | expected lists, or an explicit empty catalog |
 | 3 | Detection fires | `opencdr.py test deployed` | all `PASS` (except 028) |
 | 4 | Signals/logs queryable | `opencdr.py signals list` / `logs list` | rows from step 3 visible |
 | 5 | Dashboard shows real data | UI Overview/Signals/Logs pages | counts match steps 3/4 |

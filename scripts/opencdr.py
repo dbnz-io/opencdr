@@ -343,7 +343,7 @@ def cmd_rules_load(args: argparse.Namespace) -> None:
     # guardduty/, and any future source folder added the same way -- see
     # docs/detection-rules.md#authoring-testing-and-loading) rather than
     # flat in RULES_DIR itself.
-    files = sorted(RULES_DIR.rglob("*.json"))
+    files = sorted(path for path in RULES_DIR.rglob("*.json") if "lists" not in path.parts)
     if not files:
         print(warn(f"  No rule files found in {RULES_DIR.relative_to(ROOT)}"))
         return
@@ -787,7 +787,7 @@ def cmd_logs_list(args: argparse.Namespace) -> None:
 
 
 def _get_list(url: str, key: str, list_id: str) -> dict:
-    status, body = _request("GET", f"/rules/{list_id}?rule_kind=list", url, key)
+    status, body = _request("GET", f"/lists/{list_id}", url, key)
     if status == 404:
         print(err(f"  List not found: {list_id}"))
         sys.exit(1)
@@ -800,12 +800,13 @@ def cmd_lists_create(args: argparse.Namespace) -> None:
     url, key = _require_api(cfg)
 
     payload = {
-        "rule_id": args.list_id,
-        "rule_kind": "list",
+        "list_id": args.list_id,
+        "matcher": getattr(args, "matcher", "exact"),
+        "value_type": getattr(args, "value_type", "string"),
         "description": args.description or "",
         "values": args.values or [],
     }
-    status, body = _request("PUT", f"/rules/{args.list_id}?rule_kind=list", url, key, json=payload)
+    status, body = _request("PUT", f"/lists/{args.list_id}", url, key, json=payload)
     _die_on_error(status, body)
     count = len(payload["values"])
     print(ok(f"  created  {args.list_id}") + f"  ({count} value{'s' if count != 1 else ''})")
@@ -815,7 +816,7 @@ def cmd_lists_list(args: argparse.Namespace) -> None:
     cfg = _load_config()
     url, key = _require_api(cfg)
 
-    status, body = _request("GET", "/rules?rule_kind=list&page_size=100", url, key)
+    status, body = _request("GET", "/lists?page_size=100", url, key)
     _die_on_error(status, body, "lists list")
 
     items = body.get("items", [])
@@ -826,9 +827,9 @@ def cmd_lists_list(args: argparse.Namespace) -> None:
     print(f"\n  {'LIST_ID':<45} {'VALUES':>6}  DESCRIPTION")
     print("  " + "─" * 78)
     for item in items:
-        values = item.get("values") or []
+        value_count = item.get("entry_count", 0)
         desc = item.get("description") or ""
-        print(f"  {item.get('rule_id', ''):<45} {str(len(values)):>6}  {dim(desc)}")
+        print(f"  {item.get('list_id', ''):<45} {str(value_count):>6}  {dim(desc)}")
     print()
 
 
@@ -860,7 +861,8 @@ def cmd_lists_add(args: argparse.Namespace) -> None:
 
     values.append(args.value)
     item["values"] = values
-    status, body = _request("PUT", f"/rules/{args.list_id}?rule_kind=list", url, key, json=item)
+    item["expected_rev"] = item.get("rev", 0)
+    status, body = _request("PUT", f"/lists/{args.list_id}", url, key, json=item)
     _die_on_error(status, body)
     print(
         ok(f"  updated  {args.list_id}")
@@ -879,8 +881,12 @@ def cmd_lists_remove(args: argparse.Namespace) -> None:
         return
 
     values.remove(args.value)
+    if not values:
+        print(err("  Lists must retain at least one value; delete the list instead."))
+        sys.exit(1)
     item["values"] = values
-    status, body = _request("PUT", f"/rules/{args.list_id}?rule_kind=list", url, key, json=item)
+    item["expected_rev"] = item.get("rev", 0)
+    status, body = _request("PUT", f"/lists/{args.list_id}", url, key, json=item)
     _die_on_error(status, body)
     print(
         ok(f"  updated  {args.list_id}")
@@ -891,7 +897,7 @@ def cmd_lists_remove(args: argparse.Namespace) -> None:
 def cmd_lists_delete(args: argparse.Namespace) -> None:
     cfg = _load_config()
     url, key = _require_api(cfg)
-    status, body = _request("DELETE", f"/rules/{args.list_id}?rule_kind=list", url, key)
+    status, body = _request("DELETE", f"/lists/{args.list_id}", url, key)
     if status == 404:
         print(warn(f"  List not found: {args.list_id}"))
         sys.exit(1)
@@ -1009,6 +1015,11 @@ def cmd_test_local(args: argparse.Namespace) -> None:
                 all_rules.append(r)
             elif r.get("rule_kind") == "list":
                 all_lists[r["rule_id"]] = r.get("values", [])
+            elif "lists" in p.parts and r.get("list_id"):
+                all_lists[r["list_id"]] = {
+                    "matcher": r.get("matcher", "exact"),
+                    "values": r.get("values", []),
+                }
         except json.JSONDecodeError as e:
             print(warn(f"  {p.relative_to(RULES_DIR)}: invalid JSON, skipped ({e})"))
 
@@ -1327,7 +1338,11 @@ def _run_setup_wizard() -> None:  # noqa: C901
     # ── Step 3: Load rules ────────────────────────────────────────────────
     _step(3, "Detection Rules")
 
-    rule_files = [p for p in sorted(RULES_DIR.rglob("*.json")) if p.name not in _SKIP_RULE_FILES]
+    rule_files = [
+        p
+        for p in sorted(RULES_DIR.rglob("*.json"))
+        if p.name not in _SKIP_RULE_FILES and "lists" not in p.parts
+    ]
     print(f"  Found {len(rule_files)} rule file(s) in {dim(str(RULES_DIR.relative_to(ROOT)))}")
     print()
 
@@ -1785,6 +1800,13 @@ def _build_parser() -> argparse.ArgumentParser:
     lsc = ls_sub.add_parser("create", help="Create a new list")
     lsc.add_argument("list_id", metavar="<list_id>")
     lsc.add_argument("--description", metavar="<desc>", default="")
+    lsc.add_argument("--matcher", choices=["exact", "cidr"], default="exact")
+    lsc.add_argument(
+        "--value-type",
+        choices=["string", "ip", "cidr", "iam_user", "arn", "aws_account_id", "resource_id"],
+        default="string",
+        dest="value_type",
+    )
     lsc.add_argument("--values", nargs="*", metavar="<value>", default=[])
     lsc.set_defaults(func=cmd_lists_create)
 

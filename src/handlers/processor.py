@@ -7,6 +7,7 @@ import time
 from ..domain.detection_engine import run_detection
 from ..domain.ocsf_min_parser import build_default_router
 from ..infra.aws_handler import AwsHandler
+from ..infra.detection_lists_repository import load_detection_lists
 from ..infra.detection_rules_repository import (
     get_rule_catalog_metadata,
     load_detection_rules,
@@ -67,10 +68,10 @@ def get_rules(aws: AwsHandler, ocdr_logger: Logger):
     return RULES_CACHE
 
 
-def get_lists(aws: AwsHandler, ocdr_logger: Logger) -> dict[str, list]:
+def get_lists(aws: AwsHandler, ocdr_logger: Logger) -> dict[str, dict]:
     """
     Load lists once per Lambda container, refreshed every RULES_TTL_SECONDS.
-    Returns {list_id: [values]}.
+    Returns active matcher/version/value snapshots keyed by list_id.
     """
     global LISTS_CACHE, LISTS_CACHE_LOADED_AT, LISTS_GENERATION
     now = time.time()
@@ -86,10 +87,20 @@ def get_lists(aws: AwsHandler, ocdr_logger: Logger) -> dict[str, list]:
             event_type="SYSTEM",
             message="Loading detection lists",
         )
-        raw = load_detection_rules(aws, ocdr_logger, rule_kind="list")
-        LISTS_CACHE = {item["rule_id"]: item.get("values", []) for item in raw}
-        LISTS_CACHE_LOADED_AT = now
-        LISTS_GENERATION = generation
+        try:
+            loaded = load_detection_lists(aws, ocdr_logger)
+        except Exception:
+            if LISTS_CACHE is None:
+                raise
+            ocdr_logger.warning(
+                event_name="LISTS_STALE_CACHE_USED",
+                event_type="SYSTEM",
+                message="List refresh failed; using the last successful snapshot",
+            )
+        else:
+            LISTS_CACHE = loaded
+            LISTS_CACHE_LOADED_AT = now
+            LISTS_GENERATION = generation
 
     return LISTS_CACHE
 
@@ -225,6 +236,8 @@ def lambda_handler(event, context):
             "severity": detection.get("severity", "UNKNOWN"),
             "notify": True,
             "response_module": detection.get("response_module", "") or "",
+            "response_actions": detection.get("response_actions", []),
+            "resolved_response_actions": detection.get("resolved_response_actions", []),
             "playbook": detection.get("playbook", "") or "",
             "type": "signal",
             "match_count": 1,
@@ -240,6 +253,8 @@ def lambda_handler(event, context):
             "resources": detection.get("resources", []),
             "raw_event": detection.get("raw_event", {}),
         }
+        if detection.get("list_versions"):
+            alert_item["list_versions"] = detection["list_versions"]
 
         if ALERTS_TABLE_NAME:
             try:

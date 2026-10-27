@@ -9,6 +9,13 @@
 
 OpenCDR Core is an open-source, account-local Cloud Detection & Response data plane for AWS. One deployment protects one AWS account: it ingests CloudTrail and GuardDuty events, evaluates configurable rules, correlates activity, and delivers alerts with optional automated incident response. A home-region deployment plus lightweight regional collectors provides multi-region coverage without making detection depend on an organization-level service.
 
+OpenCDR Core is production-ready within its documented product boundary. It
+provides secure defaults and an optional reversible hardened profile for the
+resources it deploys. Customer-specific identity, network, backup, retention,
+regional-coverage, and production-promotion policies remain deployment-owner
+decisions—not missing Core features. See the [security shared-responsibility
+model](docs/shared-responsibility.md).
+
 The deployed service and resource names remain `opencdr` for upgrade compatibility. See [OpenCDR Core](docs/core.md) for the product boundary and [Management contract](docs/management-contract.md) for the stable interface an optional fleet manager can use.
 
 This README is a quickstart: enough to get a working deployment. Everything else — full architecture, every notification channel's setup, writing detection rules, the automated-response module reference, multi-account/multi-region setup, CI/CD, observability, cost tracking, SIEM integrations, the security model — lives in **[`docs/`](docs/README.md)**, which has a ["find what you need"](docs/README.md#find-what-you-need) index.
@@ -95,12 +102,15 @@ deployment.
 
 Rule content lives in its own repo, [dbnz-io/opencdr-detection-rules](https://github.com/dbnz-io/opencdr-detection-rules) (MIT-licensed), pulled in here as a git submodule at `support_files/detection_rules`. If you cloned this repo without `--recurse-submodules`, run `git submodule update --init` first — otherwise step 3 below silently loads zero rules.
 
+Reusable detection lists are independent, versioned resources managed through `/lists`; the
+rules repository includes opt-in examples under `lists/`, but rule loading does not install them.
+
 ```bash
 # 3. Load the bundled detection rules
 ./scripts/load_rules.sh --stage dev
 ```
 
-> **⚠️ Automated response can take real, destructive action.** Rules load with every `response_module` stripped by default, and CI deploys with `DREDGE_DRY_RUN=true` unless a manual run explicitly selects live execution. Pass `--with-response-modules` and disable dry-run only once you've reviewed [Response modules](docs/incident-response.md#response-modules) and actually want them armed.
+> **⚠️ Automated response can take real, destructive action.** Rules load with `response_module` and `response_actions` stripped by default, and CI deploys with `DREDGE_DRY_RUN=true` unless a manual run explicitly selects live execution. Pass `--with-response-modules` and disable dry-run only once you've reviewed [Response modules](docs/incident-response.md#response-modules) and actually want them armed.
 
 ```bash
 # 4. Configure a notification channel (interactive wizard — also re-runs step 3)
@@ -126,7 +136,7 @@ Your API URL and key are printed by `serverless deploy`. That's a working deploy
 
 ## OpenCDR CLI & MCP Server
 
-`scripts/opencdr.py` is a management CLI for a deployed OpenCDR stack — rules, settings, signals, logs, and the interactive setup wizard used above.
+`scripts/opencdr.py` is a management CLI for a deployed OpenCDR stack — rules, reusable lists, settings, signals, logs, and the interactive setup wizard used above.
 
 ```bash
 python3 scripts/opencdr.py status   # health check

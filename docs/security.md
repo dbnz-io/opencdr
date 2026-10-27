@@ -25,19 +25,21 @@ The deployed API key itself follows the same principle at the infrastructure lev
 
 API-key auth on every route, backed by a usage plan (10,000 requests/month quota, 100 requests/second rate limit) — a basic backstop against runaway/accidental traffic, not a security control against a determined caller with a valid key.
 
-Accordingly, the default API configuration is suitable for development and
-controlled evaluation, not as the sole production management-plane boundary. The
-production deployer must add IAM/SigV4 or OIDC/JWT authentication, restrict the API
-Gateway resource/network policy, migrate each caller, and retain API keys only for
-metering or temporary compatibility where needed. See
-[Production deployment responsibilities](production-deployment.md#1-establish-the-production-identity-and-network-boundary).
+The supplied API-key configuration is OpenCDR's supported baseline. The customer
+owns the final identity and exposure decision because only the customer knows its
+callers and network boundary. Environments requiring workload/user identity beyond
+bearer keys can add IAM/SigV4 or OIDC/JWT, a restrictive API Gateway resource
+policy, and private networking. This is a customer security-policy choice—not an
+unresolved Core defect. See the [security shared-responsibility
+model](shared-responsibility.md) and [customer production deployment
+decisions](production-deployment.md#1-establish-the-production-identity-and-network-boundary).
 
 ## Known, deliberate limitations
 
 Stated plainly, because a client evaluating this deployment should know about these rather than discover them:
 
-- **API keys are now route-scoped, but coarsely.** Five scopes exist (`read`, `rules`, `settings`, `ir_roles`, `ir_actions` — see [API Reference](api-reference.md#api-key-scopes)), enforced in `api.py` from the caller's key name, not a custom Lambda authorizer (API Gateway does populate `identity.apiKeyId` for key-authenticated requests, which turned out to be enough). `read` is still one scope covering signals/logs/rules/settings/ir-roles GETs together — a key can't be scoped to "read signals but not read settings." `ir_actions` is the write scope that governs undoing containment — enqueuing an IR-action rollback (`POST /ir-actions/{detection_id}/rollback`) — and is deliberately separate from `ir_roles` (which manages *which* IAM role the responder assumes per account): being able to roll back a containment action is a distinct privilege from being able to reconfigure the response identity. The original bare key (predating scoping) still carries all five scopes for back-compat, and the MCP server (`mcp_server/`, the platform's default management plane) is deliberately given all five too, since managing rules/lists/settings/IR-roles and rolling back IR-actions is exactly what it's for — a compromised MCP config is as much a full compromise as the bare key. A deployment that only needs narrower access (e.g. a read-only reporting integration) should mint its own single-scope key rather than reuse either broad one.
-- **No per-alert human approval on automated response.** The rate-limit circuit breaker (see [Incident Response](incident-response.md#rate-limiting)) caps runaway automation account-wide, but any individual detection with a `response_module` set fires automatically once it matches — there's no approval step in between.
+- **API keys are now route-scoped, but coarsely.** Five scopes exist (`read`, `rules`, `settings`, `ir_roles`, `ir_actions` — see [API Reference](api-reference.md#api-key-scopes)), enforced in `api.py` from the caller's key name, not a custom Lambda authorizer (API Gateway does populate `identity.apiKeyId` for key-authenticated requests, which turned out to be enough). `read` is still one scope covering signals/logs/rules/lists/settings/ir-roles GETs together — a key can't be scoped to "read signals but not read settings." `ir_actions` is the write scope that governs undoing containment — enqueuing an IR-action rollback (`POST /ir-actions/{detection_id}/rollback`) — and is deliberately separate from `ir_roles` (which manages *which* IAM role the responder assumes per account): being able to roll back a containment action is a distinct privilege from being able to reconfigure the response identity. The original bare key (predating scoping) still carries all five scopes for back-compat, and the MCP server (`mcp_server/`, the platform's default management plane) is deliberately given all five too, since managing rules/lists/settings/IR-roles and rolling back IR-actions is exactly what it's for — a compromised MCP config is as much a full compromise as the bare key. A deployment that only needs narrower access (e.g. a read-only reporting integration) should mint its own single-scope key rather than reuse either broad one.
+- **No per-alert human approval on automated response.** The rate-limit circuit breaker (see [Incident Response](incident-response.md#rate-limiting)) caps runaway automation account-wide, but any detection with `response_module` or `response_actions` configured fires automatically once it matches — there's no approval step in between.
 - **The observability layer is AWS-native, not portable.** See [Observability](observability.md#portability-the-honest-tradeoff) — a deliberate tradeoff, not a limitation to be fixed later by default.
 - **A fresh deploy only covers its own region.** `processor`'s EventBridge rule listens on the default bus in the deployment region only — CloudTrail and GuardDuty events from any other region an account operates in never reach it, by default. A mitigation exists (`scripts/setup_region_forwarding.sh`, see [Cross-Region Event Forwarding](region-forwarding.md)) but it's an explicit, opt-in step per additional region, not automatic — a multi-region account that hasn't run it is silently blind outside its deployment region.
 
@@ -48,4 +50,5 @@ Stated plainly, because a client evaluating this deployment should know about th
 - [API Reference](api-reference.md) — the authentication model from the caller's side
 - [`SECURITY.md`](../SECURITY.md) — vulnerability reporting
 - [Cross-Region Event Forwarding](region-forwarding.md) — closing the single-region coverage gap
-- [Production deployment responsibilities](production-deployment.md) — deployer-owned identity, network, state protection, and recovery gates
+- [Security shared-responsibility model](shared-responsibility.md) — OpenCDR and customer security ownership
+- [Customer production deployment decisions](production-deployment.md) — optional identity, network, state protection, and recovery guidance

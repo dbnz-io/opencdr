@@ -2,8 +2,8 @@
 `ALLOWED_CONDITION_OPS` had drifted from what detection_engine.py actually
 implements in both directions (wildcard/in_list/not_in_list implemented but
 rejected here; not_prefix/not_suffix accepted here but not implemented,
-silently never matching with no error either side). rule_kind="list" was
-also storage-layer-only, unreachable through the API at all.
+silently never matching with no error either side). Legacy rule_kind="list"
+normalization remains covered for migration reads, but current writes use /lists.
 """
 
 from __future__ import annotations

@@ -21,6 +21,10 @@ def main() -> int:
     path = Path(sys.argv[1])
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
+        if isinstance(payload, dict) and payload.get("rule_kind") == "list":
+            raise ValueError(
+                "rule_kind=list is legacy; reusable lists must be managed through /lists"
+            )
         validate_rule_document(payload)
     except (OSError, json.JSONDecodeError, ValueError) as exc:
         print(str(exc), file=sys.stderr)

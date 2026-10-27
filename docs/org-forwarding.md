@@ -18,7 +18,7 @@ aws events put-permission \
 
 That grants `events:PutEvents` on the central bus to **any principal anywhere in the organization** — not just the intended per-account forwarding mechanism. A compromised Lambda, an over-permissioned application role, or an insider in *any* member account could call `PutEvents` directly with a hand-crafted, CloudTrail-shaped event, and `processor` would treat it exactly like a real one — no forwarding rule, no local EventBridge match required first.
 
-This isn't hypothetical once you consider what a forged event can do: it can carry whatever `requestParameters` the forger wants (a `userName`, an `instanceId`, a `bucketName`) and, if it matches a rule with a `response_module`, direct real automated response at a target of their choosing.
+This isn't hypothetical once you consider what a forged event can do: it can carry whatever target fields the forger wants (a `userName`, an `instanceId`, a `bucketName`) and, if it matches a rule with `response_module` or `response_actions` configured, direct real automated response at a target of their choosing.
 
 ## The fix: a scoped role per member account, not a blanket org-wide grant
 

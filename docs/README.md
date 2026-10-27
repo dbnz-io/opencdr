@@ -11,7 +11,7 @@ This is the deep-reference documentation set. For a fast-start overview and copy
 - [Complete Setup Guide](setup.md) — every step, in order, from a clean AWS account to a fully working deployment
 - [Architecture](architecture.md) — the eleven Lambdas, the data stores, and how an event flows from raw CloudTrail record to delivered alert
 - [Detection Rules](detection-rules.md) — the rule schema, how to author/test/load rules
-- [API Reference](api-reference.md) — every REST endpoint, auth model, and where the OpenAPI spec is out of date
+- [API Reference](api-reference.md) — every REST endpoint, authentication model, and the synchronized OpenAPI contract
 - [Incident Response](incident-response.md) — automated response modules, how `responder` authorizes itself, rate limiting, remediation notifications
 - [Notifications](notifications.md) — channels, per-severity routing, remediation-success notifications
 - [SIEM Integrations](siem-integrations.md) — Datadog, Splunk, Microsoft Sentinel, Elastic/OpenSearch, Chronicle, IBM QRadar, Sumo Logic
@@ -19,7 +19,8 @@ This is the deep-reference documentation set. For a fast-start overview and copy
 - [Data Archival](data-archival.md) — why signals/alerts/logs TTL out of DynamoDB, where they go first (S3, Parquet), and how to query the archive
 - [Deployment](deployment.md) — standing up a new deployment, CI/CD, what's automatic vs. manual
 - [`opencdr-deploy`](https://github.com/dbnz-io/opencdr-deploy) — separately released manager for named installations, immutable artifacts, feature updates, and operational scripts
-- [Production deployment responsibilities](production-deployment.md) — the account owner's authentication, network, state-recovery, promotion, and go-live gates
+- [Security shared-responsibility model](shared-responsibility.md) — what OpenCDR secures, what the customer chooses, and the cost/tradeoff boundary
+- [Production deployment decisions](production-deployment.md) — implementation guidance for customer-owned authentication, network, recovery, and promotion controls
 - [Resource security profiles](security-profiles.md) — reversible `standard` and `hardened` protection for resources OpenCDR owns
 - [Security](security.md) — IAM model, secrets handling, known limitations stated plainly
 - [Glossary](glossary.md) — terms used throughout these pages, defined the way this codebase actually uses them
@@ -41,7 +42,8 @@ This is the deep-reference documentation set. For a fast-start overview and copy
 | I'm setting this up for the first time — what's the full checklist? | [Complete Setup Guide](setup.md) |
 | How do I deploy this into a new AWS account? | [Deployment](deployment.md) |
 | How do I manage several installations from one computer? | [`opencdr-deploy`](https://github.com/dbnz-io/opencdr-deploy) |
-| What must the AWS account owner do before calling it production-ready? | [Production deployment responsibilities](production-deployment.md) |
+| Is OpenCDR production-ready, and which security controls belong to the customer? | [Security shared-responsibility model](shared-responsibility.md) |
+| How should a customer implement optional production controls? | [Production deployment decisions](production-deployment.md) |
 | What does `securityProfile=hardened` protect, and how do I change it? | [Resource security profiles](security-profiles.md) |
 | What do I get automatically vs. what needs manual setup? | [Deployment](deployment.md#whats-automatic-vs-what-needs-a-one-time-step) |
 | How do I write / test / load a detection rule? | [Detection Rules](detection-rules.md) |
@@ -64,7 +66,7 @@ This is the deep-reference documentation set. For a fast-start overview and copy
 | Are API keys scoped, or does one key control everything? | [API Reference](api-reference.md#api-key-scopes) |
 | Can I manage rules/settings/etc. from an MCP client instead of the CLI? | [API Reference](api-reference.md#mcp-server-default-management-plane) |
 | What REST endpoints exist, and what do they need in the request? | [API Reference](api-reference.md) |
-| Can I trust `openapi.yml` as complete? | [API Reference](api-reference.md#a-note-on-openapiyml) |
+| Where is the complete machine-readable API contract? | [API Reference](api-reference.md#machine-readable-contract) |
 | What do I get for observability with zero configuration? | [Observability](observability.md#automatic-zero-configuration) |
 | How do I get Slack/email notifications when OpenCDR itself breaks (not a detection)? | [Observability](observability.md#alarms-exist-automatically-delivery-is-the-one-time-step) |
 | What custom metrics exist, and what do they tell me? | [Observability](observability.md#custom-metrics) |

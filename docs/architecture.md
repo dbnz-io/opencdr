@@ -80,23 +80,27 @@ Every SQS queue above (`signals-write-queue`, `notifications-queue`, `responses-
 
 ## DynamoDB tables
 
-All tables are pay-per-request (no capacity to plan for). Naming convention: `${service}-${stage}-<name>-table`. `signals-table-v2`, `alerts-table`, `outbox-table`, and `logs-table-v2` all TTL at `DYNAMODB_TTL_DAYS` (default 90) — signals/alerts/logs are archived to S3 first (see [`data-archival.md`](data-archival.md)), so nothing is actually lost when they expire here.
+All tables are pay-per-request (no capacity to plan for). Resource names are defined explicitly in `serverless.yml`; most use `${service}-${stage}-<name>-table`. `signals-table-v2`, `alerts-table`, `outbox-table`, and `logs-table-v2` all TTL at `DYNAMODB_TTL_DAYS` (default 90). When archival is enabled, signals/alerts/logs are copied to S3 before normal TTL expiry (see [`data-archival.md`](data-archival.md)); archival is off by default, is not retroactive, and therefore must not be treated as a default recovery path.
 
 `signals-table-v2`/`logs-table-v2` use a day-bucketed composite HASH key (`severity_bucket`/`service_bucket`, `"HIGH#2026-08-12"`, computed by `src/infra/partition_keys.py`) rather than a bare `severity`/`service` value — a single low-cardinality value (6 severities, 8 services) meant every write for that value shared one DynamoDB partition, with a real throughput ceiling independent of pay-per-request billing. The composite key self-scales with no per-deployment tuning. `severity`/`service` themselves are untouched on every item — `archiver`'s `flatten_signal`/`flatten_log` and the S3/Parquet archive still see clean values (see [`data-archival.md`](data-archival.md)). "V2" is a naming leftover from the migration itself (the original bare-key tables were deployed alongside these during cutover, then decommissioned) — not a sign a further migration is pending.
 
 | Table | Partition key | Sort key | GSIs | Written by | Read by |
 |---|---|---|---|---|---|
+| `ingestion` | `pk` | `sk` | — | `s3Ingestion` | `s3Ingestion` |
 | `signals-table-v2` | `severity_bucket` | `timestamp` | `gsi_signal_event_id` (event_id/timestamp), `gsi_signal_category_id` (category/timestamp), `gsi_signal_actor_user_name` (actor.user_name/timestamp — what correlation rules query) | `signalWriter` | `alerter`, `api`, `archiver` |
 | `alerts-table` | `alert_key` | `timestamp` | — | `alerter` | `api`, `archiver` |
 | `outbox-table` | `outbox_id` | — | — (own DynamoDB stream is the trigger) | `alerter` | `publisher` |
+| `delivery-state-table` | `delivery_key` | — | — | `notifier`, `responder` | `notifier`, `responder` |
 | `logs-table-v2` | `service_bucket` | `timestamp` | `gsi_logs_event_id` (event_id/timestamp), `gsi_activity_name` (event_name/timestamp) | every Lambda, via the shared `Logger` | `api`, `archiver`, `responder` (rate-limit circuit breaker) |
 | `detection-rules-table` | `rule_kind` | `rule_id` | — | `scripts/load_rules.sh`, `POST/PUT /rules` | `processor`, `alerter`, `api` |
+| `detection-lists-table` | `list_id` | `item_key` | `gsi_list_metadata` (`item_type`, `list_id`) | `POST/PUT/DELETE /lists` | `processor`, `alerter`, `s3Ingestion`, `api` |
 | `settings-table` | `setting_id` | — | — | `POST/PUT /settings` | `notifier`, `api` |
 | `ir-account-roles-table` | `aws_account_id` | — | — | `POST/PUT /ir-roles` | `responder` |
+| `ir-actions-table` | `detection_id` | — | — | `responder`, `rollbackHandler`, rollback API | `api`, `rollbackHandler` |
 
 `logs-table-v2` is OpenCDR's own structured operational log — every handler's `Logger` writes here in addition to stdout/CloudWatch Logs, queryable via `GET /logs`. This is a different thing from the CloudWatch-native observability layer (metrics, traces, alarms) — see [Observability](observability.md) for that.
 
-**If you're building custom tooling directly against these tables** (bypassing the API): always Query via one of the GSIs above, never Scan. The `api` Lambda's own read paths already only Query, on purpose — a Scan on `signals-table-v2` or `logs-table-v2` reads the entire table regardless of how selective your filter is, and gets more expensive every day these tables accumulate data (which is exactly what TTL/archival above is trying to keep in check on the write side; a Scan habit undoes that on the read side).
+**If you're building custom tooling directly against the high-volume signal or log tables** (bypassing the API): always Query via one of their keys or GSIs above, never Scan. The `api` Lambda's signal/log read paths already only Query, on purpose — a Scan on `signals-table-v2` or `logs-table-v2` reads the entire table regardless of how selective your filter is, and gets more expensive every day these tables accumulate data (which is exactly what TTL/archival above is trying to keep in check on the write side; a Scan habit undoes that). Small administrative tables use bounded scans where no query index exists.
 
 ## SQS queues
 
@@ -104,7 +108,7 @@ All tables are pay-per-request (no capacity to plan for). Naming convention: `${
 |---|---|---|
 | `signals-write-queue` | Signal writes `processor`/`alerter` enqueue instead of writing directly, destined for `signalWriter` | `signals-write-dlq` |
 | `notifications-queue` | Alerts destined for `notifier` | `notifications-dlq` |
-| `responses-queue` | Alerts destined for `responder` (only when the matched rule has a `response_module`) | `responses-dlq` |
+| `responses-queue` | Alerts destined for `responder`; it executes legacy `response_module` or explicit `response_actions` configuration when present | `responses-dlq` |
 | `stream-failures` | Poison-pill records from the signals/alerts/outbox/logs DynamoDB streams that `alerter`/`publisher`/`archiver` couldn't process | — (it's already the dead-letter path) |
 
 ## Repository layout
@@ -141,7 +145,7 @@ tests/
 ci-bootstrap/           # Standalone CFN template for the OIDC deploy role (see deployment.md)
 region-forwarding/      # Standalone CFN template for cross-region event forwarding (see region-forwarding.md)
 serverless.yml          # Infrastructure definition
-openapi.yml             # API spec (see api-reference.md for known drift)
+openapi.yml             # Authoritative API contract (JSON copy in src/openapi/swagger.json)
 ```
 
 `dredge` (the incident response action library `responder` runs actions through) is a separate, pinned dependency (`requirements.txt`), not vendored into this repo — see [Incident Response](incident-response.md).

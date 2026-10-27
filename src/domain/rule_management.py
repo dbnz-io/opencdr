@@ -14,11 +14,15 @@ from typing import Any
 from .correlation_engine import CorrelationEngine, _get_field, parse_correlation_rule
 from .detection_engine import rule_matches
 from .ocsf_min_parser import build_default_router
+from .response_actions import (
+    ALLOWED_RESPONSE_TARGET_ROOTS,
+    MAX_RESPONSE_ACTIONS,
+    RESPONSE_TARGET_CONTRACTS,
+)
 from .rule_schema import (
     ALLOWED_CONDITION_OPS,
     ALLOWED_FIELD_ROOTS,
     ALLOWED_RESPONSE_MODULES,
-    ALLOWED_RULE_KINDS,
     ALLOWED_SEVERITIES,
     MAX_THRESHOLD,
     MAX_TIME_WINDOW_SECONDS,
@@ -27,17 +31,23 @@ from .rule_schema import (
     validate_rule_document,
 )
 
-RULE_CONTRACT_VERSION = "2.0.0"
+RULE_CONTRACT_VERSION = "3.0.0"
 
 
 def rule_contract() -> dict[str, Any]:
     return {
         "contract_version": RULE_CONTRACT_VERSION,
-        "rule_kinds": sorted(ALLOWED_RULE_KINDS),
+        "rule_kinds": ["correlation", "signal"],
+        "legacy_read_only_rule_kinds": ["list"],
         "severities": sorted(ALLOWED_SEVERITIES),
         "field_roots": sorted(ALLOWED_FIELD_ROOTS),
         "condition_operators": sorted(ALLOWED_CONDITION_OPS),
         "response_modules": sorted(ALLOWED_RESPONSE_MODULES),
+        "response_actions": {
+            "maximum": MAX_RESPONSE_ACTIONS,
+            "target_field_roots": sorted(ALLOWED_RESPONSE_TARGET_ROOTS),
+            "modules": RESPONSE_TARGET_CONTRACTS,
+        },
         "bounds": {
             "threshold": {"minimum": MIN_THRESHOLD, "maximum": MAX_THRESHOLD},
             "time_window_seconds": {
@@ -62,6 +72,15 @@ def validate_candidate(payload: Any, *, available_lists: set[str] | None = None)
         validate_rule_document(payload)
     except ValueError as exc:
         errors.append({"code": "invalid_rule", "path": _error_path(str(exc)), "message": str(exc)})
+
+    if isinstance(payload, dict) and payload.get("rule_kind") == "list":
+        errors.append(
+            {
+                "code": "lists_are_independent",
+                "path": "rule_kind",
+                "message": "lists must be managed through /lists, not the rule contract",
+            }
+        )
 
     if isinstance(payload, dict) and payload.get("rule_kind") != "list":
         conditions = payload.get("conditions") or payload.get("signal_conditions") or []
@@ -105,7 +124,7 @@ def evaluate_candidate(
     payload: dict[str, Any],
     events: list[dict[str, Any]],
     *,
-    lists: dict[str, list[str]] | None = None,
+    lists: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Evaluate a candidate without notification, response, or persistence."""
     validation = validate_candidate(payload, available_lists=set((lists or {}).keys()))
@@ -118,17 +137,9 @@ def evaluate_candidate(
     rule["enabled"] = True
     rule["notify"] = False
     rule.pop("response_module", None)
+    rule.pop("response_actions", None)
     rule["evaluation_mode"] = "analysis"
     kind = rule["rule_kind"]
-    if kind == "list":
-        return {
-            **validation,
-            "matches": [],
-            "evaluated": 0,
-            "skipped": 0,
-            "list_values": len(rule.get("values") or []),
-        }
-
     if kind == "correlation":
         parsed = parse_correlation_rule(rule)
         repo = _SequenceRepository()

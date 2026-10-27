@@ -36,46 +36,8 @@ jobs:
         with:
           submodules: true
 
-      - name: Validate JSON syntax and required fields
-        run: |
-          python3 - <<'EOF'
-          import json, sys
-          from pathlib import Path
-
-          RULE_REQUIRED_FIELDS = ("rule_id", "rule_kind", "severity", "enabled")
-          LIST_REQUIRED_FIELDS = ("rule_id", "rule_kind", "values")
-          rule_dir = Path("support_files/detection_rules")
-          paths = sorted(rule_dir.rglob("*.json"))
-
-          if not paths:
-              print("ERROR: no rule files found", file=sys.stderr)
-              sys.exit(1)
-
-          errors = []
-          for path in paths:
-              try:
-                  rule = json.loads(path.read_text())
-              except json.JSONDecodeError as exc:
-                  errors.append(f"{path.name}: invalid JSON — {exc}")
-                  continue
-              if rule.get("rule_kind") == "list":
-                  for field in LIST_REQUIRED_FIELDS:
-                      if field not in rule:
-                          errors.append(f"{path.name}: missing required field '{field}'")
-                  if "values" in rule and not isinstance(rule["values"], list):
-                      errors.append(f"{path.name}: 'values' must be an array")
-              else:
-                  for field in RULE_REQUIRED_FIELDS:
-                      if field not in rule:
-                          errors.append(f"{path.name}: missing required field '{field}'")
-
-          if errors:
-              for msg in errors:
-                  print(f"ERROR: {msg}", file=sys.stderr)
-              sys.exit(1)
-
-          print(f"All {len(paths)} rule(s) passed validation.")
-          EOF
+      - name: Validate rules and reusable lists against the runtime contracts
+        run: python3 scripts/validate_catalog.py support_files/detection_rules
 
   secrets-scan:
     name: Secrets Scan (gitleaks)

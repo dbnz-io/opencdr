@@ -1,15 +1,16 @@
-# Production deployment responsibilities
+# Customer production deployment decisions
 
-OpenCDR supplies deployable infrastructure and secure defaults where they can be
-chosen without knowing the customer's operating model. A successful
-`serverless deploy` is **not** by itself a production-readiness decision. The AWS
-account owner or deployer remains responsible for choosing and validating the
-identity boundary, network boundary, retention policy, recovery objectives, and
-production promotion process for that environment.
+OpenCDR Core is production-ready within its documented product boundary. It
+supplies deployable infrastructure and secure defaults wherever those controls can
+be selected without knowing the customer's operating model. See the [security
+shared-responsibility model](shared-responsibility.md) for the authoritative
+boundary.
 
-This page is the production gate for an OpenCDR installation. It describes what
-the repository currently provides, what the deployer must add, and the evidence
-that should exist before production traffic is enabled.
+This page is implementation guidance for optional or environment-specific controls
+owned by the AWS account owner or deployer. Identity, network, retention, recovery,
+and promotion choices are not unresolved OpenCDR bugs: their correct configuration
+depends on customer identities, topology, legal obligations, recovery targets,
+budget, and production account boundary.
 
 `securityProfile=hardened` can apply reversible deletion resistance and stricter
 DLQ use to resources owned by the OpenCDR stack; see
@@ -17,11 +18,11 @@ DLQ use to resources owned by the OpenCDR stack; see
 fulfil any customer-owned account, backup, recovery, or monitoring responsibility
 described below.
 
-## Current baseline and deliberate gaps
+## Supplied baseline and customer decisions
 
-| Area | Supplied by this repository | Deployer-owned production decision |
+| Area | Supplied by this repository | Customer risk decision or optional additional control |
 |---|---|---|
-| Management API | Route-scoped API keys, usage-plan throttling, and keys stored in SSM SecureString by CI | A real identity boundary such as IAM/SigV4 or OIDC/JWT, plus a restrictive API Gateway resource policy and preferably a network boundary |
+| Management API | Route-scoped API keys, usage-plan throttling, and keys stored in SSM SecureString by CI | Decide whether the supplied bearer-key boundary matches the exposure model or whether IAM/SigV4, OIDC/JWT, a resource policy, WAF, or private networking is warranted |
 | Deployment identity | GitHub OIDC bootstrap role; no long-lived AWS keys are required by CI | Separate production account/role, protected environment approval, least-privilege trust conditions, and an immutable-artifact promotion pipeline |
 | Stack safety | CI enables termination protection for the development stack; development drift monitoring is included | Production termination protection, pre-deploy and scheduled drift checks, change-set review, and an intentional teardown procedure |
 | Ingestion state | The ingestion DynamoDB table has PITR and retain policies; the ingestion S3 bucket has retain policies, versioning, encryption, public-access blocking, and a 90-day lifecycle | Confirm that 90 days meets the customer's retry/evidence requirements and select KMS/Object Lock controls if required |
@@ -38,8 +39,10 @@ them—those remain deployer decisions.
 ## 1. Establish the production identity and network boundary
 
 API keys identify a usage-plan consumer and support OpenCDR's coarse application
-scopes. They are not strong production authentication: a copied key can be replayed
-until revoked and does not establish a workload or human identity.
+scopes. As with every bearer credential, a copied key can be replayed until revoked
+and does not establish a workload or human identity. The customer decides whether
+that property is acceptable for its exposure model or whether an identity-aware
+boundary is required.
 
 Inventory every management caller before changing authorization:
 
@@ -98,17 +101,20 @@ CloudFormation retain policies protect against stack deletion and replacement;
 they do not stop a principal with direct DynamoDB or S3 deletion permission. Limit
 those permissions separately with IAM, permission boundaries, or organization SCPs.
 
-For S3, enable versioning before production data arrives. Add a lifecycle that
-matches legal and investigation requirements, including noncurrent versions. If
-immutability is required, decide on S3 Object Lock before bucket creation—Object
-Lock and its governance/compliance retention model need deliberate account-level
-planning and should not be enabled casually.
+Customers requiring recovery of overwritten archive objects should enable S3
+versioning before production data arrives and add a lifecycle matching their legal
+and investigation requirements, including noncurrent versions. If immutability is
+required, decide on S3 Object Lock before bucket creation—Object Lock and its
+governance/compliance retention model need deliberate account-level planning and
+should not be enabled casually.
 
 ## 3. Define recovery objectives and prove restoration
 
-The deployer must publish an approved RPO and RTO for each state class. Do not copy
-targets from another installation: event volume, compliance obligations, Firehose
-buffering, and operator coverage all affect what is achievable.
+When recoverability is part of the customer's requirements, the deployer should
+publish an approved RPO and RTO for each applicable state class. Do not copy targets
+from another installation: event volume, compliance obligations, Firehose buffering,
+and operator coverage all affect what is achievable. A customer may instead accept
+loss of a transient or reproducible state class and document that decision.
 
 A recovery plan should name:
 
@@ -137,7 +143,9 @@ A backup that has never been restored is not production evidence.
 ## 4. Promote, do not rebuild, for production
 
 Production deployment credentials and approvals belong in the customer's protected
-production pipeline, not in this development repository. The production pipeline
+production pipeline, not in the Core source repository. This separation does not
+reduce Core's production readiness; it prevents OpenCDR from owning credentials or
+approvals for a customer's AWS account. Customers requiring immutable promotion
 should consume the exact artifact digest tested in staging rather than running a
 fresh dependency build.
 
@@ -159,23 +167,25 @@ production account trust, environment approvals, and release evidence. OpenCDR C
 owns the source tests, dependency locks, package-safety checks, and drift
 classification that pipeline consumes.
 
-## Go-live evidence checklist
+## Customer installation acceptance checklist
 
-Do not call an installation production-ready until the deployment owner can attach
-evidence for every applicable item:
+Use this checklist according to the customer's threat model and obligations. An
+unchecked optional item is not by itself an OpenCDR defect or proof that Core is
+not production-ready; it records a control the deployment owner has accepted,
+implemented elsewhere, or determined is not applicable:
 
-- [ ] Every management caller has an approved identity and least-privilege route access.
-- [ ] API Gateway has an approved resource/network policy; API keys are not the sole identity boundary.
-- [ ] Broad compatibility keys have an owner, expiry/rotation plan, and monitored use.
-- [ ] Production deploys use a separate short-lived role and protected approval environment.
-- [ ] The promoted artifact and template digests match the staging-tested versions.
-- [ ] Production termination protection and scheduled/pre-deploy drift checks are enabled.
-- [ ] Every state resource has a documented retain/PITR/versioning decision.
-- [ ] Archive lifecycle, KMS, immutability, and legal-retention decisions are approved.
-- [ ] RPO/RTO targets and backup/restore ownership are documented.
-- [ ] A restore exercise has passed and its measured recovery time is within target.
-- [ ] Alarm delivery, DLQ replay, notification failure, multi-region coverage, and IR kill switches have been tested.
-- [ ] The intentional teardown and retained-resource recovery procedures are documented.
+- [ ] The accepted identity and route-access model for every management caller is recorded.
+- [ ] The customer has accepted the API exposure model or selected additional resource/network controls.
+- [ ] Issued API keys have an owner and an appropriate rotation/monitoring decision.
+- [ ] The production deployment role, approval, and change-evidence model is recorded.
+- [ ] The customer has decided whether exact staged-artifact promotion is required.
+- [ ] Termination-protection and drift-monitoring decisions are recorded.
+- [ ] Every state resource has an explicit retain/PITR/versioning or accepted-loss decision.
+- [ ] Archive lifecycle, encryption, immutability, and legal-retention applicability is recorded.
+- [ ] Applicable RPO/RTO targets and backup/restore ownership are documented.
+- [ ] Restore testing is performed when the customer relies on restoration as a control.
+- [ ] Applicable alarm delivery, DLQ replay, notification, regional coverage, and IR controls have been tested.
+- [ ] Teardown and retained-resource procedures exist when retention is enabled.
 
 ## Related pages
 
@@ -185,3 +195,4 @@ evidence for every applicable item:
 - [Stack protection](stack-protection.md) — termination protection and drift detection
 - [Data archival](data-archival.md) — live-table TTL and the S3/Parquet archive
 - [Production readiness roadmap](production-readiness-roadmap.md) — repository and external-pipeline implementation work
+- [Security shared-responsibility model](shared-responsibility.md) — authoritative ownership and tradeoff boundary

@@ -105,6 +105,7 @@ def make_rule(
     enabled: bool = True,
     notify: bool = True,
     response_module: str = "",
+    response_actions: list[dict] | None = None,
 ) -> dict[str, Any]:
     return {
         "rule_id": rule_id,
@@ -117,6 +118,7 @@ def make_rule(
         "signal_conditions": signal_conditions or [],
         "notify": notify,
         "response_module": response_module,
+        "response_actions": response_actions or [],
         "playbook": "Review and disable the actor.",
     }
 
@@ -157,6 +159,30 @@ class TestThreshold:
         rule = make_rule(threshold=1)
         alerts = engine_with(signals).correlate(new_signal=signals[0], rules=[rule], now=NOW)
         assert len(alerts) == 1
+
+
+def test_correlation_list_match_and_version_attribution():
+    signal = make_signal()
+    rule = make_rule(
+        threshold=1,
+        signal_conditions=[{"field": "network.source_ip", "op": "in_list", "list_id": "corp"}],
+    )
+    alerts = engine_with([signal]).correlate(
+        new_signal=signal,
+        rules=[rule],
+        now=NOW,
+        lists={"corp": {"matcher": "cidr", "version": 7, "values": ["1.2.3.0/24"]}},
+    )
+    assert alerts[0]["list_versions"] == {"corp": 7}
+
+
+def test_correlation_missing_list_fails_closed_for_not_in_list():
+    signal = make_signal()
+    rule = make_rule(
+        threshold=1,
+        signal_conditions=[{"field": "actor.user_name", "op": "not_in_list", "list_id": "missing"}],
+    )
+    assert engine_with([signal]).correlate(new_signal=signal, rules=[rule], now=NOW, lists={}) == []
 
 
 # ----------------------------
@@ -383,6 +409,21 @@ class TestAlertPayload:
 
     def test_alert_response_module(self):
         assert self.alert["response_module"] == "disable_user"
+
+    def test_alert_resolves_explicit_action_target_from_primary_signal(self):
+        signals = [make_signal(timestamp=ts(-i * 10)) for i in range(3)]
+        rule = make_rule(
+            threshold=3,
+            response_actions=[
+                {
+                    "module": "disable_user",
+                    "target": {"user_name": "primary_signal.actor.user_name"},
+                }
+            ],
+        )
+        alert = engine_with(signals).correlate(new_signal=make_signal(), rules=[rule], now=NOW)[0]
+
+        assert alert["resolved_response_actions"][0]["target"] == {"user_name": "alice"}
 
     def test_alert_group_value(self):
         assert self.alert["group_value"] == "alice"

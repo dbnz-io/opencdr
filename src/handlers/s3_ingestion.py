@@ -30,6 +30,7 @@ from ..domain.ingestion import (
     stock_falco_rules,
 )
 from ..infra.aws_handler import AwsHandler
+from ..infra.detection_lists_repository import load_detection_lists
 from ..infra.detection_rules_repository import load_detection_rules
 from ..infra.logger import Logger
 from ..infra.metrics import emit_metric
@@ -94,10 +95,7 @@ def process_object(notification, context=None, replay_run=None):
             raise InvalidRecord("binding_mismatch")
         aws = AwsHandler(logger=logger)
         rules = load_detection_rules(aws, logger, rule_kind="signal", include_disabled=True)
-        lists = {
-            r["rule_id"]: r.get("values", [])
-            for r in load_detection_rules(aws, logger, rule_kind="list")
-        }
+        lists = load_detection_lists(aws, logger)
         if config["kind"] == "falco":
             by_id = {r["rule_id"]: r for r in stock_falco_rules()}
             by_id.update({r["rule_id"]: r for r in rules})

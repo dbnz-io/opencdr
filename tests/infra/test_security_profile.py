@@ -50,7 +50,7 @@ def test_all_dynamodb_tables_follow_the_selected_profile():
         name: value for name, value in resources.items() if value["Type"] == "AWS::DynamoDB::Table"
     }
 
-    assert len(tables) == 10
+    assert len(tables) == 11
     for name, table in tables.items():
         assert table["Properties"]["DeletionProtectionEnabled"] == (
             "${self:custom.securityProfile.dynamodbDeletionProtection}"

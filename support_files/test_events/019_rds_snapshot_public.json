@@ -19,7 +19,7 @@
       "userName": "attacker"
     },
     "requestParameters": {
-      "dbSnapshotIdentifier": "prod-db-snapshot-2026",
+      "dBSnapshotIdentifier": "prod-db-snapshot-2026",
       "attributeName": "restore",
       "valuesToAdd": ["all"]
     }

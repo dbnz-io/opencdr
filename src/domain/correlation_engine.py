@@ -7,6 +7,9 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any, Protocol
 
+from .detection_lists import list_matches, referenced_list_versions
+from .response_actions import resolve_response_actions
+
 # -------------------------------------------------------------------
 # Repository contract (implemented by your infra layer / aws_handler)
 # -------------------------------------------------------------------
@@ -81,7 +84,9 @@ def _parse_iso(ts: str) -> datetime | None:
         return None
 
 
-def _evaluate_condition(signal: dict[str, Any], cond: dict[str, Any]) -> bool:
+def _evaluate_condition(
+    signal: dict[str, Any], cond: dict[str, Any], lists: dict[str, Any] | None = None
+) -> bool:
     """
     Condition model (compatible with what you already had in spirit):
       {
@@ -121,6 +126,12 @@ def _evaluate_condition(signal: dict[str, Any], cond: dict[str, Any]) -> bool:
     if op == "not_in":
         vals = [str(v) for v in _as_list(value)]
         return observed_s not in vals
+    if op in {"in_list", "not_in_list"}:
+        snapshot = (lists or {}).get(str(cond.get("list_id") or ""))
+        if snapshot is None:
+            return False
+        matched = list_matches(observed_s, snapshot)
+        return matched if op == "in_list" else not matched
 
     if op == "contains":
         return str(value) in observed_s
@@ -141,11 +152,13 @@ def _evaluate_condition(signal: dict[str, Any], cond: dict[str, Any]) -> bool:
     return False
 
 
-def _all_conditions_match(signal: dict[str, Any], conditions: list[dict[str, Any]]) -> bool:
+def _all_conditions_match(
+    signal: dict[str, Any], conditions: list[dict[str, Any]], lists: dict[str, Any] | None = None
+) -> bool:
     if not conditions:
         return True
     for c in conditions:
-        if not _evaluate_condition(signal, c):
+        if not _evaluate_condition(signal, c, lists):
             return False
     return True
 
@@ -195,6 +208,7 @@ class CorrelationRule:
 
     notify: bool = True
     response_module: str = ""
+    response_actions: list[dict[str, Any]] | None = None
     playbook: str = ""
     rule_version: int | None = None
     content_fingerprint: str = ""
@@ -222,6 +236,7 @@ def parse_correlation_rule(rule: dict[str, Any]) -> CorrelationRule | None:
         signal_conditions=list(rule.get("signal_conditions") or []),
         notify=bool(rule.get("notify", True)),
         response_module=str(rule.get("response_module", "") or ""),
+        response_actions=list(rule.get("response_actions") or []),
         playbook=str(rule.get("playbook", "") or ""),
         rule_version=rule.get("rule_version") or rule.get("version"),
         content_fingerprint=str(rule.get("content_fingerprint", "") or ""),
@@ -257,6 +272,7 @@ class CorrelationEngine:
         new_signal: dict[str, Any],
         rules: list[dict[str, Any]],
         now: datetime | None = None,
+        lists: dict[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
         if (new_signal.get("provenance") or {}).get("mode") == "analysis":
             return []
@@ -283,7 +299,7 @@ class CorrelationEngine:
                     continue
 
             # Gate 1: does the incoming signal itself match the rule conditions?
-            if not _all_conditions_match(new_signal, rule.signal_conditions):
+            if not _all_conditions_match(new_signal, rule.signal_conditions, lists):
                 continue
 
             # Determine group value (e.g., actor.user_name)
@@ -310,7 +326,7 @@ class CorrelationEngine:
                 for s in recent
                 if s.get("integration_id") == integration
                 and (s.get("provenance") or {}).get("mode") != "analysis"
-                and _all_conditions_match(s, rule.signal_conditions)
+                and _all_conditions_match(s, rule.signal_conditions, lists)
             ]
 
             if len(matched) < rule.threshold:
@@ -327,6 +343,7 @@ class CorrelationEngine:
                     trigger_time=trigger_time,
                     group_value=group_value,
                     matched_signals=matched,
+                    lists=lists or {},
                 )
             )
 
@@ -340,6 +357,7 @@ class CorrelationEngine:
         trigger_time: datetime,
         group_value: str,
         matched_signals: list[dict[str, Any]],
+        lists: dict[str, Any],
     ) -> dict[str, Any]:
         # Key the window from the triggering signal's event time, not processing
         # time. A retry on the other side of an aligned wall-clock boundary must
@@ -454,6 +472,10 @@ class CorrelationEngine:
                         "userAgent": _s(raw_detail.get("userAgent")),
                         # keep requestParameters (can be big; if you hit 400KB, trim it)
                         "requestParameters": raw_detail.get("requestParameters", {}),
+                        # Response targets such as a newly-created access key
+                        # live here.  Keep the object so explicit correlation
+                        # action mappings can address it deterministically.
+                        "responseElements": raw_detail.get("responseElements", {}),
                     },
                 },
             }
@@ -488,7 +510,7 @@ class CorrelationEngine:
         max_summaries = 10
         summaries = [_signal_snapshot(s) for s in matched_signals[:max_summaries]]
 
-        return {
+        alert = {
             "alert_id": str(uuid.uuid4()),
             "alert_key": alert_key,
             "timestamp": now.isoformat(),
@@ -502,6 +524,7 @@ class CorrelationEngine:
             "severity": _s(getattr(rule, "severity", "UNKNOWN")),
             "notify": bool(getattr(rule, "notify", True)),
             "response_module": _s(getattr(rule, "response_module", "")),
+            "response_actions": list(getattr(rule, "response_actions", None) or []),
             "playbook": _s(getattr(rule, "playbook", "")),
             "type": "correlation",
             "group_by": _s(getattr(rule, "group_by", "")),
@@ -513,3 +536,13 @@ class CorrelationEngine:
             "primary_signal": _signal_snapshot(primary),
             "signals_summary": summaries,
         }
+        if alert["response_actions"]:
+            alert["resolved_response_actions"] = resolve_response_actions(
+                alert, alert["response_actions"]
+            )
+        list_versions = referenced_list_versions(
+            {"signal_conditions": rule.signal_conditions}, lists
+        )
+        if list_versions:
+            alert["list_versions"] = list_versions
+        return alert

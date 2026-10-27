@@ -124,17 +124,17 @@ while IFS= read -r -d '' rule_file; do
     continue
   fi
 
-  # Strip response_module unless explicitly armed -- see the header comment.
-  # rule_kind "list" rules have no response_module field at all; this is a
-  # no-op for them either way.
+  # Strip both legacy and v1 response configuration unless explicitly armed.
   if [[ "$WITH_RESPONSE_MODULES" == true ]]; then
     rule_json="$(jq --arg path "$filename" '. + {source_type:"catalog-seed", source_path:$path}' "$rule_file")"
     armed_note=""
   else
-    rule_json="$(jq --arg path "$filename" '(if has("response_module") then .response_module = "" else . end) + {source_type:"catalog-seed", source_path:$path}' "$rule_file")"
+    rule_json="$(jq --arg path "$filename" '(if has("response_module") then .response_module = "" else . end) | (if has("response_actions") then .response_actions = [] else . end) | . + {source_type:"catalog-seed", source_path:$path}' "$rule_file")"
     original_module=$(jq -r '.response_module // empty' "$rule_file")
     if [[ -n "$original_module" ]]; then
       armed_note="  [unarmed, was: ${original_module}]"
+    elif [[ "$(jq '.response_actions // [] | length' "$rule_file")" -gt 0 ]]; then
+      armed_note="  [unarmed response_actions]"
     else
       armed_note=""
     fi
@@ -177,7 +177,7 @@ while IFS= read -r -d '' rule_file; do
     echo "  [ERROR]  $filename — DynamoDB write failed"
     ((failed++)) || true
   fi
-done < <(find "$RULES_DIR" -type f -name "*.json" -print0 | sort -z)
+done < <(find "$RULES_DIR" -type d -name lists -prune -o -type f -name "*.json" -print0 | sort -z)
 
 echo ""
 echo "─────────────────────────────────────────────────"

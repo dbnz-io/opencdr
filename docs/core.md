@@ -2,6 +2,12 @@
 
 OpenCDR Core is the account-local detection and response data plane. One Core deployment owns one AWS account: it ingests that account's events, evaluates rules, stores its data, sends notifications, and performs incident response with local IAM authority.
 
+Core is production-ready within this product boundary. Account-specific identity,
+networking, backup, retention, regional coverage, and deployment approval remain
+customer decisions under the [security shared-responsibility
+model](shared-responsibility.md); OpenCDR does not silently create or price those
+account-level controls on the customer's behalf.
+
 The CloudFormation and Lambda resource names remain `opencdr-*` for upgrade compatibility. “Core” is the product boundary, not a breaking rename of deployed resources.
 
 ## Deployment topology
@@ -20,6 +26,7 @@ The stable integration boundary is documented in [Management contract](managemen
 - `management/release-manifest.json` identifies the release and supported contract.
 - `GET /status` reports product, version, deployment identity, and capabilities.
 - `management/schemas/configuration-bundle.schema.json` describes declarative desired configuration.
+- `/lists` manages reusable exact/CIDR detection lists independently from rule releases.
 - `management/schemas/alert.schema.json` describes normalized alert export.
 
 Core remains independently operable through its REST API and `scripts/opencdr.py`; a fleet manager is an optional client of this surface.

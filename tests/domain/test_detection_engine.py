@@ -76,6 +76,21 @@ class TestConditionOperators:
             make_event(), {"field": "actor.user_name", "op": "not_exists"}
         )
 
+    def test_list_conditions_fail_closed_when_list_is_missing(self):
+        for op in ("in_list", "not_in_list"):
+            assert not evaluate_condition(
+                make_event(),
+                {"field": "actor.user_name", "op": op, "list_id": "missing"},
+                {},
+            )
+
+    def test_cidr_list_match(self):
+        assert evaluate_condition(
+            make_event(),
+            {"field": "network.source_ip", "op": "in_list", "list_id": "corp"},
+            {"corp": {"matcher": "cidr", "version": 4, "values": ["1.2.3.0/24"]}},
+        )
+
     def test_in_match(self):
         cond = {"field": "activity_name", "op": "in", "value": ["CreateUser", "DeleteUser"]}
         assert evaluate_condition(make_event(), cond)

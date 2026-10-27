@@ -92,11 +92,127 @@ class TestStatusAndHelp:
         body = body_of(resp)
         assert body["status"] == "ok"
         assert body["product"] == "OpenCDR Core"
-        assert body["management_contract_version"] == "1.0.0"
+        assert body["management_contract_version"] == "2.0.0"
         assert body["security_profile"] == "standard"
         assert body["capabilities"]["account_local"] is True
         assert set(body["deployment"]) == {"stage", "account_id", "home_region"}
         assert body["request_id"] == "test-req-id"
+
+
+class TestDetectionLists:
+    def test_matcher_is_required(self):
+        payload = {"list_id": "admins", "values": ["alice"]}
+        response = api.lambda_handler(
+            make_event("POST", "/lists", body=json.dumps(payload)), make_context()
+        )
+        assert response["statusCode"] == 400
+        assert "matcher is required" in body_of(response)["message"]
+
+    def test_create_writes_values_before_activating_metadata(self):
+        table = MagicMock()
+        table.get_item.return_value = {}
+        batch = table.batch_writer.return_value.__enter__.return_value
+        payload = {
+            "list_id": "corp-networks",
+            "matcher": "cidr",
+            "value_type": "cidr",
+            "values": ["10.1.2.3/8"],
+        }
+        with patch.object(api, "detection_lists_table", table):
+            response = api.lambda_handler(
+                make_event("POST", "/lists", body=json.dumps(payload), api_key_id="key-1"),
+                make_context(),
+            )
+        assert response["statusCode"] == 201
+        assert body_of(response)["values"] == ["10.0.0.0/8"]
+        assert batch.put_item.call_count == 1
+        written = table.put_item.call_args.kwargs["Item"]
+        assert written["active_version"] == 1
+        assert written["entry_count"] == 1
+        assert written["created_by"] == "key-1"
+
+    def test_update_requires_and_checks_expected_revision(self):
+        table = MagicMock()
+        table.get_item.return_value = {
+            "Item": {"list_id": "admins", "item_key": "META", "rev": 3, "active_version": 2}
+        }
+        payload = {"matcher": "exact", "values": ["alice"]}
+        with patch.object(api, "detection_lists_table", table):
+            missing = api.lambda_handler(
+                make_event("PUT", "/lists/admins", body=json.dumps(payload)), make_context()
+            )
+            conflict = api.lambda_handler(
+                make_event(
+                    "PUT",
+                    "/lists/admins",
+                    body=json.dumps({**payload, "expected_rev": 2}),
+                ),
+                make_context(),
+            )
+        assert missing["statusCode"] == 400
+        assert conflict["statusCode"] == 409
+        table.put_item.assert_not_called()
+
+    def test_get_returns_only_active_version_values(self):
+        table = MagicMock()
+        table.get_item.return_value = {
+            "Item": {
+                "list_id": "admins",
+                "item_key": "META",
+                "matcher": "exact",
+                "value_type": "iam_user",
+                "active_version": 2,
+                "active_version_id": "token-2",
+                "rev": 2,
+            }
+        }
+        table.query.return_value = {"Items": [{"value": "bob"}, {"value": "alice"}]}
+        with patch.object(api, "detection_lists_table", table):
+            response = api.lambda_handler(make_event("GET", "/lists/admins"), make_context())
+        assert response["statusCode"] == 200
+        assert body_of(response)["values"] == ["alice", "bob"]
+        assert table.query.call_args.kwargs["ConsistentRead"] is True
+
+    def test_legacy_list_writes_are_rejected(self):
+        payload = {"rule_kind": "list", "rule_id": "admins", "values": ["alice"]}
+        create = api.lambda_handler(
+            make_event("POST", "/rules", body=json.dumps(payload)), make_context()
+        )
+        update = api.lambda_handler(
+            make_event("PUT", "/rules/admins", body=json.dumps(payload)), make_context()
+        )
+        assert create["statusCode"] == 400
+        assert update["statusCode"] == 400
+        assert "use POST /lists" in body_of(create)["message"]
+
+    def test_rule_evaluation_accepts_cidr_list_snapshot(self):
+        payload = {
+            "rule": {
+                "rule_id": "source-network",
+                "rule_kind": "signal",
+                "enabled": True,
+                "notify": False,
+                "severity": "HIGH",
+                "conditions": [{"field": "network.source_ip", "op": "in_list", "list_id": "corp"}],
+            },
+            "events": [
+                {
+                    "source": "cloudtrail",
+                    "detail-type": "AWS API Call via CloudTrail",
+                    "detail": {
+                        "eventName": "ListUsers",
+                        "eventSource": "iam.amazonaws.com",
+                        "sourceIPAddress": "10.2.3.4",
+                    },
+                }
+            ],
+            "lists": {"corp": {"matcher": "cidr", "value_type": "cidr", "values": ["10.0.0.0/8"]}},
+        }
+        response = api.lambda_handler(
+            make_event("POST", "/rules/evaluate", body=json.dumps(payload)), make_context()
+        )
+        assert response["statusCode"] == 200
+        assert body_of(response)["matches"]
 
     def test_help_lists_endpoints(self):
         resp = api.lambda_handler(make_event("GET", "/help"), make_context())
@@ -893,6 +1009,38 @@ class TestNormalizeRulePayload:
         with pytest.raises(ValueError, match="response_module"):
             api._normalize_rule_payload(payload, force_rule_id=None)
 
+    def test_multiple_response_actions_are_accepted(self):
+        payload = dict(VALID_RULE_BODY)
+        payload["response_actions"] = [
+            {"module": "disable_user", "target": {"user_name": "actor.user_name"}},
+            {
+                "module": "disable_access_key",
+                "target": {
+                    "user_name": "raw_event.detail.responseElements.accessKey.userName",
+                    "access_key_id": ("raw_event.detail.responseElements.accessKey.accessKeyId"),
+                },
+            },
+        ]
+        out = api._normalize_rule_payload(payload, force_rule_id=None)
+        assert len(out["response_actions"]) == 2
+
+    def test_response_actions_reject_unknown_target_key(self):
+        payload = dict(VALID_RULE_BODY)
+        payload["response_actions"] = [
+            {"module": "disable_user", "target": {"victim": "actor.user_name"}}
+        ]
+        with pytest.raises(ValueError, match="target"):
+            api._normalize_rule_payload(payload, force_rule_id=None)
+
+    def test_legacy_and_v1_response_configuration_are_mutually_exclusive(self):
+        payload = dict(VALID_RULE_BODY)
+        payload["response_module"] = "disable_user"
+        payload["response_actions"] = [
+            {"module": "disable_user", "target": {"user_name": "actor.user_name"}}
+        ]
+        with pytest.raises(ValueError, match="cannot both"):
+            api._normalize_rule_payload(payload, force_rule_id=None)
+
 
 class TestAllowedResponseModulesSync:
     def test_matches_responder_registered_handlers_exactly(self):
@@ -1065,6 +1213,11 @@ class TestRequiredScopeFor:
             ("GET", "/help", None),
             ("GET", "/signals", "read"),
             ("GET", "/logs", "read"),
+            ("GET", "/lists", "read"),
+            ("POST", "/lists", "rules"),
+            ("GET", "/lists/admins", "read"),
+            ("PUT", "/lists/admins", "rules"),
+            ("DELETE", "/lists/admins", "rules"),
             ("GET", "/rules", "read"),
             ("POST", "/rules", "rules"),
             ("GET", "/rules/001_console_login", "read"),

@@ -299,6 +299,50 @@ def _process_record(
         )
         return
 
+    resolved_actions = detection_event.get("resolved_response_actions")
+    if isinstance(resolved_actions, list) and resolved_actions:
+        source_detection_id = detection_event.get("detection_id") or detection_event.get("alert_id")
+        for action in resolved_actions:
+            if not isinstance(action, dict):
+                continue
+            action_id = action.get("action_id")
+            module = action.get("module")
+            resolution_error = action.get("resolution_error")
+            if resolution_error:
+                emit_metric(
+                    "ResponderTargetResolutionFailures",
+                    dimensions={"response_module": str(module or "unknown")},
+                )
+                logger.error(
+                    event_name="IR_TARGET_RESOLUTION_FAILED",
+                    event_type="ERROR",
+                    message="Response target mapping could not be resolved; action skipped",
+                    details={
+                        "action_id": action_id,
+                        "detection_id": source_detection_id,
+                        "rule_id": detection_event.get("rule_id"),
+                        "response_module": module,
+                        "error": resolution_error,
+                    },
+                )
+                continue
+
+            action_event = dict(detection_event)
+            action_event.pop("resolved_response_actions", None)
+            action_event["source_detection_id"] = source_detection_id
+            action_event["detection_id"] = action_id
+            action_event["alert_id"] = action_id
+            action_event["alert_key"] = action_id
+            action_event["response_module"] = module
+            action_event["resolved_response_target"] = action.get("target") or {}
+            action_record = {
+                "body": json.dumps(action_event),
+                "messageId": action_id,
+                "receiptHandle": receipt_handle,
+            }
+            _process_record(action_record, request_id, receipt_handle, logger)
+        return
+
     response_module = detection_event.get("response_module")
     detection_id = detection_event.get("detection_id")
     rule_id = detection_event.get("rule_id")
@@ -506,6 +550,7 @@ def _process_record(
         message=f"Executed incident response action: {response_module}",
         details={
             "detection_id": detection_id,
+            "source_detection_id": detection_event.get("source_detection_id") or detection_id,
             "rule_id": rule_id,
             "response_module": response_module,
             "operation_result": _operation_result_to_dict(result),
@@ -579,6 +624,7 @@ def _notify_remediation_success(
             "type": "remediation_success",
             "notify": True,
             "detection_id": detection_id,
+            "source_detection_id": detection_event.get("source_detection_id") or detection_id,
             "rule_id": rule_id,
             "severity": detection_event.get("severity", "UNKNOWN"),
             "response_module": response_module,
@@ -677,7 +723,10 @@ def _build_rollback_kwargs(
         }
 
     if response_module == "disable_secrets_manager_secret":
-        return {"secret_id": _request_parameters(detection_event).get("secretId")}
+        return {
+            "secret_id": _response_target(detection_event).get("secret_id")
+            or _request_parameters(detection_event).get("secretId")
+        }
 
     if response_module == "disable_user":
         # access_keys_disabled/groups_removed/managed_policies_detached are
@@ -755,7 +804,8 @@ def _build_rollback_kwargs(
 
     if response_module == "disable_lambda_function":
         return {
-            "function_name": _request_parameters(detection_event).get("functionName"),
+            "function_name": _response_target(detection_event).get("function_name")
+            or _request_parameters(detection_event).get("functionName"),
             "reserved_concurrent_executions": rollback_state.get("reserved_concurrent_executions"),
         }
 
@@ -802,6 +852,7 @@ def _write_ir_action_record(
         rollback_kwargs = _build_rollback_kwargs(response_module, detection_event, result)
         item: dict[str, Any] = {
             "detection_id": detection_id,
+            "source_detection_id": detection_event.get("source_detection_id") or detection_id,
             "rule_id": rule_id,
             "response_module": response_module,
             "undo_module": ROLLBACK_UNDO_MODULE[response_module],
@@ -873,6 +924,12 @@ def _detection_error_code(event: dict) -> str | None:
     return None
 
 
+def _response_target(event: dict) -> dict:
+    """Return already-resolved v1 target values, never rule field paths."""
+    target = event.get("resolved_response_target")
+    return target if isinstance(target, dict) else {}
+
+
 def _request_parameters(event: dict) -> dict:
     """
     Locate CloudTrail's requestParameters wherever it lives on a detection
@@ -928,8 +985,9 @@ def _extract_user_and_access_key(event: dict) -> tuple[str | None, str | None]:
     For CreateAccessKey / access-key detections.
     Try to pull both user_name and access_key_id.
     """
-    user_name: str | None = None
-    access_key_id: str | None = None
+    target = _response_target(event)
+    user_name: str | None = target.get("user_name")
+    access_key_id: str | None = target.get("access_key_id")
 
     raw_event = event.get("raw_event") or {}
     if isinstance(raw_event, dict):
@@ -939,8 +997,8 @@ def _extract_user_and_access_key(event: dict) -> tuple[str | None, str | None]:
         if isinstance(resp, dict):
             access_key_obj = resp.get("accessKey") or {}
             if isinstance(access_key_obj, dict):
-                user_name = access_key_obj.get("userName")
-                access_key_id = access_key_obj.get("accessKeyId")
+                user_name = user_name or access_key_obj.get("userName")
+                access_key_id = access_key_id or access_key_obj.get("accessKeyId")
 
         # Fallback: userIdentity.userName
         if not user_name:
@@ -961,7 +1019,7 @@ def _extract_user_and_access_key(event: dict) -> tuple[str | None, str | None]:
 
 
 def _extract_user_name(event: dict) -> str | None:
-    user_name: str | None = event.get("user_name")
+    user_name: str | None = _response_target(event).get("user_name") or event.get("user_name")
 
     raw_event = event.get("raw_event") or {}
     if isinstance(raw_event, dict) and not user_name:
@@ -1003,7 +1061,7 @@ def _extract_user_name(event: dict) -> str | None:
 
 
 def _extract_role_name(event: dict) -> str | None:
-    role_name: str | None = event.get("target_value")
+    role_name: str | None = _response_target(event).get("role_name") or event.get("target_value")
     return role_name or _request_parameters(event).get("roleName")
 
 
@@ -1022,7 +1080,9 @@ def _extract_account_id(event: dict) -> str | None:
       4) legacy/hand-crafted event shapes: top-level "aws_account_id",
          raw_event.account, raw_event.detail.recipientAccountId.
     """
-    account_id: str | None = event.get("cloud_account_id") or None
+    account_id: str | None = (
+        _response_target(event).get("account_id") or event.get("cloud_account_id") or None
+    )
 
     if not account_id:
         primary_signal = event.get("primary_signal") or {}
@@ -1047,7 +1107,7 @@ def _extract_account_id(event: dict) -> str | None:
 
 
 def _extract_bucket_name(event: dict) -> str | None:
-    bucket: str | None = event.get("target_value")
+    bucket: str | None = _response_target(event).get("bucket_name") or event.get("target_value")
     bucket = bucket or _request_parameters(event).get("bucketName")
     if not bucket:
         r = _resource_by_type(event, "AWS::S3::Bucket")
@@ -1060,7 +1120,7 @@ def _extract_bucket_and_key(event: dict) -> tuple[str | None, str | None]:
     bucket = _extract_bucket_name(event)
     req = _request_parameters(event)
     # CloudTrail commonly uses "key" for S3 object key
-    key: str | None = req.get("key") or req.get("keyName")
+    key: str | None = _response_target(event).get("key") or req.get("key") or req.get("keyName")
 
     return bucket, key
 
@@ -1071,6 +1131,17 @@ def _extract_rds_snapshot(event: dict) -> tuple[str | None, str]:
     Returns (snapshot_id, snapshot_type) -- "instance" or "cluster",
     whichever CloudTrail's requestParameters actually carries.
     """
+    target = _response_target(event)
+    if target.get("snapshot_id"):
+        if target.get("snapshot_type"):
+            return target["snapshot_id"], target["snapshot_type"]
+        req = _request_parameters(event)
+        snapshot_type = (
+            "cluster"
+            if req.get("dBClusterSnapshotIdentifier") == target["snapshot_id"]
+            else "instance"
+        )
+        return target["snapshot_id"], snapshot_type
     req = _request_parameters(event)
     snapshot_id = req.get("dBSnapshotIdentifier")
     if snapshot_id:
@@ -1088,6 +1159,16 @@ def _extract_inline_policy_principal(event: dict) -> tuple[str | None, str | Non
     caller treats as unsupported rather than guessing at a group_name arg
     dredge doesn't accept.
     """
+    target = _response_target(event)
+    if target:
+        user_name = target.get("user_name")
+        role_name = target.get("role_name")
+        principal_name = target.get("principal_name")
+        if principal_name and event.get("activity_name") == "PutUserPolicy":
+            user_name = principal_name
+        elif principal_name and event.get("activity_name") == "PutRolePolicy":
+            role_name = principal_name
+        return user_name, role_name, target.get("policy_name")
     req = _request_parameters(event)
     return req.get("userName"), req.get("roleName"), req.get("policyName")
 
@@ -1096,6 +1177,11 @@ def _extract_instance_ids(event: dict) -> list[str]:
     """
     Try to get one or more EC2 instance IDs.
     """
+    explicit = _response_target(event).get("instance_ids")
+    if isinstance(explicit, str):
+        return [explicit]
+    if isinstance(explicit, list):
+        return sorted(set(explicit))
     instance_ids: list[str] = []
 
     # Simple heuristic: target_value might be a single instance id
@@ -1131,6 +1217,41 @@ def _extract_instance_ids(event: dict) -> list[str]:
     return sorted(set(instance_ids))
 
 
+def _translate_security_group_permissions(raw_permissions: Any) -> list[dict]:
+    """Translate CloudTrail permissions, or retain already-normalized boto3 permissions."""
+    items = (
+        raw_permissions.get("items")
+        if isinstance(raw_permissions, dict)
+        else raw_permissions
+        if isinstance(raw_permissions, list)
+        else None
+    )
+    translated: list[dict] = []
+    for perm in items or []:
+        if not isinstance(perm, dict):
+            continue
+        if "IpProtocol" in perm:
+            translated.append(perm)
+            continue
+        ip_ranges = [
+            {"CidrIp": item["cidrIp"]}
+            for item in (perm.get("ipRanges") or {}).get("items", [])
+            if isinstance(item, dict) and item.get("cidrIp")
+        ]
+        if not ip_ranges:
+            continue
+        translated_perm: dict = {
+            "IpProtocol": perm.get("ipProtocol", "-1"),
+            "IpRanges": ip_ranges,
+        }
+        if perm.get("fromPort") is not None:
+            translated_perm["FromPort"] = perm["fromPort"]
+        if perm.get("toPort") is not None:
+            translated_perm["ToPort"] = perm["toPort"]
+        translated.append(translated_perm)
+    return translated
+
+
 def _extract_security_group_rule_change(event: dict) -> tuple[str | None, list[dict], list[dict]]:
     """
     Translate a CloudTrail AuthorizeSecurityGroupIngress/Egress event's
@@ -1149,42 +1270,32 @@ def _extract_security_group_rule_change(event: dict) -> tuple[str | None, list[d
     security-group rule change), so no resources[]-based fallback is
     needed the way other extractors have one.
     """
+    target = _response_target(event)
+    if target:
+        rules = _translate_security_group_permissions(target.get("rules"))
+        target_ingress_rules = _translate_security_group_permissions(target.get("ingress_rules"))
+        target_egress_rules = _translate_security_group_permissions(target.get("egress_rules"))
+        if rules and event.get("activity_name") == "AuthorizeSecurityGroupIngress":
+            target_ingress_rules = rules
+        elif rules and event.get("activity_name") == "AuthorizeSecurityGroupEgress":
+            target_egress_rules = rules
+        return (
+            target.get("group_id"),
+            target_ingress_rules,
+            target_egress_rules,
+        )
     req = _request_parameters(event)
     group_id = req.get("groupId")
     if not isinstance(group_id, str) or not group_id:
         group_id = None
 
-    def _translate(raw_permissions: Any) -> list[dict]:
-        items = (raw_permissions or {}).get("items") if isinstance(raw_permissions, dict) else None
-        translated: list[dict] = []
-        for perm in items or []:
-            if not isinstance(perm, dict):
-                continue
-            ip_ranges = [
-                {"CidrIp": r["cidrIp"]}
-                for r in (perm.get("ipRanges") or {}).get("items", [])
-                if isinstance(r, dict) and r.get("cidrIp")
-            ]
-            if not ip_ranges:
-                continue
-            translated_perm: dict = {
-                "IpProtocol": perm.get("ipProtocol", "-1"),
-                "IpRanges": ip_ranges,
-            }
-            if perm.get("fromPort") is not None:
-                translated_perm["FromPort"] = perm["fromPort"]
-            if perm.get("toPort") is not None:
-                translated_perm["ToPort"] = perm["toPort"]
-            translated.append(translated_perm)
-        return translated
-
     activity_name = event.get("activity_name", "")
     ingress_rules: list[dict] = []
     egress_rules: list[dict] = []
     if activity_name == "AuthorizeSecurityGroupIngress":
-        ingress_rules = _translate(req.get("ipPermissions"))
+        ingress_rules = _translate_security_group_permissions(req.get("ipPermissions"))
     elif activity_name == "AuthorizeSecurityGroupEgress":
-        egress_rules = _translate(req.get("ipPermissions"))
+        egress_rules = _translate_security_group_permissions(req.get("ipPermissions"))
 
     return group_id, ingress_rules, egress_rules
 
@@ -1436,7 +1547,9 @@ def _handle_disable_lambda_function(dredge: Dredge, event: dict) -> OperationRes
     Throttle a Lambda function to zero reserved concurrency, for rule
     008_lambda_modified.
     """
-    function_name = _request_parameters(event).get("functionName")
+    function_name = _response_target(event).get("function_name") or _request_parameters(event).get(
+        "functionName"
+    )
 
     if not function_name:
         return OperationResult(
@@ -1458,7 +1571,9 @@ def _handle_disable_secrets_manager_secret(dredge: Dredge, event: dict) -> Opera
     schedule on a single credential-access signal, not a reversible
     toggle like the other two.
     """
-    secret_id = _request_parameters(event).get("secretId")
+    secret_id = _response_target(event).get("secret_id") or _request_parameters(event).get(
+        "secretId"
+    )
 
     if not secret_id:
         return OperationResult(
@@ -1480,7 +1595,7 @@ def _handle_enable_cloudtrail_logging(dredge: Dredge, event: dict) -> OperationR
     itself is gone), which surfaces as a normal TrailNotFoundException
     failure rather than being special-cased here.
     """
-    trail_name = _request_parameters(event).get("name")
+    trail_name = _response_target(event).get("trail_name") or _request_parameters(event).get("name")
 
     if not trail_name:
         return OperationResult(
@@ -1502,7 +1617,9 @@ def _handle_enable_guardduty_detector(dredge: Dredge, event: dict) -> OperationR
     detector_id (or the detector itself is gone), surfacing as a
     missing-field failure here rather than being special-cased.
     """
-    detector_id = _request_parameters(event).get("detectorId")
+    detector_id = _response_target(event).get("detector_id") or _request_parameters(event).get(
+        "detectorId"
+    )
 
     if not detector_id:
         return OperationResult(
@@ -1524,7 +1641,9 @@ def _handle_start_config_recorder(dredge: Dredge, event: dict) -> OperationResul
     configurationRecorderName, surfacing as a missing-field failure here
     rather than being special-cased.
     """
-    recorder_name = _request_parameters(event).get("configurationRecorderName")
+    recorder_name = _response_target(event).get("recorder_name") or _request_parameters(event).get(
+        "configurationRecorderName"
+    )
 
     if not recorder_name:
         return OperationResult(

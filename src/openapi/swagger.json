@@ -2,8 +2,8 @@
   "openapi": "3.0.3",
   "info": {
     "title": "OpenCDR Core API",
-    "version": "1.2.0",
-    "description": "OpenCDR Core management API (signals, logs, rules, settings)"
+    "version": "2.0.0",
+    "description": "OpenCDR Core management API: signals, logs, detection rules, detection lists, notification settings, IR-role mappings, and executed IR actions. All routes require an x-api-key whose name encodes its scopes (see docs/api-reference.md#api-key-scopes)."
   },
   "servers": [
     {
@@ -26,269 +26,1327 @@
       "ApiKeyAuth": []
     }
   ],
-  "paths": {
-    "/status": {
-      "get": {
-        "summary": "OpenCDR Core liveness and deployment identity",
-        "responses": {
-          "200": {
-            "description": "OK",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "object",
-                  "required": ["status", "product", "core_version", "management_contract_version", "security_profile", "deployment"],
-                  "properties": {
-                    "status": { "type": "string", "enum": ["ok"] },
-                    "product": { "type": "string", "enum": ["OpenCDR Core"] },
-                    "service": { "type": "string" },
-                    "core_version": { "type": "string" },
-                    "management_contract_version": { "type": "string" },
-                    "security_profile": { "type": "string", "enum": ["standard", "hardened"] },
-                    "deployment": { "type": "object" },
-                    "capabilities": { "type": "object" },
-                    "time": { "type": "string" }
-                  }
+  "components": {
+    "securitySchemes": {
+      "ApiKeyAuth": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "x-api-key"
+      }
+    },
+    "schemas": {
+      "CoreStatus": {
+        "type": "object",
+        "required": [
+          "status",
+          "product",
+          "service",
+          "core_version",
+          "management_contract_version",
+          "deployment",
+          "capabilities",
+          "time"
+        ],
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "ok"
+            ]
+          },
+          "product": {
+            "type": "string",
+            "enum": [
+              "OpenCDR Core"
+            ]
+          },
+          "service": {
+            "type": "string"
+          },
+          "core_version": {
+            "type": "string"
+          },
+          "management_contract_version": {
+            "type": "string"
+          },
+          "deployment": {
+            "type": "object",
+            "required": [
+              "stage",
+              "account_id",
+              "home_region"
+            ],
+            "properties": {
+              "stage": {
+                "type": "string"
+              },
+              "account_id": {
+                "type": "string"
+              },
+              "home_region": {
+                "type": "string"
+              }
+            }
+          },
+          "capabilities": {
+            "type": "object",
+            "additionalProperties": true
+          },
+          "lambda_name": {
+            "type": "string"
+          },
+          "time": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "request_id": {
+            "type": "string",
+            "nullable": true
+          }
+        }
+      },
+      "IntegrationBinding": {
+        "type": "object",
+        "properties": {
+          "integration_id": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "falco",
+              "custom"
+            ]
+          },
+          "bucket": {
+            "type": "string"
+          },
+          "prefix": {
+            "type": "string"
+          },
+          "format": {
+            "type": "string"
+          },
+          "compression": {
+            "type": "string"
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "rev": {
+            "type": "integer"
+          },
+          "parser": {
+            "type": "object"
+          }
+        },
+        "required": [
+          "integration_id",
+          "kind",
+          "bucket",
+          "prefix",
+          "rev",
+          "parser"
+        ]
+      },
+      "IngestionJob": {
+        "type": "object",
+        "properties": {
+          "object_id": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "PROCESSING",
+              "DISPATCHED",
+              "PARTIAL",
+              "QUARANTINED"
+            ]
+          },
+          "created_at": {
+            "type": "string"
+          },
+          "mode": {
+            "type": "string",
+            "enum": [
+              "live",
+              "analysis"
+            ]
+          },
+          "record_count": {
+            "type": "integer"
+          },
+          "invalid_count": {
+            "type": "integer"
+          },
+          "dropped_count": {
+            "type": "integer"
+          },
+          "signal_count": {
+            "type": "integer"
+          },
+          "error_code": {
+            "type": "string"
+          },
+          "bucket": {
+            "type": "string"
+          },
+          "key": {
+            "type": "string"
+          },
+          "version_id": {
+            "type": "string"
+          },
+          "records": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "sk": {
+                  "type": "string"
+                },
+                "status": {
+                  "type": "string"
+                },
+                "code": {
+                  "type": "string"
                 }
               }
             }
           }
-        }
-      }
-    },
-    "/help": {
-      "get": {
-        "summary": "API help",
-        "responses": {
-          "200": {
-            "description": "OK"
+        },
+        "required": [
+          "object_id",
+          "status"
+        ]
+      },
+      "ParserPreview": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "parsed",
+              "dropped"
+            ]
+          },
+          "event": {
+            "type": "object",
+            "nullable": true
+          },
+          "code": {
+            "type": "string",
+            "nullable": true
+          }
+        },
+        "required": [
+          "status"
+        ]
+      },
+      "ParserCatalog": {
+        "type": "object",
+        "properties": {
+          "bucket": {
+            "type": "string"
+          },
+          "prefix_template": {
+            "type": "string"
+          },
+          "parsers": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          },
+          "stock_falco_rules": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          }
+        },
+        "required": [
+          "bucket",
+          "parsers"
+        ]
+      },
+      "IngestionJobs": {
+        "type": "object",
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/IngestionJob"
+            }
+          },
+          "next_token": {
+            "type": "string",
+            "nullable": true
+          }
+        },
+        "required": [
+          "items"
+        ]
+      },
+      "IngestionReplay": {
+        "type": "object",
+        "properties": {
+          "run_id": {
+            "type": "string"
+          },
+          "mode": {
+            "type": "string",
+            "enum": [
+              "analysis"
+            ]
+          },
+          "object_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "run_id",
+          "mode",
+          "object_id"
+        ]
+      },
+      "IntegrationConfiguration": {
+        "type": "object",
+        "required": [
+          "kind",
+          "format",
+          "parser",
+          "expected_rev"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "kind": {
+            "type": "string",
+            "enum": [
+              "falco",
+              "custom"
+            ]
+          },
+          "format": {
+            "type": "string",
+            "enum": [
+              "json",
+              "ndjson",
+              "lines"
+            ]
+          },
+          "compression": {
+            "type": "string",
+            "enum": [
+              "none",
+              "gzip"
+            ],
+            "default": "none"
+          },
+          "enabled": {
+            "type": "boolean",
+            "default": false
+          },
+          "expected_rev": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "0 creates; updates require current rev."
+          },
+          "parser": {
+            "oneOf": [
+              {
+                "type": "object",
+                "required": [
+                  "kind",
+                  "id",
+                  "version"
+                ],
+                "additionalProperties": false,
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "enum": [
+                      "builtin"
+                    ]
+                  },
+                  "id": {
+                    "type": "string",
+                    "enum": [
+                      "falco.json"
+                    ]
+                  },
+                  "version": {
+                    "type": "string",
+                    "enum": [
+                      "1.0.0"
+                    ]
+                  }
+                }
+              },
+              {
+                "type": "object",
+                "required": [
+                  "kind",
+                  "version_arn",
+                  "contract_version"
+                ],
+                "additionalProperties": false,
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "enum": [
+                      "lambda"
+                    ]
+                  },
+                  "version_arn": {
+                    "type": "string",
+                    "description": "Deployment-allowlisted immutable numeric version ARN."
+                  },
+                  "contract_version": {
+                    "type": "string",
+                    "enum": [
+                      "1"
+                    ]
+                  }
+                }
+              }
+            ]
           }
         }
-      }
-    },
-    "/swagger.json": {
-      "get": {
-        "summary": "OpenAPI JSON spec",
-        "responses": {
-          "200": {
-            "description": "OK"
+      },
+      "Error": {
+        "type": "object",
+        "description": "4xx/5xx error body. `message` is surfaced verbatim to operators.",
+        "properties": {
+          "message": {
+            "type": "string"
+          },
+          "request_id": {
+            "type": "string",
+            "nullable": true
+          }
+        },
+        "required": [
+          "message"
+        ]
+      },
+      "Condition": {
+        "type": "object",
+        "description": "One detection condition. See docs/detection-rules.md.",
+        "properties": {
+          "field": {
+            "type": "string",
+            "description": "Dotted event path. The first segment must be an allowed field root (GET /help -> /rules.condition_field_roots)."
+          },
+          "op": {
+            "type": "string",
+            "enum": [
+              "exists",
+              "not_exists",
+              "equals",
+              "not_equals",
+              "in",
+              "not_in",
+              "in_list",
+              "not_in_list",
+              "contains",
+              "not_contains",
+              "prefix",
+              "not_prefix",
+              "suffix",
+              "not_suffix",
+              "matches",
+              "not_matches",
+              "wildcard"
+            ]
+          },
+          "value": {
+            "description": "Scalar or list, depending on op. Omitted for exists/not_exists/wildcard.",
+            "nullable": true
+          },
+          "list_id": {
+            "type": "string",
+            "description": "Required for in_list/not_in_list; references a reusable /lists resource."
+          }
+        },
+        "required": [
+          "field",
+          "op"
+        ]
+      },
+      "Rule": {
+        "type": "object",
+        "description": "A signal or correlation detection rule (PK rule_kind, SK rule_id).",
+        "additionalProperties": true,
+        "properties": {
+          "rule_kind": {
+            "type": "string",
+            "enum": [
+              "signal",
+              "correlation"
+            ]
+          },
+          "rule_id": {
+            "type": "string"
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "notify": {
+            "type": "boolean"
+          },
+          "severity": {
+            "type": "string",
+            "enum": [
+              "CRITICAL",
+              "HIGH",
+              "MEDIUM",
+              "LOW",
+              "INFO",
+              "INFORMATIONAL",
+              "UNKNOWN"
+            ]
+          },
+          "response_module": {
+            "type": "string",
+            "nullable": true,
+            "description": "Legacy single-action configuration. Mutually exclusive with response_actions."
+          },
+          "response_actions": {
+            "type": "array",
+            "maxItems": 10,
+            "description": "Ordered response actions with module-specific target keys mapped to detection fields.",
+            "items": {
+              "$ref": "#/components/schemas/ResponseAction"
+            }
+          },
+          "conditions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Condition"
+            }
+          },
+          "threshold": {
+            "type": "integer",
+            "description": "Correlation rules only."
+          },
+          "time_window_seconds": {
+            "type": "integer",
+            "description": "Correlation rules only."
+          },
+          "created_by": {
+            "type": "string"
+          },
+          "updated_by": {
+            "type": "string",
+            "description": "Server-set from the authenticated API-key id; body values are ignored."
+          },
+          "timestamp": {
+            "type": "string"
+          },
+          "rev": {
+            "type": "integer",
+            "description": "Monotonic version for optimistic concurrency (see expected_rev)."
+          }
+        },
+        "required": [
+          "rule_kind",
+          "rule_id"
+        ]
+      },
+      "ResponseAction": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "module",
+          "target"
+        ],
+        "properties": {
+          "module": {
+            "type": "string",
+            "description": "Registered response module. Its accepted target keys are returned by GET /rules/schema."
+          },
+          "target": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            },
+            "description": "Map of fixed module argument names to detection-event field paths."
           }
         }
-      }
-    },
-    "/docs": {
-      "get": {
-        "summary": "Swagger UI",
-        "responses": {
-          "200": {
-            "description": "OK"
-          }
-        }
-      }
-    },
-    "/signals": {
-      "get": {
-        "summary": "List signals (table or GSI)",
-        "description": "Provide exactly one of severity, event_id, category.",
-        "parameters": [
+      },
+      "RuleWrite": {
+        "type": "object",
+        "description": "Body for POST /rules or PUT /rules/{rule_id}.",
+        "allOf": [
           {
-            "in": "query",
-            "name": "severity",
-            "schema": {
+            "$ref": "#/components/schemas/Rule"
+          }
+        ],
+        "properties": {
+          "expected_rev": {
+            "type": "integer",
+            "description": "Optional optimistic-concurrency guard. If supplied, the write is conditional on the stored rev still equalling it (409 on mismatch); omit for an unconditional upsert. Never persisted."
+          }
+        }
+      },
+      "ListRule": {
+        "type": "object",
+        "deprecated": true,
+        "description": "Legacy rule_kind=list representation; use /lists instead.",
+        "additionalProperties": true,
+        "properties": {
+          "rule_kind": {
+            "type": "string",
+            "enum": [
+              "list"
+            ]
+          },
+          "rule_id": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "values": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "created_by": {
+            "type": "string"
+          },
+          "updated_by": {
+            "type": "string"
+          },
+          "timestamp": {
+            "type": "string"
+          },
+          "rev": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "rule_kind",
+          "rule_id",
+          "values"
+        ]
+      },
+      "DetectionListWrite": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "matcher",
+          "values"
+        ],
+        "properties": {
+          "list_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "matcher": {
+            "type": "string",
+            "enum": [
+              "exact",
+              "cidr"
+            ]
+          },
+          "value_type": {
+            "type": "string",
+            "enum": [
+              "string",
+              "ip",
+              "cidr",
+              "iam_user",
+              "arn",
+              "aws_account_id",
+              "resource_id"
+            ],
+            "description": "Optional operator metadata; defaults to cidr for the cidr matcher and string otherwise."
+          },
+          "values": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 10000,
+            "uniqueItems": true,
+            "items": {
               "type": "string",
-              "enum": [
-                "CRITICAL",
-                "HIGH",
-                "MEDIUM",
-                "LOW",
-                "INFO",
-                "INFORMATIONAL"
+              "minLength": 1,
+              "maxLength": 2048
+            }
+          },
+          "description": {
+            "type": "string",
+            "maxLength": 2048
+          },
+          "labels": {
+            "type": "array",
+            "maxItems": 50,
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            }
+          },
+          "expected_rev": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Required when updating an existing list; omit when creating."
+          }
+        }
+      },
+      "DetectionListMetadata": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "list_id",
+          "matcher",
+          "value_type",
+          "active_version",
+          "entry_count",
+          "rev"
+        ],
+        "properties": {
+          "list_id": {
+            "type": "string"
+          },
+          "matcher": {
+            "type": "string",
+            "enum": [
+              "exact",
+              "cidr"
+            ]
+          },
+          "value_type": {
+            "type": "string",
+            "enum": [
+              "string",
+              "ip",
+              "cidr",
+              "iam_user",
+              "arn",
+              "aws_account_id",
+              "resource_id"
+            ]
+          },
+          "description": {
+            "type": "string"
+          },
+          "labels": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "active_version": {
+            "type": "integer",
+            "readOnly": true
+          },
+          "entry_count": {
+            "type": "integer",
+            "readOnly": true
+          },
+          "rev": {
+            "type": "integer",
+            "readOnly": true
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "readOnly": true
+          },
+          "created_by": {
+            "type": "string",
+            "readOnly": true
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time",
+            "readOnly": true
+          },
+          "updated_by": {
+            "type": "string",
+            "readOnly": true
+          }
+        }
+      },
+      "DetectionListSnapshot": {
+        "type": "object",
+        "additionalProperties": true,
+        "required": [
+          "list_id",
+          "matcher",
+          "value_type",
+          "values",
+          "active_version",
+          "entry_count",
+          "rev"
+        ],
+        "properties": {
+          "list_id": {
+            "type": "string"
+          },
+          "matcher": {
+            "type": "string",
+            "enum": [
+              "exact",
+              "cidr"
+            ]
+          },
+          "value_type": {
+            "type": "string",
+            "enum": [
+              "string",
+              "ip",
+              "cidr",
+              "iam_user",
+              "arn",
+              "aws_account_id",
+              "resource_id"
+            ]
+          },
+          "values": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "description": {
+            "type": "string"
+          },
+          "labels": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "active_version": {
+            "type": "integer"
+          },
+          "entry_count": {
+            "type": "integer"
+          },
+          "rev": {
+            "type": "integer"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "created_by": {
+            "type": "string"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "updated_by": {
+            "type": "string"
+          }
+        }
+      },
+      "RuleListResponse": {
+        "type": "object",
+        "properties": {
+          "order": {
+            "type": "string",
+            "enum": [
+              "asc",
+              "desc"
+            ]
+          },
+          "page_size": {
+            "type": "integer"
+          },
+          "items": {
+            "type": "array",
+            "items": {
+              "oneOf": [
+                {
+                  "$ref": "#/components/schemas/Rule"
+                },
+                {
+                  "$ref": "#/components/schemas/ListRule"
+                }
               ]
             }
           },
-          {
-            "in": "query",
-            "name": "event_id",
-            "schema": {
-              "type": "string"
+          "next_token": {
+            "type": "string",
+            "nullable": true
+          },
+          "has_next": {
+            "type": "boolean"
+          },
+          "notes": {
+            "type": "string"
+          }
+        }
+      },
+      "RuleValidation": {
+        "type": "object",
+        "additionalProperties": true,
+        "required": [
+          "valid",
+          "contract_version",
+          "errors",
+          "warnings"
+        ],
+        "properties": {
+          "valid": {
+            "type": "boolean"
+          },
+          "contract_version": {
+            "type": "string"
+          },
+          "errors": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": true
             }
           },
-          {
-            "in": "query",
-            "name": "category",
-            "schema": {
-              "type": "string"
+          "warnings": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": true
+            }
+          }
+        }
+      },
+      "RuleReleaseManifest": {
+        "type": "object",
+        "required": [
+          "release_id",
+          "release_version",
+          "contract_version",
+          "rules"
+        ],
+        "properties": {
+          "release_id": {
+            "type": "string"
+          },
+          "release_version": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "contract_version": {
+            "type": "string"
+          },
+          "manifest_digest": {
+            "type": "string"
+          },
+          "removal_policy": {
+            "type": "string",
+            "enum": [
+              "ignore",
+              "disable",
+              "delete"
+            ],
+            "default": "disable"
+          },
+          "source_type": {
+            "type": "string"
+          },
+          "source_commit": {
+            "type": "string"
+          },
+          "rules": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "$ref": "#/components/schemas/RuleWrite"
+            }
+          }
+        }
+      },
+      "Signal": {
+        "type": "object",
+        "description": "A detection signal. Event-derived; only stable keys are enumerated.",
+        "additionalProperties": true,
+        "properties": {
+          "detection_id": {
+            "type": "string"
+          },
+          "event_id": {
+            "type": "string"
+          },
+          "severity": {
+            "type": "string"
+          },
+          "category": {
+            "type": "string"
+          },
+          "timestamp": {
+            "type": "string"
+          }
+        }
+      },
+      "SignalListResponse": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "object",
+            "additionalProperties": true
+          },
+          "order": {
+            "type": "string",
+            "enum": [
+              "asc",
+              "desc"
+            ]
+          },
+          "page_size": {
+            "type": "integer"
+          },
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Signal"
             }
           },
-          {
-            "in": "query",
-            "name": "order",
-            "schema": {
-              "type": "string",
-              "enum": [
-                "asc",
-                "desc"
-              ],
-              "default": "desc"
+          "next_token": {
+            "type": "string",
+            "nullable": true
+          },
+          "has_next": {
+            "type": "boolean"
+          }
+        }
+      },
+      "SignalStatsResponse": {
+        "type": "object",
+        "properties": {
+          "date_from": {
+            "type": "string"
+          },
+          "date_to": {
+            "type": "string"
+          },
+          "counts": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "integer"
             }
           },
-          {
-            "in": "query",
-            "name": "page_size",
-            "schema": {
-              "type": "integer",
-              "minimum": 1,
-              "maximum": 200,
-              "default": 20
+          "total": {
+            "type": "integer"
+          }
+        }
+      },
+      "LogEvent": {
+        "type": "object",
+        "description": "An audit/CloudTrail log row. Event-derived; only stable keys are enumerated.",
+        "additionalProperties": true,
+        "properties": {
+          "event_id": {
+            "type": "string"
+          },
+          "service": {
+            "type": "string"
+          },
+          "event_name": {
+            "type": "string"
+          },
+          "timestamp": {
+            "type": "string"
+          }
+        }
+      },
+      "LogListResponse": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "object",
+            "additionalProperties": true
+          },
+          "order": {
+            "type": "string",
+            "enum": [
+              "asc",
+              "desc"
+            ]
+          },
+          "page_size": {
+            "type": "integer"
+          },
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/LogEvent"
             }
           },
-          {
-            "in": "query",
-            "name": "next_token",
-            "schema": {
-              "type": "string"
-            }
+          "next_token": {
+            "type": "string",
+            "nullable": true
           },
+          "has_next": {
+            "type": "boolean"
+          }
+        }
+      },
+      "Settings": {
+        "type": "object",
+        "description": "A settings document. Secret-shaped fields are returned as ***REDACTED***.",
+        "additionalProperties": true,
+        "properties": {
+          "setting_id": {
+            "type": "string"
+          },
+          "notifications_enabled": {
+            "type": "boolean"
+          },
+          "channels": {
+            "type": "object",
+            "additionalProperties": true
+          },
+          "guardduty_notify": {
+            "type": "object",
+            "additionalProperties": true
+          },
+          "updated_by": {
+            "type": "string"
+          },
+          "timestamp": {
+            "type": "string"
+          },
+          "rev": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "setting_id"
+        ]
+      },
+      "SettingsWrite": {
+        "type": "object",
+        "description": "Body for POST /settings or PUT /settings/{setting_id}.",
+        "allOf": [
           {
-            "in": "query",
-            "name": "integration_id",
-            "schema": {
-              "type": "string"
-            }
+            "$ref": "#/components/schemas/Settings"
           }
         ],
-        "responses": {
-          "200": {
-            "description": "OK"
+        "properties": {
+          "expected_rev": {
+            "type": "integer",
+            "description": "Optional optimistic-concurrency guard (409 on mismatch). Never persisted."
+          }
+        }
+      },
+      "IRRole": {
+        "type": "object",
+        "description": "Maps an AWS account to the IAM role the responder assumes there.",
+        "additionalProperties": true,
+        "properties": {
+          "aws_account_id": {
+            "type": "string",
+            "pattern": "^[0-9]{12}$"
+          },
+          "role_arn": {
+            "type": "string",
+            "description": "arn:aws:iam::<account>:role/<name>. The embedded account must equal aws_account_id (cross-account mappings are refused)."
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "updated_by": {
+            "type": "string"
+          },
+          "updated_at": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "aws_account_id",
+          "role_arn"
+        ]
+      },
+      "IRRoleListResponse": {
+        "type": "object",
+        "properties": {
+          "page_size": {
+            "type": "integer"
+          },
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/IRRole"
+            }
+          },
+          "next_token": {
+            "type": "string",
+            "nullable": true
+          },
+          "has_next": {
+            "type": "boolean"
+          }
+        }
+      },
+      "IRAction": {
+        "type": "object",
+        "description": "An executed, rollback-eligible IR action.",
+        "additionalProperties": true,
+        "properties": {
+          "detection_id": {
+            "type": "string"
+          },
+          "source_detection_id": {
+            "type": "string",
+            "description": "Triggering detection/alert ID; differs from detection_id for multi-action rules."
+          },
+          "response_module": {
+            "type": "string"
+          },
+          "rollback_supported": {
+            "type": "boolean"
+          },
+          "rollback_status": {
+            "type": "string",
+            "enum": [
+              "pending",
+              "succeeded",
+              "failed"
+            ],
+            "description": "Absent until a rollback has been attempted."
+          },
+          "rollback_error": {
+            "type": "string",
+            "nullable": true
+          },
+          "rollback_updated_at": {
+            "type": "string"
+          },
+          "rolled_back": {
+            "type": "boolean",
+            "description": "Mirrors rollback_status == \"succeeded\" (back-compat)."
+          },
+          "rollback_requested_by": {
+            "type": "string",
+            "description": "Server-set from the authenticated API-key id."
+          },
+          "rollback_reason": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "detection_id"
+        ]
+      },
+      "IRActionListResponse": {
+        "type": "object",
+        "properties": {
+          "page_size": {
+            "type": "integer"
+          },
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/IRAction"
+            }
+          },
+          "next_token": {
+            "type": "string",
+            "nullable": true
+          },
+          "has_next": {
+            "type": "boolean"
+          }
+        }
+      },
+      "RollbackRequest": {
+        "type": "object",
+        "properties": {
+          "reason": {
+            "type": "string",
+            "description": "Optional human-readable justification, recorded on the action's audit trail."
+          },
+          "interface": {
+            "type": "string",
+            "description": "Optional caller-interface tag (e.g. \"mcp\")."
           }
         }
       }
     },
-    "/logs": {
-      "get": {
-        "summary": "List logs (table or GSI)",
-        "description": "Provide exactly one of service, event_id, event_name.",
-        "parameters": [
-          {
-            "in": "query",
-            "name": "service",
+    "responses": {
+      "BadRequest": {
+        "description": "Validation error (message is operator-readable)",
+        "content": {
+          "application/json": {
             "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "in": "query",
-            "name": "event_id",
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "in": "query",
-            "name": "event_name",
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "in": "query",
-            "name": "order",
-            "schema": {
-              "type": "string",
-              "enum": [
-                "asc",
-                "desc"
-              ],
-              "default": "desc"
-            }
-          },
-          {
-            "in": "query",
-            "name": "page_size",
-            "schema": {
-              "type": "integer",
-              "minimum": 1,
-              "maximum": 200,
-              "default": 20
-            }
-          },
-          {
-            "in": "query",
-            "name": "next_token",
-            "schema": {
-              "type": "string"
+              "$ref": "#/components/schemas/Error"
             }
           }
-        ],
-        "responses": {
-          "200": {
-            "description": "OK"
+        }
+      },
+      "NotFound": {
+        "description": "Resource not found",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      },
+      "Conflict": {
+        "description": "Conflict (e.g. optimistic-concurrency rev mismatch, or already exists)",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      },
+      "Forbidden": {
+        "description": "API key missing the required scope",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
           }
         }
       }
     },
-    "/rules": {
-      "get": {
-        "summary": "List rules",
-        "parameters": [
-          {
-            "in": "query",
-            "name": "rule_kind",
-            "schema": {
-              "type": "string",
-              "enum": [
-                "signal",
-                "correlation"
-              ]
-            }
-          },
-          {
-            "in": "query",
-            "name": "order",
-            "schema": {
-              "type": "string",
-              "enum": [
-                "asc",
-                "desc"
-              ],
-              "default": "desc"
-            }
-          },
-          {
-            "in": "query",
-            "name": "page_size",
-            "schema": {
-              "type": "integer",
-              "minimum": 1,
-              "maximum": 200,
-              "default": 20
-            }
-          },
-          {
-            "in": "query",
-            "name": "next_token",
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "OK"
-          }
+    "parameters": {
+      "Order": {
+        "in": "query",
+        "name": "order",
+        "schema": {
+          "type": "string",
+          "enum": [
+            "asc",
+            "desc"
+          ],
+          "default": "desc"
         }
-      }
-    },
-    "/settings": {
-      "get": {
-        "summary": "Get global settings",
-        "responses": {
-          "200": {
-            "description": "OK"
-          }
+      },
+      "PageSize": {
+        "in": "query",
+        "name": "page_size",
+        "schema": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 200,
+          "default": 20
         }
+      },
+      "NextToken": {
+        "in": "query",
+        "name": "next_token",
+        "schema": {
+          "type": "string"
+        },
+        "description": "Opaque cursor from the previous response."
       }
-    },
+    }
+  },
+  "paths": {
     "/integrations": {
       "get": {
         "summary": "Parser catalog and managed bucket",
@@ -654,326 +1712,1267 @@
           }
         ]
       }
-    }
-  },
-  "components": {
-    "securitySchemes": {
-      "ApiKeyAuth": {
-        "type": "apiKey",
-        "in": "header",
-        "name": "x-api-key"
+    },
+    "/status": {
+      "get": {
+        "summary": "OpenCDR Core liveness, version, deployment identity, and capabilities",
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoreStatus"
+                }
+              }
+            }
+          }
+        }
       }
     },
-    "schemas": {
-      "IntegrationConfiguration": {
-        "type": "object",
-        "required": [
-          "kind",
-          "format",
-          "parser",
-          "expected_rev"
-        ],
-        "additionalProperties": false,
-        "properties": {
-          "kind": {
-            "type": "string",
-            "enum": [
-              "falco",
-              "custom"
-            ]
-          },
-          "format": {
-            "type": "string",
-            "enum": [
-              "json",
-              "ndjson",
-              "lines"
-            ]
-          },
-          "compression": {
-            "type": "string",
-            "enum": [
-              "none",
-              "gzip"
-            ],
-            "default": "none"
-          },
-          "enabled": {
-            "type": "boolean",
-            "default": false
-          },
-          "expected_rev": {
-            "type": "integer",
-            "minimum": 0,
-            "description": "0 creates; updates require current rev."
-          },
-          "parser": {
-            "oneOf": [
-              {
-                "type": "object",
-                "required": [
-                  "kind",
-                  "id",
-                  "version"
-                ],
-                "additionalProperties": false,
-                "properties": {
-                  "kind": {
-                    "type": "string",
-                    "enum": [
-                      "builtin"
-                    ]
-                  },
-                  "id": {
-                    "type": "string",
-                    "enum": [
-                      "falco.json"
-                    ]
-                  },
-                  "version": {
-                    "type": "string",
-                    "enum": [
-                      "1.0.0"
-                    ]
-                  }
+    "/help": {
+      "get": {
+        "summary": "API help (endpoints, query params, condition field roots)",
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
                 }
-              },
-              {
-                "type": "object",
-                "required": [
-                  "kind",
-                  "version_arn",
-                  "contract_version"
-                ],
-                "additionalProperties": false,
-                "properties": {
-                  "kind": {
-                    "type": "string",
-                    "enum": [
-                      "lambda"
-                    ]
-                  },
-                  "version_arn": {
-                    "type": "string",
-                    "description": "Deployment-allowlisted immutable numeric version ARN."
-                  },
-                  "contract_version": {
-                    "type": "string",
-                    "enum": [
-                      "1"
-                    ]
+              }
+            }
+          }
+        }
+      }
+    },
+    "/signals": {
+      "get": {
+        "summary": "List signals (base table or GSI)",
+        "description": "Provide exactly one of severity, event_id, category, integration_id.",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "integration_id",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "severity",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "CRITICAL",
+                "HIGH",
+                "MEDIUM",
+                "LOW",
+                "INFO",
+                "INFORMATIONAL",
+                "UNKNOWN"
+              ]
+            }
+          },
+          {
+            "in": "query",
+            "name": "event_id",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "category",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "date_from",
+            "description": "Severity selector only. YYYY-MM-DD, UTC, inclusive. Defaults to 6 days before date_to.",
+            "schema": {
+              "type": "string",
+              "format": "date"
+            }
+          },
+          {
+            "in": "query",
+            "name": "date_to",
+            "description": "Severity selector only. YYYY-MM-DD, UTC, inclusive. Defaults to today.",
+            "schema": {
+              "type": "string",
+              "format": "date"
+            }
+          },
+          {
+            "$ref": "#/components/parameters/Order"
+          },
+          {
+            "$ref": "#/components/parameters/PageSize"
+          },
+          {
+            "$ref": "#/components/parameters/NextToken"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SignalListResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          }
+        }
+      }
+    },
+    "/signals/stats": {
+      "get": {
+        "summary": "Signal counts by severity for a date range",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "date_from",
+            "schema": {
+              "type": "string",
+              "format": "date"
+            }
+          },
+          {
+            "in": "query",
+            "name": "date_to",
+            "schema": {
+              "type": "string",
+              "format": "date"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SignalStatsResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          }
+        }
+      }
+    },
+    "/logs": {
+      "get": {
+        "summary": "List logs (base table or GSI)",
+        "description": "Provide exactly one of service, event_id, event_name.",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "service",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "event_id",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "event_name",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "date_from",
+            "description": "Service selector only. YYYY-MM-DD, UTC, inclusive.",
+            "schema": {
+              "type": "string",
+              "format": "date"
+            }
+          },
+          {
+            "in": "query",
+            "name": "date_to",
+            "description": "Service selector only. YYYY-MM-DD, UTC, inclusive.",
+            "schema": {
+              "type": "string",
+              "format": "date"
+            }
+          },
+          {
+            "$ref": "#/components/parameters/Order"
+          },
+          {
+            "$ref": "#/components/parameters/PageSize"
+          },
+          {
+            "$ref": "#/components/parameters/NextToken"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LogListResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          }
+        }
+      }
+    },
+    "/lists": {
+      "get": {
+        "summary": "List reusable detection lists",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/PageSize"
+          },
+          {
+            "$ref": "#/components/parameters/NextToken"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Metadata for active lists (values are returned by GET /lists/{list_id}).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "items": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/DetectionListMetadata"
+                      }
+                    },
+                    "next_token": {
+                      "type": "string",
+                      "nullable": true
+                    }
                   }
                 }
               }
-            ]
+            }
           }
         }
       },
-      "IntegrationBinding": {
-        "type": "object",
-        "properties": {
-          "integration_id": {
-            "type": "string"
-          },
-          "kind": {
-            "type": "string",
-            "enum": [
-              "falco",
-              "custom"
-            ]
-          },
-          "bucket": {
-            "type": "string"
-          },
-          "prefix": {
-            "type": "string"
-          },
-          "format": {
-            "type": "string"
-          },
-          "compression": {
-            "type": "string"
-          },
-          "enabled": {
-            "type": "boolean"
-          },
-          "rev": {
-            "type": "integer"
-          },
-          "parser": {
-            "type": "object"
+      "post": {
+        "summary": "Create a reusable detection list",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "allOf": [
+                  {
+                    "$ref": "#/components/schemas/DetectionListWrite"
+                  },
+                  {
+                    "type": "object",
+                    "required": [
+                      "list_id"
+                    ]
+                  }
+                ]
+              }
+            }
           }
         },
-        "required": [
-          "integration_id",
-          "kind",
-          "bucket",
-          "prefix",
-          "rev",
-          "parser"
-        ]
+        "responses": {
+          "201": {
+            "description": "Created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DetectionListSnapshot"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          }
+        }
+      }
+    },
+    "/lists/{list_id}": {
+      "parameters": [
+        {
+          "in": "path",
+          "name": "list_id",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "get": {
+        "summary": "Get the active list snapshot",
+        "responses": {
+          "200": {
+            "description": "Active snapshot",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DetectionListSnapshot"
+                }
+              }
+            }
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
       },
-      "IngestionJob": {
-        "type": "object",
-        "properties": {
-          "object_id": {
-            "type": "string"
+      "put": {
+        "summary": "Create or activate a new immutable list version",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DetectionListWrite"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Updated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DetectionListSnapshot"
+                }
+              }
+            }
           },
-          "status": {
-            "type": "string",
-            "enum": [
-              "PROCESSING",
-              "DISPATCHED",
-              "PARTIAL",
-              "QUARANTINED"
-            ]
+          "201": {
+            "description": "Created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DetectionListSnapshot"
+                }
+              }
+            }
           },
-          "created_at": {
-            "type": "string"
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
           },
-          "mode": {
-            "type": "string",
-            "enum": [
-              "live",
-              "analysis"
-            ]
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          }
+        }
+      },
+      "delete": {
+        "summary": "Delete a list and all of its stored versions",
+        "responses": {
+          "200": {
+            "description": "Deleted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
           },
-          "record_count": {
-            "type": "integer"
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      }
+    },
+    "/rules": {
+      "get": {
+        "summary": "List rules",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "rule_kind",
+            "description": "Omit to merge signal+correlation. The list option is legacy; use /lists.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "signal",
+                "correlation",
+                "list"
+              ]
+            }
           },
-          "invalid_count": {
-            "type": "integer"
+          {
+            "$ref": "#/components/parameters/Order"
           },
-          "dropped_count": {
-            "type": "integer"
+          {
+            "$ref": "#/components/parameters/PageSize"
           },
-          "signal_count": {
-            "type": "integer"
+          {
+            "$ref": "#/components/parameters/NextToken"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RuleListResponse"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "summary": "Create a rule (conditional -- 409 if it already exists)",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RuleWrite"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Rule"
+                }
+              }
+            }
           },
-          "error_code": {
-            "type": "string"
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
           },
-          "bucket": {
-            "type": "string"
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
           },
-          "key": {
-            "type": "string"
-          },
-          "version_id": {
-            "type": "string"
-          },
-          "records": {
-            "type": "array",
-            "items": {
-              "type": "object",
-              "properties": {
-                "sk": {
-                  "type": "string"
-                },
-                "status": {
-                  "type": "string"
-                },
-                "code": {
-                  "type": "string"
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          }
+        }
+      }
+    },
+    "/rules/schema": {
+      "get": {
+        "summary": "Read the versioned rule-management contract",
+        "responses": {
+          "200": {
+            "description": "Rule schema catalog and supported bounds",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/rules/validate": {
+      "post": {
+        "summary": "Validate a candidate rule without changing runtime state",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "rule"
+                ],
+                "properties": {
+                  "rule": {
+                    "$ref": "#/components/schemas/RuleWrite"
+                  },
+                  "available_lists": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  }
                 }
               }
             }
           }
         },
-        "required": [
-          "object_id",
-          "status"
-        ]
-      },
-      "ParserPreview": {
-        "type": "object",
-        "properties": {
-          "status": {
-            "type": "string",
-            "enum": [
-              "parsed",
-              "dropped"
-            ]
-          },
-          "event": {
-            "type": "object",
-            "nullable": true
-          },
-          "code": {
-            "type": "string",
-            "nullable": true
-          }
-        },
-        "required": [
-          "status"
-        ]
-      },
-      "ParserCatalog": {
-        "type": "object",
-        "properties": {
-          "bucket": {
-            "type": "string"
-          },
-          "prefix_template": {
-            "type": "string"
-          },
-          "parsers": {
-            "type": "array",
-            "items": {
-              "type": "object"
+        "responses": {
+          "200": {
+            "description": "Structured validation result",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RuleValidation"
+                }
+              }
             }
           },
-          "stock_falco_rules": {
-            "type": "array",
-            "items": {
-              "type": "object"
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          }
+        }
+      }
+    },
+    "/rules/evaluate": {
+      "post": {
+        "summary": "Evaluate a candidate rule against supplied fixtures without side effects",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "rule",
+                  "events"
+                ],
+                "properties": {
+                  "rule": {
+                    "$ref": "#/components/schemas/RuleWrite"
+                  },
+                  "events": {
+                    "type": "array",
+                    "maxItems": 500,
+                    "items": {
+                      "type": "object",
+                      "additionalProperties": true
+                    }
+                  },
+                  "lists": {
+                    "type": "object",
+                    "additionalProperties": {
+                      "oneOf": [
+                        {
+                          "type": "array",
+                          "items": {
+                            "type": "string"
+                          }
+                        },
+                        {
+                          "$ref": "#/components/schemas/DetectionListWrite"
+                        }
+                      ]
+                    }
+                  }
+                }
+              }
             }
           }
         },
-        "required": [
-          "bucket",
-          "parsers"
-        ]
-      },
-      "IngestionJobs": {
-        "type": "object",
-        "properties": {
-          "items": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/IngestionJob"
+        "responses": {
+          "200": {
+            "description": "Analysis-only evaluation result",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/RuleValidation"
+                    },
+                    {
+                      "type": "object",
+                      "additionalProperties": true
+                    }
+                  ]
+                }
+              }
             }
           },
-          "next_token": {
-            "type": "string",
-            "nullable": true
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          }
+        }
+      }
+    },
+    "/rules/runtime-status": {
+      "get": {
+        "summary": "Compare stored catalog generation with evaluator-observed generations",
+        "responses": {
+          "200": {
+            "description": "Runtime activation status",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/rules/metrics": {
+      "get": {
+        "summary": "Privacy-preserving aggregates by exact rule and release version",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "rule_id",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "rule_version",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "release_id",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "date_from",
+            "schema": {
+              "type": "string",
+              "format": "date"
+            }
+          },
+          {
+            "in": "query",
+            "name": "date_to",
+            "schema": {
+              "type": "string",
+              "format": "date"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Aggregate-only rule performance; partial is true when a bounded bucket was truncated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          }
+        }
+      }
+    },
+    "/rule-releases/plan": {
+      "post": {
+        "summary": "Plan exact convergence for an immutable release manifest",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RuleReleaseManifest"
+              }
+            }
           }
         },
-        "required": [
-          "items"
-        ]
+        "responses": {
+          "200": {
+            "description": "Ordered create, update, disable, delete and unchanged operations",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          }
+        }
+      }
+    },
+    "/rule-releases/apply": {
+      "post": {
+        "summary": "Apply an immutable release manifest with revision guards",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RuleReleaseManifest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Applied operations and new catalog generation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          }
+        }
+      }
+    },
+    "/rules/{rule_id}": {
+      "parameters": [
+        {
+          "in": "path",
+          "name": "rule_id",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "get": {
+        "summary": "Get a rule or a legacy list record for migration",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "rule_kind",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "signal",
+                "correlation",
+                "list"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "oneOf": [
+                    {
+                      "$ref": "#/components/schemas/Rule"
+                    },
+                    {
+                      "$ref": "#/components/schemas/ListRule"
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
       },
-      "IngestionReplay": {
-        "type": "object",
-        "properties": {
-          "run_id": {
-            "type": "string"
-          },
-          "mode": {
-            "type": "string",
-            "enum": [
-              "analysis"
-            ]
-          },
-          "object_id": {
-            "type": "string"
+      "put": {
+        "summary": "Upsert a signal or correlation rule (optional optimistic concurrency via expected_rev)",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RuleWrite"
+              }
+            }
           }
         },
-        "required": [
-          "run_id",
-          "mode",
-          "object_id"
-        ]
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Rule"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          }
+        }
+      },
+      "delete": {
+        "summary": "Delete a rule or remove a legacy list after migration",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "rule_kind",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "signal",
+                "correlation",
+                "list"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Deleted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      }
+    },
+    "/settings": {
+      "get": {
+        "summary": "Get global settings (secrets masked)",
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Settings"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "summary": "Create the global settings document",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SettingsWrite"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Settings"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          }
+        }
+      }
+    },
+    "/settings/{setting_id}": {
+      "parameters": [
+        {
+          "in": "path",
+          "name": "setting_id",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "get": {
+        "summary": "Get a settings document by id",
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Settings"
+                }
+              }
+            }
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      },
+      "put": {
+        "summary": "Upsert a settings document (optional optimistic concurrency)",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SettingsWrite"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Settings"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          }
+        }
+      },
+      "delete": {
+        "summary": "Delete a settings document",
+        "responses": {
+          "200": {
+            "description": "Deleted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      }
+    },
+    "/ir-roles": {
+      "get": {
+        "summary": "List IR-role mappings",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/PageSize"
+          },
+          {
+            "$ref": "#/components/parameters/NextToken"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IRRoleListResponse"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "summary": "Create an IR-role mapping (conditional -- 409 if it exists)",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/IRRole"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IRRole"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          }
+        }
+      }
+    },
+    "/ir-roles/{aws_account_id}": {
+      "parameters": [
+        {
+          "in": "path",
+          "name": "aws_account_id",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "pattern": "^[0-9]{12}$"
+          }
+        }
+      ],
+      "get": {
+        "summary": "Get the IR-role mapping for an account",
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IRRole"
+                }
+              }
+            }
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      },
+      "put": {
+        "summary": "Upsert the IR-role mapping for an account",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/IRRole"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IRRole"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      },
+      "delete": {
+        "summary": "Delete the IR-role mapping for an account",
+        "responses": {
+          "200": {
+            "description": "Deleted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      }
+    },
+    "/ir-actions": {
+      "get": {
+        "summary": "List executed, rollback-eligible IR actions",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/PageSize"
+          },
+          {
+            "$ref": "#/components/parameters/NextToken"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IRActionListResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ir-actions/{detection_id}": {
+      "parameters": [
+        {
+          "in": "path",
+          "name": "detection_id",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "get": {
+        "summary": "Get a specific executed IR action",
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IRAction"
+                }
+              }
+            }
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      }
+    },
+    "/ir-actions/{detection_id}/rollback": {
+      "parameters": [
+        {
+          "in": "path",
+          "name": "detection_id",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "post": {
+        "summary": "Enqueue the rollback of an IR action (async; returns 202)",
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RollbackRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "Rollback enqueued (poll GET /ir-actions/{detection_id} for the outcome)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Rollback not supported for this action",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "description": "A rollback for this action is already pending",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
       }
     }
   }

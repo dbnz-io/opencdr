@@ -1,13 +1,13 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://opencdr.dev/schemas/configuration-bundle/1.0.0",
+  "$id": "https://opencdr.dev/schemas/configuration-bundle/2.0.0",
   "title": "OpenCDR Core configuration bundle",
-  "description": "Declarative desired configuration for one OpenCDR Core deployment. Fleet applies rules and settings through the existing management API using optimistic concurrency.",
+  "description": "Declarative desired configuration for one OpenCDR Core deployment. Fleet applies rules, reusable lists, and settings through the management API using optimistic concurrency.",
   "type": "object",
   "additionalProperties": false,
   "required": ["contract_version", "bundle_id", "rules"],
   "properties": {
-    "contract_version": { "const": "1.0.0" },
+    "contract_version": { "const": "2.0.0" },
     "bundle_id": { "type": "string", "minLength": 1, "maxLength": 128 },
     "description": { "type": "string", "maxLength": 1024 },
     "minimum_core_version": {
@@ -22,11 +22,28 @@
         "required": ["rule_id", "rule_kind", "enabled"],
         "properties": {
           "rule_id": { "type": "string", "minLength": 1 },
-          "rule_kind": { "type": "string", "enum": ["signal", "correlation", "list"] },
+          "rule_kind": { "type": "string", "enum": ["signal", "correlation"] },
           "enabled": { "type": "boolean" },
           "expected_rev": { "type": "integer", "minimum": 0 }
         },
         "additionalProperties": true
+      }
+    },
+    "lists": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": true,
+        "required": ["list_id", "matcher", "values"],
+        "properties": {
+          "list_id": { "type": "string", "minLength": 1, "maxLength": 128 },
+          "matcher": { "type": "string", "enum": ["exact", "cidr"] },
+          "value_type": { "type": "string", "enum": ["string", "ip", "cidr", "iam_user", "arn", "aws_account_id", "resource_id"] },
+          "values": { "type": "array", "minItems": 1, "maxItems": 10000, "uniqueItems": true, "items": { "type": "string", "minLength": 1, "maxLength": 2048 } },
+          "description": { "type": "string", "maxLength": 2048 },
+          "labels": { "type": "array", "maxItems": 50, "items": { "type": "string", "minLength": 1, "maxLength": 128 } },
+          "expected_rev": { "type": "integer", "minimum": 0 }
+        }
       }
     },
     "settings": {

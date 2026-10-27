@@ -57,10 +57,11 @@ class TestListsCreate:
             mock_request.call_args.kwargs,
         )
         assert method == "PUT"
-        assert path == "/rules/automation-identities?rule_kind=list"
+        assert path == "/lists/automation-identities"
         assert kwargs["json"] == {
-            "rule_id": "automation-identities",
-            "rule_kind": "list",
+            "list_id": "automation-identities",
+            "matcher": "exact",
+            "value_type": "string",
             "description": "CI identities",
             "values": ["ci-deploy-role", "cdk-toolkit"],
         }
@@ -107,7 +108,7 @@ class TestListsList:
         )
         method, path = mock_request.call_args.args[:2]
         assert method == "GET"
-        assert path == "/rules?rule_kind=list&page_size=100"
+        assert path == "/lists?page_size=100"
 
     def test_empty_items_prints_no_lists_found(self, capsys):
         _run(opencdr.cmd_lists_list, SimpleNamespace(), api_response=(200, {"items": []}))
@@ -122,8 +123,8 @@ class TestListsList:
                 {
                     "items": [
                         {
-                            "rule_id": "automation-identities",
-                            "values": ["a", "b", "c"],
+                            "list_id": "automation-identities",
+                            "entry_count": 3,
                             "description": "CI",
                         }
                     ]
@@ -150,7 +151,7 @@ class TestListsShow:
         mock_request = _run(opencdr.cmd_lists_show, args, api_response=(200, {"values": []}))
         method, path = mock_request.call_args.args[:2]
         assert method == "GET"
-        assert path == "/rules/automation-identities?rule_kind=list"
+        assert path == "/lists/automation-identities"
 
     def test_values_printed_sorted(self, capsys):
         args = SimpleNamespace(list_id="x")
@@ -294,7 +295,7 @@ class TestListsDelete:
         mock_request = _run(opencdr.cmd_lists_delete, args, api_response=(200, {"ok": True}))
         method, path = mock_request.call_args.args[:2]
         assert method == "DELETE"
-        assert path == "/rules/x?rule_kind=list"
+        assert path == "/lists/x"
 
     def test_success_prints_deleted_message(self, capsys):
         args = SimpleNamespace(list_id="x")

@@ -11,6 +11,7 @@ from boto3.dynamodb.types import TypeDeserializer
 
 from ..domain.correlation_engine import CorrelationEngine
 from ..infra.aws_handler import AwsHandler
+from ..infra.detection_lists_repository import load_detection_lists
 from ..infra.detection_rules_repository import (
     get_rule_catalog_metadata,
     load_detection_rules,
@@ -67,6 +68,8 @@ CORR_RULES_TTL_SECONDS = int(os.getenv("ALERTER_CORR_RULES_TTL_SECONDS", "60"))
 CORR_RULES_CACHE: list[dict[str, Any]] | None = None
 CORR_RULES_CACHE_LOADED_AT: float = 0.0
 CORR_RULES_GENERATION = ""
+CORR_LISTS_CACHE: dict[str, dict[str, Any]] | None = None
+CORR_LISTS_CACHE_LOADED_AT: float = 0.0
 
 
 def get_correlation_rules(*, aws: AwsHandler, logger: Logger) -> list[dict[str, Any]]:
@@ -84,6 +87,27 @@ def get_correlation_rules(*, aws: AwsHandler, logger: Logger) -> list[dict[str, 
         CORR_RULES_GENERATION = generation
         mark_rule_catalog_observed(aws, evaluator="correlation", generation=generation)
     return CORR_RULES_CACHE
+
+
+def get_correlation_lists(*, aws: AwsHandler, logger: Logger) -> dict[str, dict[str, Any]]:
+    """Load reusable lists with a stale-cache fallback during transient failures."""
+    global CORR_LISTS_CACHE, CORR_LISTS_CACHE_LOADED_AT
+    now = time.time()
+    if CORR_LISTS_CACHE is None or (now - CORR_LISTS_CACHE_LOADED_AT) >= CORR_RULES_TTL_SECONDS:
+        try:
+            loaded = load_detection_lists(aws, logger)
+        except Exception:
+            if CORR_LISTS_CACHE is None:
+                raise
+            logger.warning(
+                event_name="LISTS_STALE_CACHE_USED",
+                event_type="SYSTEM",
+                message="List refresh failed; using the last successful snapshot",
+            )
+        else:
+            CORR_LISTS_CACHE = loaded
+            CORR_LISTS_CACHE_LOADED_AT = now
+    return CORR_LISTS_CACHE
 
 
 # ----------------------------
@@ -391,6 +415,7 @@ def lambda_handler(event, context):
         )
         return {"status": "no_rules"}
 
+    corr_lists = get_correlation_lists(aws=aws, logger=logger)
     created_alerts = 0
     stored_alerts = 0
     outboxed = 0
@@ -412,7 +437,7 @@ def lambda_handler(event, context):
 
         now = datetime.now(UTC)
 
-        alerts = engine.correlate(new_signal=signal, rules=corr_rules, now=now)
+        alerts = engine.correlate(new_signal=signal, rules=corr_rules, now=now, lists=corr_lists)
         if not alerts:
             continue
 
