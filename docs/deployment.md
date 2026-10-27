@@ -25,13 +25,14 @@ npm install    # installs the locked Serverless build toolchain
 serverless deploy --stage dev
 ```
 
-This single command provisions everything in [Architecture](architecture.md): all 11 Lambdas with their own IAM roles, all 10 DynamoDB tables, the opt-in S3/Glue/Firehose archival pipeline, all 11 SQS queues, both SNS topics, API Gateway with API-key auth, 21 CloudWatch alarms, a monthly cost budget, and the [CloudWatch Dashboard](observability.md). Nothing else needs to run first for a development deployment.
+This single command provisions everything in [Architecture](architecture.md): all 11 Lambdas with their own IAM roles, all 11 DynamoDB tables, the opt-in S3/Glue/Firehose archival pipeline, all 11 SQS queues, both SNS topics, API Gateway with API-key auth, 21 CloudWatch alarms, a monthly cost budget, and the [CloudWatch Dashboard](observability.md). Nothing else needs to run first for a development deployment.
 
-> **Production is a separate security decision.** The default API keys are not a
-> production identity boundary, and most Core state resources do not currently
-> receive PITR/retain/versioning controls automatically. Before using a production
-> stage, complete the deployer-owned [Production deployment responsibilities](production-deployment.md)
-> checklist.
+> **Production use follows a shared-responsibility model.** OpenCDR Core is
+> production-ready with a secure baseline and optional hardened resource profile.
+> The customer decides whether its threat model requires stronger API identity,
+> networking, backups, retention, or promotion controls. These are deployment
+> choices, not missing product features; see the [security shared-responsibility
+> model](shared-responsibility.md).
 
 Five deploy-time parameters are worth knowing about, all optional:
 
@@ -107,11 +108,11 @@ And enables CloudFormation stack termination protection automatically as the las
 3. **Decide on alarm delivery** (email param, or the Slack SSM parameter) if you want to know when the pipeline itself breaks, not just when it detects something. See [Observability](observability.md).
 4. **If you need cross-account IR**, onboard each additional account — see [Incident Response](incident-response.md). Single-account deployments need nothing here.
 5. **If your account operates in more than one region**, onboard each additional region: `./scripts/setup_region_forwarding.sh --stage dev --regions <region1>,<region2>`. Without this, activity outside the deployment region never generates a signal. See [Cross-Region Event Forwarding](region-forwarding.md).
-6. **Before creating a production stage**, complete the identity, network,
-   state-protection, recovery, immutable-promotion, and go-live evidence gates in
-   [Production deployment responsibilities](production-deployment.md). These are
-   customer/deployer controls and are intentionally not inferred from a successful
-   development deployment.
+6. **For a production stage**, record the customer's applicable identity, network,
+   state-protection, recovery, and promotion choices using [Customer production
+   deployment decisions](production-deployment.md). OpenCDR remains production-ready
+   whether optional controls are implemented by the customer, accepted as a
+   tradeoff, or determined not applicable.
 
 
 ## Related pages
@@ -121,5 +122,6 @@ And enables CloudFormation stack termination protection automatically as the las
 - [Observability](observability.md) — the dashboard/metrics/traces/alarms every deploy includes
 - [`ci-bootstrap/README.md`](../ci-bootstrap/README.md) — OIDC role setup in full
 - [`docs/stack-protection.md`](stack-protection.md) — termination protection and drift detection
-- [Production deployment responsibilities](production-deployment.md) — deployer-owned authentication, recovery, promotion, and go-live gates
+- [Security shared-responsibility model](shared-responsibility.md) — authoritative OpenCDR/customer ownership boundary
+- [Customer production deployment decisions](production-deployment.md) — optional authentication, recovery, and promotion guidance
 - [Cross-Region Event Forwarding](region-forwarding.md) — onboarding additional regions

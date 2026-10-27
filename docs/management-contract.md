@@ -1,12 +1,12 @@
 # OpenCDR Core management contract
 
-Management contract version `1.0.0` is the narrow boundary between an account-local OpenCDR Core deployment and an optional fleet manager. The detection-rule authoring and release sub-contract is independently versioned as `2.0.0`. Contract changes follow semantic versioning: additive optional fields are minor changes; removing or changing required fields is a major change.
+Management contract version `2.0.0` is the narrow boundary between an account-local OpenCDR Core deployment and an optional fleet manager. Version 2 moves reusable lists from rule records into the independent `/lists` lifecycle. The detection-rule authoring and release sub-contract is independently versioned as `3.0.0`; it retains multi-action response target mappings and excludes list data from rule releases. Contract changes follow semantic versioning: additive optional fields are minor changes; removing or changing required fields is a major change.
 
 ## Detection-content lifecycle
 
 `GET /rules/schema` publishes the supported kinds, operators, bounds, response modules, and evaluation modes. A manager must use `POST /rules/validate` and the side-effect-free `POST /rules/evaluate` before promotion. Candidate evaluation never sends notifications, executes response modules, or persists supplied fixtures.
 
-An immutable release manifest contains its release identity, contract version, removal policy, and the complete ordered list/rule desired state. `POST /rule-releases/plan` returns create, update, disable, delete, and unchanged operations. `POST /rule-releases/apply` validates the entire manifest before making revision-guarded writes, applies lists before dependent rules, stamps source/release provenance, and advances the catalog generation. Reapplying the same manifest is idempotent.
+An immutable rule release manifest contains its release identity, contract version, removal policy, and complete ordered signal/correlation rule desired state. `POST /rule-releases/plan` returns create, update, disable, delete, and unchanged operations. `POST /rule-releases/apply` validates the entire manifest before making revision-guarded writes, stamps source/release provenance, and advances the catalog generation. Reusable lists are promoted separately through `/lists`; rules retain stable `list_id` references.
 
 `GET /rules/runtime-status` distinguishes durable storage from activation. It reports the stored catalog generation and whether both the signal and correlation evaluators have observed it. A fleet manager must show an accepted release as `propagating` until this endpoint reports `verified`.
 
@@ -33,15 +33,15 @@ This is a liveness and identity endpoint, not proof that every regional collecto
 
 ## Configuration bundles
 
-[`configuration-bundle.schema.json`](../management/schemas/configuration-bundle.schema.json) describes desired rules and settings for one Core. Application uses the existing `/rules` and `/settings/{setting_id}` APIs. Fleet must:
+[`configuration-bundle.schema.json`](../management/schemas/configuration-bundle.schema.json) describes desired rules, reusable lists, and settings for one Core. Application uses `/rules`, `/lists`, and `/settings/{setting_id}`. Fleet must:
 
 1. compare `minimum_core_version` with `/status`;
 2. validate the bundle before making writes;
 3. use `expected_rev` for optimistic concurrency;
-4. apply rule and settings records independently and report partial failure;
+4. apply list, rule, and settings records independently and report partial failure;
 5. never place plaintext secrets in a persisted bundle—use the existing settings secret references.
 
-Legacy configuration bundles remain supported for compatibility. New detection-content automation should use rule releases because they add whole-manifest validation, dependency ordering, exact removal semantics, provenance, and evaluator verification. Individual DynamoDB writes are not a cross-record transaction; the manifest is idempotent and Fleet owns retry/reconciliation after a partial infrastructure failure.
+Version 1 configuration bundles may contain `rule_kind=list`; migrate those entries to the version 2 top-level `lists` array before applying them to this API. New detection-content automation should combine independently promoted lists with rule releases, which add whole-manifest rule validation, exact removal semantics, provenance, and evaluator verification. Individual DynamoDB writes are not a cross-record transaction; Fleet owns retry/reconciliation after a partial infrastructure failure.
 
 A conforming example is available at [`management/examples/configuration-bundle.example.json`](../management/examples/configuration-bundle.example.json).
 

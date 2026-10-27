@@ -9,6 +9,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Changed
+- Removed the public OpenCDR release workflow's PyPI publication job and PyPI-only manual trigger; public releases now create only the version tag, GitHub Release, release notes, and SBOM because `dbnz-io/opencdr` has no PyPI project.
+- Defined OpenCDR Core as production-ready within an explicit security shared-responsibility model, separating built-in controls from customer-selected identity, network, recovery, retention, regional, and promotion policies and documenting their cost/operability tradeoffs.
+- Advanced the management contract to `2.0.0` and the rule contract to `3.0.0`: reusable lists now have an independent `/lists` lifecycle and top-level configuration-bundle section instead of being writable `rule_kind=list` records.
 - Reframed the repository as **OpenCDR Core**, an account-local detection and response data plane with stable deployed resource names for upgrade compatibility.
 - Made regional onboarding fail closed by default and verify the live EventBridge target after deployment; partial coverage now requires an explicit `--allow-partial`.
 - Made CI install only hash-locked Python dependencies and block on Ruff formatting/linting, full-source mypy, Bandit, dependency audits, rule validation, and secret scanning.
@@ -16,6 +19,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Made ordinary CI deployments safe by default: simulated IR actions, X-Ray off, and Firehose archival data flow off unless explicitly enabled in a manual run.
 
 ### Added
+- Independently versioned reusable detection lists with exact/CIDR matching, dedicated DynamoDB storage and `/lists` CRUD, CLI/MCP management, fail-closed evaluator caching, and list-version attribution on detections.
+- Multi-action incident response through `response_actions`: rules can run up to ten ordered modules, map each module's fixed target keys to triggering-event fields, and retain separate rollback action IDs in the existing IR-actions table.
 - Generic REST API access in the Core CLI with safe relative paths, encoded
   query parameters, JSON file/stdin bodies, and nonzero HTTP error handling;
   multi-installation orchestration now lives in the separate `opencdr-deploy`
@@ -31,6 +36,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [0.2.0] — 2026-08-12
 
 ### Fixed
+- Updated internal and public CI catalog validation to recognize independent `lists/` resources and validate both rules and lists through the same runtime contracts used by the API.
 - **Correlation-triggered `disable_user` was a silent no-op for every one of the 4 shipped correlation rules** since correlation rules were introduced — `responder._extract_user_name` never handled a correlation alert's shape (`group_value`/`primary_signal.actor.user_name`), only a signal alert's. Same bug fixed in four sibling extractors (role/bucket/bucket+key/instance-id) via a shared `_request_parameters()` helper. Found by an external audit, independently re-verified, and proven by a new golden-path integration test that fails against the old code and passes against the fix.
 - Response-triggering rules didn't distinguish a denied API call from a successful one — added an `api.error_code not_exists` guard to the affected rules plus a structural backstop in `responder.py` independent of rule conditions.
 - Rule-operator parity restored between the engine, the API, and the docs: `wildcard`/`in_list`/`not_in_list` are now accepted by the rule-mutation API (previously engine-only, unreachable except via `load_rules.sh`); `not_prefix`/`not_suffix` are now implemented in the engine (previously API-accepted but silently never matched); `rule_kind="list"` is now reachable through the `/rules` API.

@@ -289,7 +289,7 @@ class TestListsList:
         with patch.object(opencdr, "_request", return_value=(200, {"items": []})) as mock_req:
             server.opencdr_lists_list()
         mock_req.assert_called_once_with(
-            "GET", "/rules?rule_kind=list&page_size=100", "https://api.example.com", "test-key"
+            "GET", "/lists?page_size=100", "https://api.example.com", "test-key"
         )
 
 
@@ -309,18 +309,21 @@ class TestListsShow:
 
 class TestListsReplace:
     def test_builds_correct_payload(self, api_env):
-        with patch.object(opencdr, "_request", return_value=(200, {"ok": True})) as mock_req:
+        with patch.object(
+            opencdr, "_request", side_effect=[(404, {}), (201, {"ok": True})]
+        ) as mock_req:
             server.opencdr_lists_replace(
                 "automation-identities", "CI identities", ["ci-deploy-role"]
             )
-        mock_req.assert_called_once_with(
+        mock_req.assert_called_with(
             "PUT",
-            "/rules/automation-identities?rule_kind=list",
+            "/lists/automation-identities",
             "https://api.example.com",
             "test-key",
             json={
-                "rule_id": "automation-identities",
-                "rule_kind": "list",
+                "list_id": "automation-identities",
+                "matcher": "exact",
+                "value_type": "string",
                 "description": "CI identities",
                 "values": ["ci-deploy-role"],
             },
@@ -392,7 +395,7 @@ class TestListsDelete:
             result = server.opencdr_lists_delete("x")
         assert result == {"deleted": True, "list_id": "x"}
         mock_req.assert_called_once_with(
-            "DELETE", "/rules/x?rule_kind=list", "https://api.example.com", "test-key"
+            "DELETE", "/lists/x", "https://api.example.com", "test-key"
         )
 
     def test_404_returns_found_false(self, api_env):

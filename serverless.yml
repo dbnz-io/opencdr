@@ -8,8 +8,8 @@ params:
     alertEmail: ""  # email for security detection alerts; can match alarmEmail
     monthlyBudgetUsd: "50"  # threshold for the AWS Budgets cost alert -- override with --param="monthlyBudgetUsd=<amount>"
     orgId: ""  # legacy central-ingestion compatibility only; new installs deploy one Core per account
-    coreVersion: "1.2.2"  # release-manifest.json; overridden for immutable releases
-    managementContractVersion: "1.0.0"
+    coreVersion: "1.3.0"  # release-manifest.json; overridden for immutable releases
+    managementContractVersion: "2.0.0"
     xrayEnabled: "false"  # opt in to X-Ray traces; CloudWatch observability remains enabled
     archiveEnabled: "false"  # opt in to DynamoDB Streams -> Firehose -> S3 delivery; TTL remains enabled
     securityProfile: "standard"  # standard|hardened; protects only resources owned by this stack
@@ -127,6 +127,7 @@ provider:
     SETTINGS_TABLE_NAME: "${self:service}-${self:provider.stage}-settings-table"
     LOGS_TABLE_NAME: "${self:service}-${self:provider.stage}-logs-table-v2"
     DETECTION_RULES_TABLE_NAME: "${self:service}-${self:provider.stage}-detection-rules-table"
+    DETECTION_LISTS_TABLE_NAME: "${self:service}-${self:provider.stage}-detection-lists-table"
     OUTBOX_TABLE_NAME: "${self:service}-${self:provider.stage}-outbox-table"
     IR_ACCOUNT_ROLES_TABLE_NAME: "${self:service}-${self:provider.stage}-ir-account-roles-table"
 
@@ -191,6 +192,8 @@ functions:
           - dynamodb:UpdateItem
         Resource:
           - arn:aws:dynamodb:${self:provider.region}:*:table/${self:service}-${self:provider.stage}-detection-rules-table
+          - arn:aws:dynamodb:${self:provider.region}:*:table/${self:service}-${self:provider.stage}-detection-lists-table
+          - arn:aws:dynamodb:${self:provider.region}:*:table/${self:service}-${self:provider.stage}-detection-lists-table/index/*
           - arn:aws:dynamodb:${self:provider.region}:*:table/${self:service}-${self:provider.stage}-logs-table-v2
       - Effect: Allow
         Action:
@@ -332,6 +335,8 @@ functions:
         Resource:
           - arn:aws:dynamodb:${self:provider.region}:*:table/${self:service}-${self:provider.stage}-alerts-table
           - arn:aws:dynamodb:${self:provider.region}:*:table/${self:service}-${self:provider.stage}-detection-rules-table
+          - arn:aws:dynamodb:${self:provider.region}:*:table/${self:service}-${self:provider.stage}-detection-lists-table
+          - arn:aws:dynamodb:${self:provider.region}:*:table/${self:service}-${self:provider.stage}-detection-lists-table/index/*
           - arn:aws:dynamodb:${self:provider.region}:*:table/${self:service}-${self:provider.stage}-outbox-table
           - arn:aws:dynamodb:${self:provider.region}:*:table/${self:service}-${self:provider.stage}-logs-table-v2
       # signals-table-v2 read access -- correlation lookback (alerter.py's
@@ -721,6 +726,7 @@ functions:
           - dynamodb:Scan
           - dynamodb:DeleteItem
           - dynamodb:UpdateItem
+          - dynamodb:BatchWriteItem
         Resource:
           - arn:aws:dynamodb:${self:provider.region}:*:table/${self:service}-${self:provider.stage}-signals-table-v2
           - arn:aws:dynamodb:${self:provider.region}:*:table/${self:service}-${self:provider.stage}-signals-table-v2/index/*
@@ -728,6 +734,8 @@ functions:
           - arn:aws:dynamodb:${self:provider.region}:*:table/${self:service}-${self:provider.stage}-logs-table-v2/index/*
           - arn:aws:dynamodb:${self:provider.region}:*:table/${self:service}-${self:provider.stage}-alerts-table
           - arn:aws:dynamodb:${self:provider.region}:*:table/${self:service}-${self:provider.stage}-detection-rules-table
+          - arn:aws:dynamodb:${self:provider.region}:*:table/${self:service}-${self:provider.stage}-detection-lists-table
+          - arn:aws:dynamodb:${self:provider.region}:*:table/${self:service}-${self:provider.stage}-detection-lists-table/index/*
           - arn:aws:dynamodb:${self:provider.region}:*:table/${self:service}-${self:provider.stage}-settings-table
           - arn:aws:dynamodb:${self:provider.region}:*:table/${self:service}-${self:provider.stage}-ir-account-roles-table
           - arn:aws:dynamodb:${self:provider.region}:*:table/${self:service}-${self:provider.stage}-ir-actions-table
@@ -829,6 +837,31 @@ functions:
       - http:
           path: logs
           method: get
+          private: true
+          cors: true
+      - http:
+          path: lists
+          method: get
+          private: true
+          cors: true
+      - http:
+          path: lists
+          method: post
+          private: true
+          cors: true
+      - http:
+          path: lists/{list_id}
+          method: get
+          private: true
+          cors: true
+      - http:
+          path: lists/{list_id}
+          method: put
+          private: true
+          cors: true
+      - http:
+          path: lists/{list_id}
+          method: delete
           private: true
           cors: true
       - http:
@@ -1236,6 +1269,11 @@ resources:
                 - Effect: Allow
                   Action: [dynamodb:Query]
                   Resource: !Sub 'arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${self:service}-${self:provider.stage}-detection-rules-table'
+                - Effect: Allow
+                  Action: [dynamodb:Query]
+                  Resource:
+                    - !Sub 'arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${self:service}-${self:provider.stage}-detection-lists-table'
+                    - !Sub 'arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${self:service}-${self:provider.stage}-detection-lists-table/index/*'
                 - Effect: Allow
                   Action: [dynamodb:PutItem]
                   Resource: !Sub 'arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${self:service}-${self:provider.stage}-logs-table-v2'
@@ -1928,6 +1966,42 @@ resources:
           - AttributeName: rule_id
             KeyType: RANGE
 
+    # Reusable lists are versioned independently from rule releases.
+    detectionLists:
+      Type: AWS::DynamoDB::Table
+      DeletionPolicy: ${self:custom.securityProfile.deletionPolicy}
+      UpdateReplacePolicy: ${self:custom.securityProfile.updateReplacePolicy}
+      Properties:
+        DeletionProtectionEnabled: ${self:custom.securityProfile.dynamodbDeletionProtection}
+        TableName: ${self:service}-${self:provider.stage}-detection-lists-table
+        BillingMode: PAY_PER_REQUEST
+        Tags:
+          - Key: Project
+            Value: opencdr
+          - Key: Stage
+            Value: ${self:provider.stage}
+        AttributeDefinitions:
+          - AttributeName: list_id
+            AttributeType: S
+          - AttributeName: item_key
+            AttributeType: S
+          - AttributeName: item_type
+            AttributeType: S
+        KeySchema:
+          - AttributeName: list_id
+            KeyType: HASH
+          - AttributeName: item_key
+            KeyType: RANGE
+        GlobalSecondaryIndexes:
+          - IndexName: gsi_list_metadata
+            KeySchema:
+              - AttributeName: item_type
+                KeyType: HASH
+              - AttributeName: list_id
+                KeyType: RANGE
+            Projection:
+              ProjectionType: ALL
+
     # -------------------------
     # SETTINGS TABLE
     # -------------------------
@@ -1976,8 +2050,9 @@ resources:
 
     # One row per executed IR action that responder recognizes as
     # rollback-eligible (ROLLBACK_UNDO_MODULE in src/handlers/responder.py) --
-    # detection_id is 1:1 with the row since responder only ever takes one
-    # action per detection. rollbackHandler reads rollback_kwargs back out
+    # legacy single-action rows use the detection ID, while response_actions
+    # use stable action IDs derived from the source detection. rollbackHandler
+    # reads rollback_kwargs back out
     # to call the matching dredge undo function; rollback_supported is
     # false (row still written, for audit visibility) when the module
     # needed a prior-state capture that itself failed.

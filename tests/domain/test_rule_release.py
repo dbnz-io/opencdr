@@ -62,8 +62,10 @@ def test_plan_is_exact_and_disables_removed_managed_rule():
     ]
 
 
-def test_manifest_requires_list_dependency():
+def test_manifest_allows_external_list_dependency_and_rejects_embedded_lists():
     dependent = rule("dependent")
     dependent["conditions"] = [{"field": "actor.user_name", "op": "in_list", "list_id": "admins"}]
-    assert validate_manifest(manifest([dependent]))["errors"][-1]["code"] == "missing_list"
-    assert validate_manifest(manifest([rule("admins", kind="list"), dependent]))["valid"] is True
+    assert validate_manifest(manifest([dependent]))["valid"] is True
+    result = validate_manifest(manifest([rule("admins", kind="list"), dependent]))
+    assert result["valid"] is False
+    assert result["errors"][-1]["code"] == "lists_are_independent"

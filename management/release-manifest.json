@@ -2,8 +2,8 @@
   "$schema": "./schemas/release-manifest.schema.json",
   "manifest_version": "1.0.0",
   "product": "OpenCDR Core",
-  "release_version": "1.2.2",
-  "management_contract_version": "1.0.0",
+  "release_version": "1.3.0",
+  "management_contract_version": "2.0.0",
   "deployment_model": "single-account-home-region",
   "runtime": {
     "provider": "aws",
@@ -15,7 +15,7 @@
     "configuration_bundle_schema": "management/schemas/configuration-bundle.schema.json",
     "alert_schema": "management/schemas/alert.schema.json",
     "rule_bundle_schema": "management/schemas/rule-bundle.schema.json",
-    "rule_contract_version": "2.0.0"
+    "rule_contract_version": "3.0.0"
   },
   "capabilities": [
     "account-local-processing",
@@ -24,6 +24,7 @@
     "versioned-alert-schema",
     "immutable-rule-releases",
     "side-effect-free-rule-evaluation",
-    "evaluator-generation-verification"
+    "evaluator-generation-verification",
+    "reusable-detection-lists"
   ]
 }

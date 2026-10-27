@@ -1,17 +1,17 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://opencdr.dev/schemas/rule-bundle/2.0.0",
+  "$id": "https://opencdr.dev/schemas/rule-bundle/3.0.0",
   "title": "OpenCDR rules-as-code bundle",
   "type": "object",
   "additionalProperties": false,
   "required": ["contract_version", "commit", "artifact_digest", "rules", "fixtures", "package"],
   "properties": {
-    "contract_version": { "type": "string", "const": "2.0.0" },
+    "contract_version": { "type": "string", "const": "3.0.0" },
     "commit": { "type": "string", "minLength": 7 },
     "artifact_digest": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
     "rules": {
       "type": "array", "minItems": 1,
-      "items": { "type": "object", "required": ["rule_kind", "rule_id"], "properties": { "rule_kind": { "enum": ["signal", "correlation", "list"] }, "rule_id": { "type": "string", "minLength": 1 } }, "additionalProperties": true }
+      "items": { "type": "object", "required": ["rule_kind", "rule_id"], "properties": { "rule_kind": { "enum": ["signal", "correlation"] }, "rule_id": { "type": "string", "minLength": 1 } }, "additionalProperties": true }
     },
     "fixtures": {
       "type": "array",

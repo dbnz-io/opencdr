@@ -6,11 +6,17 @@
 
 - **Signal** — the result of a single **signal rule** matching a single normalized event. Written by `processor`, one row per match, into the signals table.
 - **Correlation (rule)** — a rule that groups signals by a field (e.g. `actor.user_name`), counts them in a rolling time window, and fires once a threshold is met.
-- **Alert** — the result of a correlation rule's threshold being met. Written by `alerter`. This is the thing that actually gets delivered via [Notifications](notifications.md) and can trigger [Incident Response](incident-response.md) — a bare signal, on its own, does not (unless its own rule sets `notify`/`response_module` directly).
+- **Alert** — the result of a correlation rule's threshold being met. Written by `alerter`. This is the thing that actually gets delivered via [Notifications](notifications.md) and can trigger [Incident Response](incident-response.md) — a bare signal, on its own, does not (unless its own rule enables notification/response directly).
 
 ### Detection rule
 
 A JSON document (`rule_kind`, `rule_id`, `rule_body`) stored in the `detection-rules-table`, defining either a signal match or a correlation pattern. See [Detection Rules](detection-rules.md).
+
+### Reusable detection list
+
+A versioned set of values in `detection-lists-table`, referenced from rule conditions by stable
+`list_id`. `exact` compares strings; `cidr` checks IPv4/IPv6 network membership. Lists are managed
+through `/lists` independently of rule releases so one list can be reused across rulesets.
 
 ### Outbox (pattern)
 

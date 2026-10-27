@@ -322,16 +322,23 @@ class TestRuleCaching:
     def test_get_lists_loads_once_and_caches(self):
         logger = MagicMock()
         aws = MagicMock()
-        raw_lists = [{"rule_id": "blocklist-ips", "values": ["1.2.3.4"]}]
+        snapshots = {
+            "blocklist-ips": {
+                "matcher": "exact",
+                "value_type": "ip",
+                "version": 1,
+                "values": ["1.2.3.4"],
+            }
+        }
         with patch(
-            "src.handlers.processor.load_detection_rules", return_value=raw_lists
-        ) as load_rules:
+            "src.handlers.processor.load_detection_lists", return_value=snapshots
+        ) as load_lists:
             first = get_lists(aws, logger)
             second = get_lists(aws, logger)
 
-        assert first == {"blocklist-ips": ["1.2.3.4"]}
+        assert first == snapshots
         assert first is second
-        load_rules.assert_called_once()
+        load_lists.assert_called_once()
 
     def test_lambda_handler_reuses_cache_across_invocations(self):
         rules = [make_signal_rule()]
@@ -339,9 +346,10 @@ class TestRuleCaching:
         with (
             patcher,
             patch("src.handlers.processor.load_detection_rules", return_value=rules) as load_rules,
+            patch("src.handlers.processor.load_detection_lists", return_value={}) as load_lists,
         ):
             lambda_handler(make_cloudtrail_event(), make_context())
             lambda_handler(make_cloudtrail_event(), make_context())
 
-        # Two invocations, but rules + lists are each loaded exactly once (signal + list kinds).
-        assert load_rules.call_count == 2  # one "signal" call + one "list" call, not four
+        assert load_rules.call_count == 1
+        assert load_lists.call_count == 1

@@ -11,11 +11,18 @@ below for how the two repos relate day to day).*
 
 Every rule is one row in the `detection-rules-table`: partition key `rule_kind`, sort key `rule_id`, and the actual rule content stored as `rule_body` — a JSON-serialized string, parsed back into a real object by `src/infra/detection_rules_repository.py` when `processor`/`alerter` load rules. This indirection is what makes rules **data, not code**: editing a rule is a DynamoDB write (via the API or `scripts/load_rules.sh`), not a Lambda redeploy. `src/handlers/api.py`'s `/rules` endpoints reuse the same `unpack_rule_body` helper on every read, so `GET /rules`/`GET /rules/{id}` return the real fields either way — whether a rule was loaded via `load_rules.sh` (`rule_body`-wrapped) or created/edited through the API itself (which writes flat, no wrapper). Both shapes coexist in the table; a rule normalizes to flat the next time it's saved through the API.
 
-Three values of `rule_kind` exist in practice, though not all are exposed the same way:
+Two values of `rule_kind` are part of current rule releases:
 
 - **`signal`** — matched by `processor` against one normalized event at a time. Mutable via the API (`ALLOWED_RULE_KINDS` in `src/handlers/api.py`).
 - **`correlation`** — matched by `alerter` against a window of recent signals. Also mutable via the API.
-- **`list`** — reference lists (e.g. allow-lists) that rule conditions can check membership against via `in_list`/`not_in_list`, loaded via `load_detection_rules(rule_kind="list")` in `processor.py`. Mutable through the `/rules` API like the other two kinds — see [List rules](https://github.com/dbnz-io/opencdr-detection-rules#list-rules) in the rules repo for the schema.
+
+Reusable lists are separate resources in `detection-lists-table` and are managed through `/lists`.
+Each update writes a new immutable value snapshot and conditionally switches the metadata pointer;
+rules continue to reference a stable `list_id`. Supported matchers are `exact` and `cidr`. Evaluators
+cache active snapshots, record `{list_id: active_version}` on detections, and fail closed when a
+referenced list cannot be loaded (both `in_list` and `not_in_list` return false). Legacy
+`rule_kind=list` rows remain a read fallback only when the dedicated lists table has no metadata;
+their `/rules` write path is disabled, while reads and deletion remain available for migration.
 
 ## Authoring, testing, and loading
 
@@ -31,8 +38,9 @@ git submodule update --init
 ```
 
 Rule content, schema, and the full catalog of what ships live in that repo's own README, not here.
-Every loader on this side (`scripts/load_rules.sh`, `scripts/test_rules_local.py`, `opencdr.py
-rules load`) scans `support_files/detection_rules/` recursively regardless of which commit is
+Every rule loader on this side (`scripts/load_rules.sh`, `scripts/test_rules_local.py`, `opencdr.py
+rules load`) scans `support_files/detection_rules/` recursively while excluding `lists/`; list
+examples are applied independently through `/lists`. Regardless of which commit is
 checked out, so authoring a new rule is entirely a change in the other repo — nothing here needs to
 change to pick it up once the submodule pin is bumped.
 
@@ -47,7 +55,7 @@ python3 scripts/test_rules_local.py --rule cloudtrail
 # Preview what load_rules.sh would write, without writing it
 ./scripts/load_rules.sh --dry-run
 
-# Load rules into a deployed stack -- response_module stripped by default,
+# Load rules into a deployed stack -- response_module and response_actions stripped by default,
 # see the warning in docs/setup.md before passing --with-response-modules
 ./scripts/load_rules.sh --stage dev
 
@@ -68,6 +76,8 @@ modules, types, list values, or correlation bounds are reported per file and are
 Validation also runs during `--dry-run`, so use that mode to check a catalog safely before loading
 it. A validation failure makes the loader exit non-zero after it has inspected every file.
 
+Rules can declare `response_actions` as an ordered list of module/target mappings. Target keys are fixed per module, while each value is a field path into the detection event (for example `actor.user_name` or `raw_event.detail.responseElements.accessKey.accessKeyId`). The management contract at `GET /rules/schema` is the authoritative catalog. `response_actions` is mutually exclusive with the legacy `response_module` field and is stripped by the bootstrap loader unless `--with-response-modules` is explicitly supplied.
+
 ## Managing rules at runtime
 
 The full CRUD surface is also available over the API — see [API Reference](api-reference.md#rules) — for editing a single rule without touching files, or building your own tooling on top.
@@ -78,5 +88,5 @@ For lifecycle automation, prefer the management endpoints: read the contract fro
 
 - [dbnz-io/opencdr-detection-rules](https://github.com/dbnz-io/opencdr-detection-rules) — rule schema, full catalog, and contribution flow
 - [Architecture](architecture.md) — where rules sit in the overall data flow
-- [Incident Response](incident-response.md) — what happens when a rule's `response_module` fires
+- [Incident Response](incident-response.md) — what happens when a rule's response actions fire
 - [API Reference](api-reference.md) — the `/rules` endpoints

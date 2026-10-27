@@ -17,6 +17,8 @@ import boto3
 import regex
 from boto3.dynamodb.conditions import Attr, Key
 
+from ..domain.detection_lists import validate_list_document
+from ..domain.response_actions import validate_response_actions
 from ..domain.rule_management import (
     RULE_CONTRACT_VERSION,
     evaluate_candidate,
@@ -69,6 +71,7 @@ SIGNALS_TABLE_NAME = os.getenv("SIGNALS_TABLE_NAME", "")
 ALERTS_TABLE_NAME = os.getenv("ALERTS_TABLE_NAME", "")
 LOGS_TABLE_NAME = os.getenv("LOGS_TABLE_NAME", "")
 DETECTION_RULES_TABLE_NAME = os.getenv("DETECTION_RULES_TABLE_NAME", "")
+DETECTION_LISTS_TABLE_NAME = os.getenv("DETECTION_LISTS_TABLE_NAME", "")
 SETTINGS_TABLE_NAME = os.getenv("SETTINGS_TABLE_NAME", "")
 IR_ACCOUNT_ROLES_TABLE_NAME = os.getenv("IR_ACCOUNT_ROLES_TABLE_NAME", "")
 IR_ACTIONS_TABLE_NAME = os.getenv("IR_ACTIONS_TABLE_NAME", "")
@@ -83,6 +86,7 @@ signals_table = ddb.Table(SIGNALS_TABLE_NAME)
 alerts_table = ddb.Table(ALERTS_TABLE_NAME)
 logs_table = ddb.Table(LOGS_TABLE_NAME)
 detection_rules_table = ddb.Table(DETECTION_RULES_TABLE_NAME)
+detection_lists_table = ddb.Table(DETECTION_LISTS_TABLE_NAME)
 settings_table = ddb.Table(SETTINGS_TABLE_NAME)
 ir_account_roles_table = ddb.Table(IR_ACCOUNT_ROLES_TABLE_NAME)
 ir_actions_table = ddb.Table(IR_ACTIONS_TABLE_NAME)
@@ -95,7 +99,7 @@ ir_actions_table = ddb.Table(IR_ACTIONS_TABLE_NAME)
 SERVICE = os.getenv("SERVICE_NAME", "OPENCDR-API")
 PRODUCT = os.getenv("OPENCDR_PRODUCT", "OpenCDR Core")
 CORE_VERSION = os.getenv("OPENCDR_CORE_VERSION", "0.0.0-unknown")
-MANAGEMENT_CONTRACT_VERSION = os.getenv("OPENCDR_MANAGEMENT_CONTRACT_VERSION", "1.0.0")
+MANAGEMENT_CONTRACT_VERSION = os.getenv("OPENCDR_MANAGEMENT_CONTRACT_VERSION", "2.0.0")
 SECURITY_PROFILE = os.getenv("OPENCDR_SECURITY_PROFILE", "standard")
 DEPLOYMENT_STAGE = os.getenv("STAGE", "dev")
 DEPLOYMENT_ACCOUNT_ID = os.getenv("OPENCDR_ACCOUNT_ID", "")
@@ -151,11 +155,8 @@ ROLLBACK_ELIGIBLE_MODULES = {
 MAX_DATE_RANGE_DAYS = 31
 
 # Partitions GET /rules queries when no ?rule_kind filter is given.
-# Deliberately excludes "list" -- a list rule is a lookup table other rules
-# reference (in_list/not_in_list), not itself something a user browsing
-# "all rules" expects to see mixed in. Explicit ?rule_kind=list still works
-# via the single-partition branch in _handle_list_rules, which validates
-# against ALLOWED_RULE_KINDS directly.
+# Deliberately excludes legacy rule_kind=list records. They remain readable
+# only for migration; current reusable lists live behind /lists.
 _DEFAULT_RULE_LISTING_KINDS = {"signal", "correlation"}
 
 # ---------------------------------------------------------------------------
@@ -240,6 +241,7 @@ def lambda_handler(event, context):
                         "alert_schema": "opencdr.alert/1.0.0",
                         "rule_contract": RULE_CONTRACT_VERSION,
                         "immutable_rule_releases": True,
+                        "reusable_detection_lists": True,
                         "runtime_rule_verification": True,
                     },
                     "lambda_name": LAMBDA_NAME,
@@ -291,8 +293,26 @@ def lambda_handler(event, context):
         if path == "/logs" and method == "GET":
             return _handle_list_logs(qs)
 
+        # Reusable detection lists are independent, versioned resources.
+        if path == "/lists" and method == "GET":
+            return _handle_list_detection_lists(qs)
+        if path == "/lists" and method == "POST":
+            return _handle_put_detection_list(
+                None, _parse_json_body(event), _get_api_key_id(event), create_only=True
+            )
+        if path.startswith("/lists/"):
+            list_id = path_params.get("list_id") or path.split("/", 2)[2]
+            if method == "GET":
+                return _handle_get_detection_list(list_id)
+            if method == "PUT":
+                return _handle_put_detection_list(
+                    list_id, _parse_json_body(event), _get_api_key_id(event)
+                )
+            if method == "DELETE":
+                return _handle_delete_detection_list(list_id)
+
         # ------------------------------------------------------------------
-        # /rules (list/create)
+        # /rules (list/create; legacy rule_kind=list records are read-only)
         #
         # Table:
         #   PK: rule_kind (signal|correlation|list)
@@ -325,13 +345,25 @@ def lambda_handler(event, context):
                 raise ValueError("rule must be an object")
             if not isinstance(events, list) or not all(isinstance(item, dict) for item in events):
                 raise ValueError("events must be a list of objects")
-            if not isinstance(lists, dict) or not all(
-                isinstance(key, str) and isinstance(value, list) for key, value in lists.items()
-            ):
-                raise ValueError("lists must be an object of list_id to values")
+            if not isinstance(lists, dict):
+                raise ValueError("lists must be an object of list_id to values or list snapshots")
+            parsed_evaluation_lists: dict[str, Any] = {}
+            for list_id, value in lists.items():
+                if not isinstance(list_id, str):
+                    raise ValueError("lists keys must be list IDs")
+                if isinstance(value, list):
+                    parsed_evaluation_lists[list_id] = value
+                elif isinstance(value, dict):
+                    parsed_evaluation_lists[list_id] = validate_list_document(
+                        value, force_list_id=list_id
+                    )
+                else:
+                    raise ValueError(
+                        "lists values must be arrays or objects with matcher and values"
+                    )
             if len(events) > 500:
                 raise ValueError("events must contain at most 500 records")
-            return _response(200, evaluate_candidate(rule, events, lists=lists))
+            return _response(200, evaluate_candidate(rule, events, lists=parsed_evaluation_lists))
 
         if path == "/rules/runtime-status" and method == "GET":
             return _handle_rule_runtime_status()
@@ -475,6 +507,8 @@ def _required_scope_for(method: str, path: str) -> str | None:
     if path in ("/status", "/help"):
         return None
     if path == "/rules" or path.startswith("/rules/"):
+        return "read" if method == "GET" else "rules"
+    if path == "/lists" or path.startswith("/lists/"):
         return "read" if method == "GET" else "rules"
     if path.startswith("/rule-releases/"):
         return "rules"
@@ -1032,7 +1066,9 @@ def _handle_rule_metrics(qs: dict[str, str]) -> dict:
             )
             aggregate["detections"] += 1
             aggregate["notification_requested"] += 1 if item.get("notify") is not False else 0
-            aggregate["response_requested"] += 1 if item.get("response_module") else 0
+            aggregate["response_requested"] += (
+                1 if item.get("response_module") or item.get("response_actions") else 0
+            )
             if item.get("detection_id"):
                 detection_groups[str(item["detection_id"])] = key
     # IR action records exist only after a rollback-eligible response succeeds.
@@ -1368,6 +1404,172 @@ def _handle_apply_rule_release(manifest: dict[str, Any], api_key_id: str | None)
     )
 
 
+def _public_list_metadata(item: dict[str, Any]) -> dict[str, Any]:
+    return {
+        key: item[key]
+        for key in (
+            "list_id",
+            "matcher",
+            "value_type",
+            "description",
+            "labels",
+            "active_version",
+            "entry_count",
+            "rev",
+            "created_at",
+            "created_by",
+            "updated_at",
+            "updated_by",
+        )
+        if key in item
+    }
+
+
+def _active_list_values(meta: dict[str, Any]) -> list[str]:
+    token = str(meta.get("active_version_id") or "")
+    if not token:
+        return []
+    prefix = f"VERSION#{token}#VALUE#"
+    values: list[str] = []
+    kwargs: dict[str, Any] = {
+        "KeyConditionExpression": Key("list_id").eq(str(meta["list_id"]))
+        & Key("item_key").begins_with(prefix),
+        "ConsistentRead": True,
+    }
+    while True:
+        response = detection_lists_table.query(**kwargs)
+        values.extend(str(item["value"]) for item in response.get("Items", []))
+        cursor = response.get("LastEvaluatedKey")
+        if not cursor:
+            break
+        kwargs["ExclusiveStartKey"] = cursor
+    return sorted(values)
+
+
+def _handle_list_detection_lists(qs: dict[str, str]) -> dict:
+    limit = _parse_limit(qs, default=50, max_limit=200)
+    kwargs: dict[str, Any] = {
+        "IndexName": "gsi_list_metadata",
+        "KeyConditionExpression": Key("item_type").eq("METADATA"),
+        "Limit": limit,
+    }
+    cursor = _decode_next_token(qs.get("next_token"))
+    if cursor:
+        kwargs["ExclusiveStartKey"] = cursor
+    response = detection_lists_table.query(**kwargs)
+    return _response(
+        200,
+        {
+            "items": [_public_list_metadata(item) for item in response.get("Items", [])],
+            "next_token": _encode_next_token(response.get("LastEvaluatedKey")),
+        },
+    )
+
+
+def _handle_get_detection_list(list_id: str) -> dict:
+    response = detection_lists_table.get_item(
+        Key={"list_id": list_id, "item_key": "META"}, ConsistentRead=True
+    )
+    meta = response.get("Item")
+    if not meta:
+        return _response(404, {"message": "List not found"})
+    return _response(200, {**_public_list_metadata(meta), "values": _active_list_values(meta)})
+
+
+def _handle_put_detection_list(
+    list_id: str | None,
+    body: dict[str, Any],
+    api_key_id: str | None,
+    *,
+    create_only: bool = False,
+) -> dict:
+    document = validate_list_document(body, force_list_id=list_id)
+    list_id = document["list_id"]
+    current = detection_lists_table.get_item(
+        Key={"list_id": list_id, "item_key": "META"}, ConsistentRead=True
+    ).get("Item")
+    if create_only and current:
+        return _response(409, {"message": "List already exists", "current_rev": current.get("rev")})
+
+    expected_rev = document.pop("expected_rev", None)
+    if current and expected_rev is None:
+        raise ValueError("expected_rev is required when updating an existing list")
+    if current and expected_rev != int(current.get("rev", 0)):
+        return _response(
+            409, {"message": "Revision conflict", "current_rev": current.get("rev", 0)}
+        )
+
+    now = datetime.now(UTC).isoformat()
+    version_token = str(uuid.uuid4())
+    next_version = int((current or {}).get("active_version", 0)) + 1
+    with detection_lists_table.batch_writer() as batch:
+        for value in document["values"]:
+            digest = hashlib.sha256(value.encode("utf-8")).hexdigest()
+            batch.put_item(
+                Item={
+                    "list_id": list_id,
+                    "item_key": f"VERSION#{version_token}#VALUE#{digest}",
+                    "version": next_version,
+                    "value": value,
+                }
+            )
+
+    meta = {
+        "list_id": list_id,
+        "item_key": "META",
+        "item_type": "METADATA",
+        "matcher": document["matcher"],
+        "value_type": document["value_type"],
+        "description": document["description"],
+        "labels": document["labels"],
+        "active_version": next_version,
+        "active_version_id": version_token,
+        "entry_count": len(document["values"]),
+        "rev": int((current or {}).get("rev", 0)) + 1,
+        "created_at": (current or {}).get("created_at", now),
+        "created_by": (current or {}).get("created_by", api_key_id or "unknown"),
+        "updated_at": now,
+        "updated_by": api_key_id or "unknown",
+    }
+    try:
+        if current:
+            detection_lists_table.put_item(
+                Item=meta,
+                ConditionExpression=Attr("rev").eq(expected_rev),
+            )
+        else:
+            detection_lists_table.put_item(
+                Item=meta,
+                ConditionExpression=Attr("list_id").not_exists(),
+            )
+    except Exception as exc:
+        if "ConditionalCheckFailed" in repr(exc):
+            return _response(409, {"message": "Revision conflict"})
+        raise
+    return _response(
+        201 if current is None else 200,
+        {**_public_list_metadata(meta), "values": document["values"]},
+    )
+
+
+def _handle_delete_detection_list(list_id: str) -> dict:
+    response = detection_lists_table.query(KeyConditionExpression=Key("list_id").eq(list_id))
+    if not response.get("Items"):
+        return _response(404, {"message": "List not found"})
+    with detection_lists_table.batch_writer() as batch:
+        while True:
+            for item in response.get("Items", []):
+                batch.delete_item(Key={"list_id": item["list_id"], "item_key": item["item_key"]})
+            cursor = response.get("LastEvaluatedKey")
+            if not cursor:
+                break
+            response = detection_lists_table.query(
+                KeyConditionExpression=Key("list_id").eq(list_id),
+                ExclusiveStartKey=cursor,
+            )
+    return _response(200, {"deleted": True, "list_id": list_id})
+
+
 def _handle_list_rules(qs: dict[str, str]) -> dict:
     """
     GET /rules
@@ -1377,8 +1579,8 @@ def _handle_list_rules(qs: dict[str, str]) -> dict:
 
     If rule_kind is omitted, every partition in _DEFAULT_RULE_LISTING_KINDS
     is queried directly (never a Scan) and merged -- see
-    _list_rules_all_partitions. This excludes "list" by default; pass
-    ?rule_kind=list explicitly to see those.
+    _list_rules_all_partitions. This excludes legacy "list" records by
+    default; pass ?rule_kind=list when inventorying data for migration.
     """
     rule_kind = qs.get("rule_kind")
     order = _parse_order(qs)
@@ -1517,6 +1719,8 @@ def _handle_create_rule(body: dict, api_key_id: str | None = None) -> dict:
 
     Uses a conditional put to prevent overwriting.
     """
+    if str(body.get("rule_kind") or "").lower() == "list":
+        raise ValueError("rule_kind=list is read-only legacy data; use POST /lists")
     normalized = _normalize_rule_payload(body, force_rule_id=None, actor=api_key_id)
 
     try:
@@ -1549,6 +1753,8 @@ def _handle_update_rule(rule_id: str, body: dict, api_key_id: str | None = None)
     silently clobbering a concurrent edit. Omit it for an unconditional
     upsert.
     """
+    if str(body.get("rule_kind") or "").lower() == "list":
+        raise ValueError("rule_kind=list is read-only legacy data; use PUT /lists/{list_id}")
     expected_rev = _pop_expected_rev(body)
     # must keep key stable
     normalized = _normalize_rule_payload(body, force_rule_id=rule_id, actor=api_key_id)
@@ -1685,7 +1891,12 @@ def _normalize_rule_payload(
                 f"response_module must be one of {sorted(ALLOWED_RESPONSE_MODULES)} or empty"
             )
 
-    if response_module:
+    response_actions = data.get("response_actions", [])
+    validate_response_actions(response_actions)
+    if response_module and response_actions:
+        raise ValueError("response_module and response_actions cannot both be configured")
+
+    if response_module or response_actions:
         source_conditions = []
         for field in ("conditions", "signal_conditions"):
             values = data.get(field) or []
@@ -1752,7 +1963,7 @@ def _normalize_rule_payload(
             if not isinstance(value, list) or not value:
                 raise ValueError(f"conditions[{i}].value must be a non-empty list for op={op}")
         elif op in _LIST_CONDITION_OPS:
-            # References a rule_kind="list" rule by id rather than an
+            # References a reusable /lists resource by id rather than an
             # inline value -- detection_engine.evaluate_condition looks it
             # up as lists[list_id], not conditions[i].value.
             if not isinstance(list_id, str) or not list_id.strip():
@@ -2335,6 +2546,16 @@ def _help_payload() -> dict:
             },
             "/status": {"method": "GET"},
             "/help": {"method": "GET"},
+            "/lists": {
+                "methods": ["GET", "POST"],
+                "description": "List or create reusable, versioned exact/CIDR detection lists.",
+                "required_fields": ["list_id", "matcher", "values"],
+                "optional_metadata": ["value_type", "description", "labels"],
+            },
+            "/lists/{list_id}": {
+                "methods": ["GET", "PUT", "DELETE"],
+                "notes": "PUT requires matcher and values; existing-list updates also require expected_rev from GET. Every update activates a new immutable value snapshot. DELETE removes all versions.",
+            },
             "/signals": {
                 "method": "GET",
                 "description": "List signals using base table or GSIs with cursor pagination.",
@@ -2377,9 +2598,9 @@ def _help_payload() -> dict:
             },
             "/rules": {
                 "methods": ["GET", "POST"],
-                "description": "Rules live in DynamoDB keyed by (rule_kind, rule_id).",
+                "description": "Signal/correlation rules live in DynamoDB keyed by (rule_kind, rule_id). Legacy list records are readable only for migration.",
                 "query_params": {
-                    "rule_kind": "Optional. One of signal|correlation|list. If omitted, signal and correlation partitions "
+                    "rule_kind": "Optional for GET. One of signal|correlation|list; list is legacy read-only. If omitted, signal and correlation partitions "
                     "is queried directly (never a table scan) and merged -- page_size then caps "
                     "each partition independently, so a response can hold more than page_size items.",
                     "order": "asc|desc affects rule_id ordering within a kind (sort key is rule_id).",
@@ -2394,7 +2615,7 @@ def _help_payload() -> dict:
             "/rules/{rule_id}": {
                 "methods": ["GET", "PUT", "DELETE"],
                 "query_params": {
-                    "rule_kind": "Required (because PK is rule_kind).",
+                    "rule_kind": "Required for GET/DELETE. PUT takes signal|correlation rule_kind from the body.",
                 },
             },
             "/rules/schema": {

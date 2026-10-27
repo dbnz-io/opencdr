@@ -10,6 +10,8 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from .response_actions import ALLOWED_RESPONSE_MODULES, validate_response_actions
+
 ALLOWED_SEVERITIES = {"CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO", "INFORMATIONAL", "UNKNOWN"}
 ALLOWED_RULE_KINDS = {"signal", "correlation", "list"}
 ALLOWED_FIELD_ROOTS = frozenset(
@@ -42,27 +44,6 @@ ALLOWED_FIELD_ROOTS = frozenset(
         "runtime_entity",
     }
 )
-ALLOWED_RESPONSE_MODULES = {
-    "disable_access_key",
-    "disable_user",
-    "delete_user",
-    "disable_role",
-    "revoke_active_sessions",
-    "delete_inline_policy",
-    "block_s3_public_access",
-    "block_s3_bucket_public_access",
-    "block_s3_object_public_access",
-    "quarantine_s3_bucket",
-    "isolate_ec2_instances",
-    "deauthorize_security_group_rules",
-    "disable_lambda_function",
-    "disable_secrets_manager_secret",
-    "revoke_rds_snapshot_public_access",
-    "enable_cloudtrail_logging",
-    "enable_guardduty_detector",
-    "start_config_recorder",
-    "enable_security_hub",
-}
 ALLOWED_CONDITION_OPS = {
     "equals",
     "not_equals",
@@ -175,11 +156,16 @@ def validate_rule_document(payload: Any) -> None:
         raise ValueError(
             f"response_module must be one of {sorted(ALLOWED_RESPONSE_MODULES)} or empty"
         )
+    response_actions = payload.get("response_actions", [])
+    validate_response_actions(response_actions)
+    if response_module and response_actions:
+        raise ValueError("response_module and response_actions cannot both be configured")
+    has_response = bool(response_module or response_actions)
 
     if rule_kind == "signal":
         _validate_conditions(payload.get("conditions"), "conditions", require_nonempty=True)
         source_conditions = payload["conditions"]
-        if response_module and any(
+        if has_response and any(
             condition.get("field") == "integration_id"
             or (
                 condition.get("field") == "source" and condition.get("value") in {"falco", "custom"}
@@ -211,7 +197,7 @@ def validate_rule_document(payload: Any) -> None:
     _validate_conditions(
         payload.get("signal_conditions"), "signal_conditions", require_nonempty=False
     )
-    if response_module and any(
+    if has_response and any(
         condition.get("field") == "integration_id"
         or (condition.get("field") == "source" and condition.get("value") in {"falco", "custom"})
         for condition in payload["signal_conditions"]

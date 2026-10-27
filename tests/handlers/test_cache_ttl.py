@@ -52,15 +52,17 @@ class TestProcessorRulesCacheExpiry:
         logger = MagicMock()
         aws = MagicMock()
         monkeypatch.setattr(processor, "RULES_TTL_SECONDS", 60)
-        raw = [{"rule_id": "blocklist", "values": ["1.2.3.4"]}]
+        snapshots = {"blocklist": {"matcher": "exact", "version": 1, "values": ["1.2.3.4"]}}
 
-        with patch("src.handlers.processor.load_detection_rules", return_value=raw) as load_rules:
+        with patch(
+            "src.handlers.processor.load_detection_lists", return_value=snapshots
+        ) as load_lists:
             with patch("src.handlers.processor.time.time", return_value=1000.0):
                 processor.get_lists(aws, logger)
             with patch("src.handlers.processor.time.time", return_value=1061.0):
                 processor.get_lists(aws, logger)
 
-        assert load_rules.call_count == 2
+        assert load_lists.call_count == 2
 
 
 class TestAlerterCorrRulesCacheExpiry:

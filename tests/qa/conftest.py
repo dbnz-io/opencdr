@@ -42,6 +42,11 @@ class App:
 
     def rule(self, name="cloudtrail/009_admin_policy_attached.json", **overrides):
         rule = json.loads((ROOT / "support_files/detection_rules" / name).read_text())
+        # Existing QA callers use response_module="" as the explicit
+        # "unarmed" override. Catalog rules now use response_actions, so
+        # preserve that helper contract by removing the v1 configuration.
+        if "response_module" in overrides:
+            rule.pop("response_actions", None)
         rule.update(overrides)
         self.call("POST", "/rules", rule, status=201)
         return rule

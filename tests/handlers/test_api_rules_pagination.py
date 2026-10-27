@@ -22,7 +22,7 @@ from src.handlers import api
 
 # sorted(_DEFAULT_RULE_LISTING_KINDS) -- the fixed partition query order
 # this file asserts against throughout. Not ALLOWED_RULE_KINDS directly:
-# that also includes "list" (rule_kind=list lookup tables), which GET
+# that also includes legacy "list" records, which GET
 # /rules deliberately excludes from its default, unfiltered listing --
 # see _DEFAULT_RULE_LISTING_KINDS's own comment in api.py.
 PARTITIONS = sorted(api._DEFAULT_RULE_LISTING_KINDS)

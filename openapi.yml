@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: OpenCDR Core API
-  version: "1.2.0"
+  version: "2.0.0"
   description: >-
     OpenCDR Core management API: signals, logs, detection rules, detection lists,
     notification settings, IR-role mappings, and executed IR actions. All
@@ -272,7 +272,7 @@ components:
           nullable: true
         list_id:
           type: string
-          description: Required for in_list/not_in_list; references a rule_kind=list rule.
+          description: Required for in_list/not_in_list; references a reusable /lists resource.
       required: [field, op]
 
     Rule:
@@ -290,7 +290,13 @@ components:
         response_module:
           type: string
           nullable: true
-          description: Empty/absent = visibility-only. A non-empty value must be a registered handler.
+          description: Legacy single-action configuration. Mutually exclusive with response_actions.
+        response_actions:
+          type: array
+          maxItems: 10
+          description: Ordered response actions with module-specific target keys mapped to detection fields.
+          items:
+            $ref: "#/components/schemas/ResponseAction"
         conditions:
           type: array
           items: { $ref: "#/components/schemas/Condition" }
@@ -310,6 +316,20 @@ components:
           description: Monotonic version for optimistic concurrency (see expected_rev).
       required: [rule_kind, rule_id]
 
+    ResponseAction:
+      type: object
+      additionalProperties: false
+      required: [module, target]
+      properties:
+        module:
+          type: string
+          description: Registered response module. Its accepted target keys are returned by GET /rules/schema.
+        target:
+          type: object
+          additionalProperties:
+            type: string
+          description: Map of fixed module argument names to detection-event field paths.
+
     RuleWrite:
       type: object
       description: Body for POST /rules or PUT /rules/{rule_id}.
@@ -325,7 +345,8 @@ components:
 
     ListRule:
       type: object
-      description: A detection list (rule_kind=list) referenced by in_list/not_in_list.
+      deprecated: true
+      description: Legacy rule_kind=list representation; use /lists instead.
       additionalProperties: true
       properties:
         rule_kind: { type: string, enum: [list] }
@@ -339,6 +360,74 @@ components:
         timestamp: { type: string }
         rev: { type: integer }
       required: [rule_kind, rule_id, values]
+
+    DetectionListWrite:
+      type: object
+      additionalProperties: false
+      required: [matcher, values]
+      properties:
+        list_id: { type: string, minLength: 1, maxLength: 128 }
+        matcher: { type: string, enum: [exact, cidr] }
+        value_type:
+          type: string
+          enum: [string, ip, cidr, iam_user, arn, aws_account_id, resource_id]
+          description: Optional operator metadata; defaults to cidr for the cidr matcher and string otherwise.
+        values:
+          type: array
+          minItems: 1
+          maxItems: 10000
+          uniqueItems: true
+          items: { type: string, minLength: 1, maxLength: 2048 }
+        description: { type: string, maxLength: 2048 }
+        labels:
+          type: array
+          maxItems: 50
+          items: { type: string, minLength: 1, maxLength: 128 }
+        expected_rev:
+          type: integer
+          minimum: 0
+          description: Required when updating an existing list; omit when creating.
+
+    DetectionListMetadata:
+      type: object
+      additionalProperties: false
+      required: [list_id, matcher, value_type, active_version, entry_count, rev]
+      properties:
+        list_id: { type: string }
+        matcher: { type: string, enum: [exact, cidr] }
+        value_type:
+          type: string
+          enum: [string, ip, cidr, iam_user, arn, aws_account_id, resource_id]
+        description: { type: string }
+        labels: { type: array, items: { type: string } }
+        active_version: { type: integer, readOnly: true }
+        entry_count: { type: integer, readOnly: true }
+        rev: { type: integer, readOnly: true }
+        created_at: { type: string, format: date-time, readOnly: true }
+        created_by: { type: string, readOnly: true }
+        updated_at: { type: string, format: date-time, readOnly: true }
+        updated_by: { type: string, readOnly: true }
+
+    DetectionListSnapshot:
+      type: object
+      additionalProperties: true
+      required: [list_id, matcher, value_type, values, active_version, entry_count, rev]
+      properties:
+        list_id: { type: string }
+        matcher: { type: string, enum: [exact, cidr] }
+        value_type:
+          type: string
+          enum: [string, ip, cidr, iam_user, arn, aws_account_id, resource_id]
+        values: { type: array, items: { type: string } }
+        description: { type: string }
+        labels: { type: array, items: { type: string } }
+        active_version: { type: integer }
+        entry_count: { type: integer }
+        rev: { type: integer }
+        created_at: { type: string, format: date-time }
+        created_by: { type: string }
+        updated_at: { type: string, format: date-time }
+        updated_by: { type: string }
 
     RuleListResponse:
       type: object
@@ -498,6 +587,9 @@ components:
       additionalProperties: true
       properties:
         detection_id: { type: string }
+        source_detection_id:
+          type: string
+          description: Triggering detection/alert ID; differs from detection_id for multi-action rules.
         response_module: { type: string }
         rollback_supported: { type: boolean }
         rollback_status:
@@ -895,13 +987,90 @@ paths:
               schema: { $ref: "#/components/schemas/LogListResponse" }
         "400": { $ref: "#/components/responses/BadRequest" }
 
+  /lists:
+    get:
+      summary: List reusable detection lists
+      parameters:
+        - { $ref: "#/components/parameters/PageSize" }
+        - { $ref: "#/components/parameters/NextToken" }
+      responses:
+        "200":
+          description: Metadata for active lists (values are returned by GET /lists/{list_id}).
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items: { type: array, items: { $ref: "#/components/schemas/DetectionListMetadata" } }
+                  next_token: { type: string, nullable: true }
+    post:
+      summary: Create a reusable detection list
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - { $ref: "#/components/schemas/DetectionListWrite" }
+                - { type: object, required: [list_id] }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DetectionListSnapshot" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "409": { $ref: "#/components/responses/Conflict" }
+
+  /lists/{list_id}:
+    parameters:
+      - { in: path, name: list_id, required: true, schema: { type: string } }
+    get:
+      summary: Get the active list snapshot
+      responses:
+        "200":
+          description: Active snapshot
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DetectionListSnapshot" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    put:
+      summary: Create or activate a new immutable list version
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/DetectionListWrite" }
+      responses:
+        "200":
+          description: Updated
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DetectionListSnapshot" }
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DetectionListSnapshot" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "409": { $ref: "#/components/responses/Conflict" }
+    delete:
+      summary: Delete a list and all of its stored versions
+      responses:
+        "200":
+          description: Deleted
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        "404": { $ref: "#/components/responses/NotFound" }
+
   /rules:
     get:
       summary: List rules
       parameters:
         - in: query
           name: rule_kind
-          description: Omit to merge signal+correlation. Pass list explicitly for detection lists.
+          description: Omit to merge signal+correlation. The list option is legacy; use /lists.
           schema: { type: string, enum: [signal, correlation, list] }
         - { $ref: "#/components/parameters/Order" }
         - { $ref: "#/components/parameters/PageSize" }
@@ -973,7 +1142,12 @@ paths:
               properties:
                 rule: { $ref: "#/components/schemas/RuleWrite" }
                 events: { type: array, maxItems: 500, items: { type: object, additionalProperties: true } }
-                lists: { type: object, additionalProperties: { type: array, items: { type: string } } }
+                lists:
+                  type: object
+                  additionalProperties:
+                    oneOf:
+                      - { type: array, items: { type: string } }
+                      - { $ref: "#/components/schemas/DetectionListWrite" }
       responses:
         "200":
           description: Analysis-only evaluation result
@@ -1049,7 +1223,7 @@ paths:
     parameters:
       - { in: path, name: rule_id, required: true, schema: { type: string } }
     get:
-      summary: Get a rule
+      summary: Get a rule or a legacy list record for migration
       parameters:
         - in: query
           name: rule_kind
@@ -1066,12 +1240,7 @@ paths:
                   - $ref: "#/components/schemas/ListRule"
         "404": { $ref: "#/components/responses/NotFound" }
     put:
-      summary: Upsert a rule (optional optimistic concurrency via expected_rev)
-      parameters:
-        - in: query
-          name: rule_kind
-          required: true
-          schema: { type: string, enum: [signal, correlation, list] }
+      summary: Upsert a signal or correlation rule (optional optimistic concurrency via expected_rev)
       requestBody:
         required: true
         content:
@@ -1087,7 +1256,7 @@ paths:
         "403": { $ref: "#/components/responses/Forbidden" }
         "409": { $ref: "#/components/responses/Conflict" }
     delete:
-      summary: Delete a rule
+      summary: Delete a rule or remove a legacy list after migration
       parameters:
         - in: query
           name: rule_kind

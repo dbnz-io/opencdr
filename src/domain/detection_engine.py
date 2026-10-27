@@ -8,7 +8,9 @@ from typing import Any
 
 import regex
 
+from .detection_lists import list_matches, referenced_list_versions
 from .ocsf_min_parser import NormalizedEvent
+from .response_actions import resolve_response_actions
 
 # Pure domain logic deliberately has no dependency on src/infra/ (no Logger
 # instance threaded through get_field/evaluate_condition/rule_matches/
@@ -120,7 +122,7 @@ def get_field(obj: Any, path: str):
 
 
 def evaluate_condition(
-    event: NormalizedEvent, cond: dict, lists: dict[str, list] | None = None
+    event: NormalizedEvent, cond: dict, lists: dict[str, Any] | None = None
 ) -> bool:
     field = cond.get("field")
     op = cond.get("op", "exists")
@@ -162,13 +164,13 @@ def evaluate_condition(
 
     if op == "in_list":
         list_id = cond.get("list_id", "")
-        values = (lists or {}).get(list_id, [])
-        return observed in [str(v) for v in values]
+        snapshot = (lists or {}).get(list_id)
+        return snapshot is not None and list_matches(observed, snapshot)
 
     if op == "not_in_list":
         list_id = cond.get("list_id", "")
-        values = (lists or {}).get(list_id, [])
-        return observed not in [str(v) for v in values]
+        snapshot = (lists or {}).get(list_id)
+        return snapshot is not None and not list_matches(observed, snapshot)
 
     if op == "contains":
         return str(value) in observed
@@ -204,7 +206,7 @@ def evaluate_condition(
     return False
 
 
-def rule_matches(event: NormalizedEvent, rule: dict, lists: dict[str, list] | None = None) -> bool:
+def rule_matches(event: NormalizedEvent, rule: dict, lists: dict[str, Any] | None = None) -> bool:
     conditions = rule.get("conditions", [])
 
     if not conditions:
@@ -245,6 +247,7 @@ def build_detection_event(
         "contract_version": rule.get("contract_version"),
         "notify": rule.get("notify", True),
         "response_module": rule.get("response_module"),
+        "response_actions": rule.get("response_actions", []),
         "playbook": rule.get("playbook"),
         # normalized event context
         "event_id": normalized_event.event_id,
@@ -283,6 +286,7 @@ def build_detection_event(
             event_time=normalized_event.time,
             cloud_provider=normalized_event.cloud_provider,
             response_module=None,
+            response_actions=[],
             playbook=None,
         )
 
@@ -293,6 +297,11 @@ def build_detection_event(
     # couldn't be grouped by that field for correlation anyway.
     if normalized_event.actor.user_name:
         detection["actor_user_name"] = normalized_event.actor.user_name
+
+    if detection.get("response_actions"):
+        detection["resolved_response_actions"] = resolve_response_actions(
+            detection, detection["response_actions"]
+        )
 
     return detection
 
@@ -305,7 +314,7 @@ def build_detection_event(
 def run_detection(
     normalized_event: NormalizedEvent,
     rules: list[dict],
-    lists: dict[str, list] | None = None,
+    lists: dict[str, Any] | None = None,
 ) -> list[dict]:
 
     detections: list[dict] = []
@@ -318,6 +327,9 @@ def run_detection(
             continue
 
         detection = build_detection_event(normalized_event, rule)
+        list_versions = referenced_list_versions(rule, lists or {})
+        if list_versions:
+            detection["list_versions"] = list_versions
         detections.append(detection)
 
     return detections

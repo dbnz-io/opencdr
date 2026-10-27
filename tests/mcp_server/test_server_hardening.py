@@ -307,7 +307,7 @@ def test_lists_replace_is_whole_object_put(api_env):
         server.opencdr_lists_replace("ioc", "desc", ["a", "b"])
     method, path = mock_req.call_args.args[0], mock_req.call_args.args[1]
     assert method == "PUT"
-    assert path == "/rules/ioc?rule_kind=list"
+    assert path == "/lists/ioc"
     assert mock_req.call_args.kwargs["json"]["values"] == ["a", "b"]
 
 

@@ -1,6 +1,6 @@
 # API Reference
 
-*The REST API's authentication model and endpoint surface — for exact request/response schemas, [`openapi.yml`](../openapi.yml) is the authoritative machine-readable spec, though see the note below on where it's currently out of sync with the actual code.*
+*The REST API's authentication model and endpoint surface — for exact request/response schemas, [`openapi.yml`](../openapi.yml) is the authoritative machine-readable spec.*
 
 `GET /status` is OpenCDR Core's stable liveness and deployment-identity contract. It reports the Core version, management-contract version, account, home region, stage, and advertised capabilities; see [Management contract](management-contract.md).
 
@@ -70,14 +70,9 @@ claude mcp add opencdr \
   -- python /path/to/mcp_server/server.py
 ```
 
-## A note on `openapi.yml`
+## Machine-readable contract
 
-`openapi.yml` is the canonical machine-readable API contract, including detection-rule validation, evaluation, release, and runtime-verification endpoints.
-
-- It **omits `/ir-roles`, `/ir-actions`, and `/signals/stats` entirely** — all three are fully implemented in `src/handlers/api.py` and wired in `serverless.yml`, added after `openapi.yml` was last regenerated.
-- `/swagger.json` and `/docs` are documented but **not implemented** — `api.py`'s routing table has no handler for either path; a request to them returns the same 404 as any unrouted path.
-
-The embedded `/docs` page is informational; use the repository `openapi.yml` for generated clients and drift checks.
+`openapi.yml` is the canonical machine-readable API contract and is tested against the routes wired by `serverless.yml`. `src/openapi/swagger.json` is a JSON serialization of the same contract for packaged consumers. Neither `/swagger.json` nor `/docs` is a served management endpoint; use the repository or installed-package artifact for generated clients.
 
 ## Endpoints
 
@@ -131,17 +126,48 @@ curl "$OPENCDR_API_URL/logs?service=OPENCDR-PROCESSOR&date_from=2026-08-01&date_
 
 | Method | Path | Notes |
 |---|---|---|
-| `GET` | `/rules` | Optional `rule_kind` filter (`signal`/`correlation`/`list`); omitted, queries the `signal`+`correlation` partitions and merges (`list` rules are excluded from the unfiltered default — pass `?rule_kind=list` explicitly) |
+| `GET` | `/rules` | Optional `rule_kind` filter (`signal`/`correlation`); legacy `list` reads remain during migration |
 | `POST` | `/rules` | Create a rule |
 | `GET` | `/rules/{rule_id}` | `rule_kind` query param required to know which partition to read |
-| `PUT` | `/rules/{rule_id}` | Update a rule |
-| `DELETE` | `/rules/{rule_id}` | Delete a rule |
+| `PUT` | `/rules/{rule_id}` | Update a signal/correlation rule; `rule_kind` is in the body |
+| `DELETE` | `/rules/{rule_id}` | Delete a rule; `rule_kind` query parameter required |
 | `GET` | `/rules/schema` | Versioned authoring and compatibility contract |
 | `POST` | `/rules/validate` | Structured, side-effect-free candidate validation |
 | `POST` | `/rules/evaluate` | Candidate evaluation against supplied fixtures; no notifications, response, or writes |
 | `GET` | `/rules/runtime-status` | Stored catalog versus signal/correlation evaluator observation |
 | `POST` | `/rule-releases/plan` | Preview exact manifest convergence |
 | `POST` | `/rule-releases/apply` | Idempotent revision-guarded exact release application |
+
+Rules may use `response_actions` to configure up to ten ordered response modules. Each action maps
+the module's fixed argument names to field paths in the triggering detection—for example,
+`{"module":"disable_user","target":{"user_name":"actor.user_name"}}`. The accepted target
+keys and field-path roots are module-specific and are returned by `GET /rules/schema`. The legacy
+single `response_module` field remains readable and writable for compatibility, but it is mutually
+exclusive with `response_actions`. See [Incident Response](incident-response.md#response-modules)
+for target-resolution and failure behavior.
+
+### Reusable lists
+
+| Method | Path | Notes |
+|---|---|---|
+| `GET` | `/lists` | Paginated list metadata; values are intentionally omitted |
+| `POST` | `/lists` | Create from `list_id`, `matcher`, `values`, and optional metadata |
+| `GET` | `/lists/{list_id}` | Read the active version and its values |
+| `PUT` | `/lists/{list_id}` | Create or activate a new immutable value snapshot; updates require `expected_rev` |
+| `DELETE` | `/lists/{list_id}` | Delete metadata and all stored versions |
+
+`matcher` is `exact` or `cidr`. `value_type` is descriptive metadata (`string`, `ip`, `cidr`,
+`iam_user`, `arn`, `aws_account_id`, or `resource_id`). A rule references the stable ID with
+`{"field":"actor.user_name","op":"in_list","list_id":"admin-users"}`. List data is not
+embedded in rule-release manifests, so a shared list can change without republishing rulesets.
+`matcher` and a non-empty `values` array are required. `value_type`, `description`, and `labels`
+are optional metadata; `value_type` defaults to `cidr` for CIDR lists and `string` otherwise. Updates become visible to warm evaluators after their cache refresh (normally
+within 60 seconds). Each update retains another internal snapshot, so frequently changing very large
+lists increases DynamoDB storage. `DELETE` removes the metadata and all stored versions.
+
+Legacy `rule_kind=list` rows can still be read and deleted through `/rules` for migration, but new
+legacy writes are rejected. Migrate the complete legacy set before relying on `/lists`; the evaluator
+uses legacy rows only while the dedicated table has no list metadata.
 
 ```bash
 curl -X POST "$OPENCDR_API_URL/rules" -H "x-api-key: $OPENCDR_API_KEY" \
@@ -159,7 +185,7 @@ See [Detection Rules](detection-rules.md) for the full rule schema.
 
 #### Optimistic concurrency & audit attribution
 
-Rule and settings writes are read-modify-write from clients (edit locally, `PUT` the whole item), so two writers can clobber each other. To make that safe, every stored rule/settings document carries a monotonic integer `rev`, and a `PUT` may include an `expected_rev` field: the write is then **conditional** on the stored `rev` still equalling it and returns `409` on a mismatch instead of silently overwriting a concurrent change (the item is stored with `rev = expected_rev + 1`). Omit `expected_rev` for an unconditional upsert (the previous behavior — used by bulk `load_rules.sh` and deliberate replaces). The OpenCDR MCP server's `opencdr_lists_add`/`opencdr_lists_remove`/`opencdr_settings_set` set `expected_rev` automatically and retry on `409` (bounded compare-and-set, not a lock).
+Rule, list, and settings writes are read-modify-write operations. Rules/settings accept an optional `expected_rev`; when supplied, the write is conditional on the stored revision and returns `409` on a mismatch. Existing list updates require `expected_rev` because every update replaces the complete active value set; creates omit it. The OpenCDR CLI and MCP list add/remove operations read the current revision and use bounded compare-and-set retries so concurrent edits are not silently lost.
 
 Every mutation also stamps `updated_by` from the **server-authenticated API-key id**, never from the request body — a client (or LLM) cannot forge who made a change. A body-supplied `updated_by` is discarded. `POST .../rollback` records the same server-side actor plus an optional `reason` and `interface` tag on the action's audit fields.
 
@@ -196,7 +222,7 @@ A write here directly controls which IAM role `responder` assumes in which AWS a
 | Method | Path | Notes |
 |---|---|---|
 | `GET` | `/ir-actions` | List executed, rollback-eligible IR actions (one row per detection responder acted on for one of the modules in `ROLLBACK_ELIGIBLE_MODULES`) |
-| `GET` | `/ir-actions/{detection_id}` | Read a specific action, including `rollback_supported` and, once a rollback has been attempted, `rollback_status` (`pending`/`succeeded`/`failed`), `rollback_error`, `rollback_updated_at`. `rolled_back` mirrors `rollback_status == "succeeded"` for back-compat — see [Incident Response](incident-response.md#rollback) for the full state machine |
+| `GET` | `/ir-actions/{detection_id}` | Read a specific action (the path value is the action ID for `response_actions`; `source_detection_id` links it to the detection), including `rollback_supported` and, once a rollback has been attempted, `rollback_status` (`pending`/`succeeded`/`failed`), `rollback_error`, `rollback_updated_at`. `rolled_back` mirrors `rollback_status == "succeeded"` for back-compat — see [Incident Response](incident-response.md#rollback) for the full state machine |
 | `POST` | `/ir-actions/{detection_id}/rollback` | Enqueue the rollback for async execution — returns `202` immediately, not the rollback's result, and sets `rollback_status: "pending"`. `400` if `rollback_supported` is false; `409` only if a rollback is already `pending` — a previously `failed` rollback can be retried |
 
 ```bash
@@ -207,7 +233,7 @@ A `POST .../rollback` only enqueues onto `ir-rollback-queue` — the actual undo
 
 ## Pagination
 
-Every list endpoint (`/signals`, `/logs`, `/rules`) shares the same cursor convention: `page_size` (1–200, default 20), `order` (`asc`/`desc`, default `desc`), and an opaque `next_token` returned in the response — pass it back as a query param to get the next page. `/rules` with no `rule_kind` filter queries both partitions independently and merges, so a single response can return up to `page_size` × 2 items — see the `notes` field in that response for the exact accounting. `/signals`' `severity` and `/logs`' `service` selectors merge-paginate across day-buckets instead (see above) — each page drains one day before moving to the next to preserve chronological order, so unlike `/rules` a single response never exceeds `page_size` items.
+The `/signals`, `/logs`, and `/rules` collection endpoints share the same cursor convention: `page_size` (1–200, default 20), `order` (`asc`/`desc`, default `desc`), and an opaque `next_token` returned in the response — pass it back as a query param to get the next page. `/rules` with no `rule_kind` filter queries both partitions independently and merges, so a single response can return up to `page_size` × 2 items — see the `notes` field in that response for the exact accounting. `/signals`' `severity` and `/logs`' `service` selectors merge-paginate across day-buckets instead (see above) — each page drains one day before moving to the next to preserve chronological order, so unlike `/rules` a single response never exceeds `page_size` items. `/lists` uses `page_size` (1–200, default 50) and `next_token`, but has no `order` parameter.
 
 ## Related pages
 
@@ -215,4 +241,4 @@ Every list endpoint (`/signals`, `/logs`, `/rules`) shares the same cursor conve
 - [Notifications](notifications.md) — `/settings` channel configuration in full
 - [Incident Response](incident-response.md) — `/ir-roles` and how resolution actually works
 - [Security](security.md) — the API key's real scope and secrets handling
-- [`openapi.yml`](../openapi.yml) — machine-readable spec (partial, see note above)
+- [`openapi.yml`](../openapi.yml) — complete machine-readable API contract

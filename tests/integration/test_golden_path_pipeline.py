@@ -76,7 +76,7 @@ def _sqs_record(body_obj: dict) -> dict:
 
 def test_correlation_alert_disable_user_receives_real_actor_user_name(monkeypatch):
     """This is the exact §1.1 scenario: a rule_021-shaped correlation alert
-    (group_by=actor.user_name, response_module=disable_user), built by the
+    (group_by=actor.user_name, response_actions=[disable_user]), built by the
     real correlation engine from a real IAM-event fixture, must resolve to
     the fixture's actor.user_name ("attacker") when responder executes it --
     not None."""
@@ -86,7 +86,9 @@ def test_correlation_alert_disable_user_receives_real_actor_user_name(monkeypatc
     assert signal["api"].get("error_code") is None
 
     correlation_rule = _load_json(RULES_DIR / "021_correlation_iam_activity_burst.json")
-    assert correlation_rule["response_module"] == "disable_user"
+    assert correlation_rule["response_actions"] == [
+        {"module": "disable_user", "target": {"user_name": "group_value"}}
+    ]
     threshold = correlation_rule["threshold"]
 
     repo = _FakeSignalsRepository([signal] * threshold)
@@ -122,7 +124,7 @@ def test_signal_level_disable_user_still_works(monkeypatch):
     signal-level path shows up here too, not just in the correlation case."""
     raw_event = _load_json(FIXTURES_DIR / "009_admin_policy_attached.json")
     rule = _load_json(RULES_DIR / "009_admin_policy_attached.json")
-    assert rule["response_module"] == "disable_user"
+    assert rule["response_actions"][0]["module"] == "disable_user"
 
     router = build_default_router()
     normalized = router.parse(raw_event)
@@ -168,7 +170,9 @@ def test_cross_source_correlation_actor_based_disable_user(monkeypatch):
     correlation_rule = _load_json(
         CORRELATION_RULES_DIR / "029_correlation_guardduty_credential_compromise_then_privesc.json"
     )
-    assert correlation_rule["response_module"] == "disable_user"
+    assert correlation_rule["response_actions"] == [
+        {"module": "disable_user", "target": {"user_name": "group_value"}}
+    ]
     assert correlation_rule["threshold"] == 2
 
     repo = _FakeSignalsRepository([guardduty_signal, cloudtrail_signal])
@@ -251,7 +255,7 @@ def test_security_group_rule_revoked_with_translated_shape(monkeypatch):
     the extractor helper in isolation."""
     raw_event = _load_json(FIXTURES_DIR / "011_security_group_opened.json")
     rule = _load_json(RULES_DIR / "011_security_group_opened.json")
-    assert rule["response_module"] == "deauthorize_security_group_rules"
+    assert rule["response_actions"][0]["module"] == "deauthorize_security_group_rules"
 
     router = build_default_router()
     normalized = router.parse(raw_event)
@@ -292,7 +296,7 @@ def test_security_group_rollback_round_trips_end_to_end(monkeypatch):
     just that each half works against a hand-typed fixture."""
     raw_event = _load_json(FIXTURES_DIR / "011_security_group_opened.json")
     rule = _load_json(RULES_DIR / "011_security_group_opened.json")
-    assert rule["response_module"] == "deauthorize_security_group_rules"
+    assert rule["response_actions"][0]["module"] == "deauthorize_security_group_rules"
 
     router = build_default_router()
     normalized = router.parse(raw_event)
@@ -384,7 +388,7 @@ def test_disable_user_rollback_round_trips_end_to_end(monkeypatch):
     detail keys) is what makes rollback_supported=True possible at all."""
     raw_event = _load_json(FIXTURES_DIR / "009_admin_policy_attached.json")
     rule = _load_json(RULES_DIR / "009_admin_policy_attached.json")
-    assert rule["response_module"] == "disable_user"
+    assert rule["response_actions"][0]["module"] == "disable_user"
 
     router = build_default_router()
     normalized = router.parse(raw_event)

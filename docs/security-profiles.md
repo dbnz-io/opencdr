@@ -5,6 +5,12 @@ OpenCDR has two resource-protection profiles: `standard` (the default) and
 It does not change API authentication or exposure, activate product features, or
 configure account-level services.
 
+Both profiles are supported for production. `standard` is the secure baseline;
+`hardened` is an opt-in cost/operability tradeoff for customers that want stronger
+deletion resistance. Controls outside the profile are customer-owned choices under
+the [security shared-responsibility model](shared-responsibility.md), not missing
+hardening bugs.
+
 ## What is always enabled
 
 Both profiles keep the secure baseline: least-privilege per-function IAM roles,
@@ -30,13 +36,17 @@ does not add an AWS charge. Retained resources continue to incur their normal
 storage charges after removal from a stack, which is the principal cost and
 operational tradeoff.
 
-## Explicitly outside the profile
+## Customer-owned controls outside the profile
 
 The customer/deployer remains responsible for API authentication and network
 exposure, CloudTrail and GuardDuty, backups and recovery objectives, Object Lock,
 customer-managed KMS keys, WAF/VPC endpoints, AWS Config/Security Hub, SCPs,
 permission boundaries, and production promotion policy. The profile does not
 claim to harden the surrounding AWS account.
+
+These controls can add AWS charges, client migration, retained-resource cleanup,
+key-management dependencies, or irreversible retention constraints. OpenCDR
+therefore documents them without enabling them unconditionally.
 
 ## Deploying
 

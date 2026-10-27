@@ -71,11 +71,6 @@ def validate_manifest(manifest: Any) -> dict[str, Any]:
         )
         rules = []
     keys: set[tuple[str, str]] = set()
-    list_ids = {
-        str(rule.get("rule_id"))
-        for rule in rules
-        if isinstance(rule, dict) and rule.get("rule_kind") == "list"
-    }
     for index, rule in enumerate(rules):
         if not isinstance(rule, dict):
             errors.append(
@@ -96,7 +91,16 @@ def validate_manifest(manifest: Any) -> dict[str, Any]:
                 }
             )
         keys.add(key)
-        result = validate_candidate(rule, available_lists=list_ids)
+        if rule.get("rule_kind") == "list":
+            errors.append(
+                {
+                    "code": "lists_are_independent",
+                    "path": f"rules[{index}].rule_kind",
+                    "message": "lists must be managed through /lists, not rule releases",
+                }
+            )
+            continue
+        result = validate_candidate(rule, available_lists=None)
         errors.extend(
             {**item, "path": f"rules[{index}].{item['path']}"} for item in result["errors"]
         )

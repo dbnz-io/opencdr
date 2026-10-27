@@ -1,5 +1,5 @@
 {
-  "contract_version": "1.0.0",
+  "contract_version": "2.0.0",
   "bundle_id": "baseline-production",
   "description": "Example desired configuration for one production Core deployment",
   "minimum_core_version": "0.3.0",
@@ -18,6 +18,15 @@
           "value": "ConsoleLogin"
         }
       ]
+    }
+  ],
+  "lists": [
+    {
+      "list_id": "admin-users",
+      "matcher": "exact",
+      "value_type": "iam_user",
+      "description": "Example shared list referenced by detection rules",
+      "values": ["alice-admin", "break-glass-admin"]
     }
   ],
   "settings": [
