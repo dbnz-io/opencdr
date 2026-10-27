@@ -7,6 +7,7 @@ had no evaluator branch at all -- falling through to the function's final
 "not_matches" fix (test_detection_engine_not_matches.py), fixed the same
 way.
 """
+
 import logging
 
 from src.domain.detection_engine import evaluate_condition

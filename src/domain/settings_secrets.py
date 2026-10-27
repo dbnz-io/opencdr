@@ -10,6 +10,7 @@ reference back to the real value at send time). Kept as its own module,
 not duplicated in each handler, so the (channel, field) list and the
 `ssm:` reference convention live in exactly one place.
 """
+
 from __future__ import annotations
 
 import os
@@ -68,7 +69,11 @@ def iter_secret_locations(channels: Any) -> list[tuple[dict, str, tuple[str, ...
             if isinstance(headers, dict):
                 for header_name in list(headers.keys()):
                     locations.append(
-                        (headers, header_name, ("webhook", "targets", str(idx), "headers", header_name))
+                        (
+                            headers,
+                            header_name,
+                            ("webhook", "targets", str(idx), "headers", header_name),
+                        )
                     )
 
     return locations

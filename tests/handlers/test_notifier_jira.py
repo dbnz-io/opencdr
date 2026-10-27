@@ -1,4 +1,5 @@
 """Tests for the Jira notification channel in notifier handler."""
+
 from __future__ import annotations
 
 import base64
@@ -81,7 +82,9 @@ def make_context():
 
 
 def _created_response(key: str = "SEC-42") -> tuple[int, str]:
-    return 201, json.dumps({"id": "10001", "key": key, "self": f"{_JIRA_BASE}/rest/api/3/issue/10001"})
+    return 201, json.dumps(
+        {"id": "10001", "key": key, "self": f"{_JIRA_BASE}/rest/api/3/issue/10001"}
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -139,9 +142,7 @@ class TestPostJsonBasicAuth:
     def test_returns_error_status_on_http_error(self):
         import urllib.error
 
-        err = urllib.error.HTTPError(
-            f"{_JIRA_BASE}/rest/api/3/issue", 400, "Bad Request", {}, None
-        )
+        err = urllib.error.HTTPError(f"{_JIRA_BASE}/rest/api/3/issue", 400, "Bad Request", {}, None)
         err.read = lambda: b'{"errorMessages":["bad field"]}'
 
         with patch("urllib.request.urlopen", side_effect=err):
@@ -168,7 +169,9 @@ class TestBuildJiraIssue:
         assert issue["fields"]["project"]["key"] == "OPS"
 
     def test_summary_contains_severity_and_rule(self):
-        issue = build_jira_issue(make_alert(severity="CRITICAL", rule_id="rule-007"), project_key=_PROJECT)
+        issue = build_jira_issue(
+            make_alert(severity="CRITICAL", rule_id="rule-007"), project_key=_PROJECT
+        )
         assert "CRITICAL" in issue["fields"]["summary"]
         assert "rule-007" in issue["fields"]["summary"]
 
@@ -176,14 +179,17 @@ class TestBuildJiraIssue:
         issue = build_jira_issue(make_alert(rule_id="r" * 300), project_key=_PROJECT)
         assert len(issue["fields"]["summary"]) <= 255
 
-    @pytest.mark.parametrize("severity,expected_priority", [
-        ("CRITICAL", "Highest"),
-        ("HIGH", "High"),
-        ("MEDIUM", "Medium"),
-        ("LOW", "Low"),
-        ("INFORMATIONAL", "Lowest"),
-        ("UNKNOWN", "Medium"),
-    ])
+    @pytest.mark.parametrize(
+        "severity,expected_priority",
+        [
+            ("CRITICAL", "Highest"),
+            ("HIGH", "High"),
+            ("MEDIUM", "Medium"),
+            ("LOW", "Low"),
+            ("INFORMATIONAL", "Lowest"),
+            ("UNKNOWN", "Medium"),
+        ],
+    )
     def test_priority_mapping(self, severity, expected_priority):
         issue = build_jira_issue(make_alert(severity=severity), project_key=_PROJECT)
         assert issue["fields"]["priority"]["name"] == expected_priority
@@ -213,7 +219,9 @@ class TestBuildJiraIssue:
         assert "Isolate the instance." in desc_text
 
     def test_description_contains_user_and_ip(self):
-        desc_text = json.dumps(build_jira_issue(make_alert(), project_key=_PROJECT)["fields"]["description"])
+        desc_text = json.dumps(
+            build_jira_issue(make_alert(), project_key=_PROJECT)["fields"]["description"]
+        )
         assert "alice" in desc_text
         assert "1.2.3.4" in desc_text
 
@@ -408,7 +416,10 @@ class TestLambdaHandlerJira:
 
     def test_jira_disabled_does_not_post(self):
         with (
-            patch("src.handlers.notifier.load_global_settings", return_value=make_settings_jira(enabled=False)),
+            patch(
+                "src.handlers.notifier.load_global_settings",
+                return_value=make_settings_jira(enabled=False),
+            ),
             patch("src.handlers.notifier.AwsHandler"),
             patch("src.handlers.notifier._post_json_basic_auth") as mock_post,
         ):

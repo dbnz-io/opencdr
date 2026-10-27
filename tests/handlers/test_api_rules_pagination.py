@@ -9,6 +9,7 @@ ExclusiveStartKey, since two independently-paged partitions can't share
 one cursor. This file covers that cursor's behavior specifically; basic
 query-vs-scan coverage lives in test_api.py::TestListRules.
 """
+
 from __future__ import annotations
 
 import json
@@ -62,7 +63,10 @@ class TestFirstPage:
         for call in mock_table.query.call_args_list:
             assert "ExclusiveStartKey" not in call.kwargs
         body = body_of(resp)
-        assert [item["rule_id"] for item in body["items"]] == [f"{PARTITIONS[0]}-1", f"{PARTITIONS[1]}-1"]
+        assert [item["rule_id"] for item in body["items"]] == [
+            f"{PARTITIONS[0]}-1",
+            f"{PARTITIONS[1]}-1",
+        ]
 
     def test_merges_up_to_page_size_per_partition_not_a_global_cap(self):
         with patch.object(api, "detection_rules_table") as mock_table:
@@ -70,7 +74,9 @@ class TestFirstPage:
                 {"Items": [{"rule_id": f"{PARTITIONS[0]}-{i}"} for i in range(5)]},
                 {"Items": [{"rule_id": f"{PARTITIONS[1]}-{i}"} for i in range(5)]},
             ]
-            resp = api.lambda_handler(make_event("GET", "/rules", qs={"page_size": "5"}), make_context())
+            resp = api.lambda_handler(
+                make_event("GET", "/rules", qs={"page_size": "5"}), make_context()
+            )
 
         body = body_of(resp)
         # 5 + 5 = 10 items even though page_size=5 -- documented, deliberate.
@@ -79,12 +85,17 @@ class TestFirstPage:
 
 class TestExhaustedPartitionSkipped:
     def test_only_queries_the_non_exhausted_partition(self):
-        incoming_cursor = {PARTITIONS[0]: None, PARTITIONS[1]: {"rule_kind": PARTITIONS[1], "rule_id": "x"}}
+        incoming_cursor = {
+            PARTITIONS[0]: None,
+            PARTITIONS[1]: {"rule_kind": PARTITIONS[1], "rule_id": "x"},
+        }
         token = api._encode_next_token(incoming_cursor)
 
         with patch.object(api, "detection_rules_table") as mock_table:
             mock_table.query.return_value = {"Items": [{"rule_id": f"{PARTITIONS[1]}-next"}]}
-            resp = api.lambda_handler(make_event("GET", "/rules", qs={"next_token": token}), make_context())
+            resp = api.lambda_handler(
+                make_event("GET", "/rules", qs={"next_token": token}), make_context()
+            )
 
         assert mock_table.query.call_count == 1
         call_kwargs = mock_table.query.call_args.kwargs
@@ -118,7 +129,10 @@ class TestHasNextAndNextToken:
     def test_next_token_round_trips_to_the_right_partition(self):
         with patch.object(api, "detection_rules_table") as mock_table:
             mock_table.query.side_effect = [
-                {"Items": [], "LastEvaluatedKey": {"rule_kind": PARTITIONS[0], "rule_id": "p0-last"}},
+                {
+                    "Items": [],
+                    "LastEvaluatedKey": {"rule_kind": PARTITIONS[0], "rule_id": "p0-last"},
+                },
                 {"Items": []},
             ]
             resp = api.lambda_handler(make_event("GET", "/rules", qs={}), make_context())
@@ -131,7 +145,9 @@ class TestHasNextAndNextToken:
         # Second page: partition 0 resumes from its cursor, partition 1 is skipped.
         with patch.object(api, "detection_rules_table") as mock_table:
             mock_table.query.return_value = {"Items": [{"rule_id": f"{PARTITIONS[0]}-page2"}]}
-            resp2 = api.lambda_handler(make_event("GET", "/rules", qs={"next_token": token}), make_context())
+            resp2 = api.lambda_handler(
+                make_event("GET", "/rules", qs={"next_token": token}), make_context()
+            )
 
         assert mock_table.query.call_count == 1
         assert mock_table.query.call_args.kwargs["ExclusiveStartKey"] == {

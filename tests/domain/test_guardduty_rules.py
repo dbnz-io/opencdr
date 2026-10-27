@@ -9,6 +9,7 @@ Rules are loaded from the actual JSON files in support_files/detection_rules/
 rather than hand-copied here, so a future edit to a rule's conditions is
 exercised by this test the moment it's saved.
 """
+
 from __future__ import annotations
 
 import json
@@ -51,7 +52,9 @@ def make_gd_event(
     )
 
 
-def make_cloudtrail_event(activity_name: str = "CreateUser", *, severity: str = "HIGH") -> NormalizedEvent:
+def make_cloudtrail_event(
+    activity_name: str = "CreateUser", *, severity: str = "HIGH"
+) -> NormalizedEvent:
     return NormalizedEvent(
         event_id="test-ct-event",
         source="cloudtrail",
@@ -80,7 +83,9 @@ class TestIamCredentialCompromiseRule:
 
     def test_matches_compromised_credentials(self):
         event = make_gd_event(
-            "CredentialAccess:IAMUser/CompromisedCredentials", severity="HIGH", gd_resource_type="IAMUser"
+            "CredentialAccess:IAMUser/CompromisedCredentials",
+            severity="HIGH",
+            gd_resource_type="IAMUser",
         )
         assert rule_matches(event, IAM_RULE)
 
@@ -169,7 +174,9 @@ class TestS3ExposureExfiltrationRule:
         assert not rule_matches(event, S3_RULE)
 
     def test_rejects_discovery_finding(self):
-        event = make_gd_event("Discovery:S3/AnomalousBehavior", severity="MEDIUM", gd_resource_type="S3")
+        event = make_gd_event(
+            "Discovery:S3/AnomalousBehavior", severity="MEDIUM", gd_resource_type="S3"
+        )
         assert not rule_matches(event, S3_RULE)
 
     def test_rejects_ec2_finding(self):
@@ -254,7 +261,9 @@ class TestNoDoubleFiringAcrossCuratedAndCatchall:
     def test_each_curated_finding_fires_exactly_one_rule(self):
         cases = [
             make_gd_event(
-                "UnauthorizedAccess:IAMUser/TorIPCaller", severity="HIGH", gd_resource_type="IAMUser"
+                "UnauthorizedAccess:IAMUser/TorIPCaller",
+                severity="HIGH",
+                gd_resource_type="IAMUser",
             ),
             make_gd_event("Backdoor:EC2/C&CActivity.B", severity="HIGH", gd_resource_type="EC2"),
             make_gd_event(

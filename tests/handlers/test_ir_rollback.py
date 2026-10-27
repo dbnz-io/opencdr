@@ -1,17 +1,18 @@
 """Tests for the ir-rollback Lambda handler (src/handlers/ir_rollback.py)."""
+
 from __future__ import annotations
 
 import json
-from unittest.mock import MagicMock
+import os
+from unittest.mock import MagicMock, patch
 
 import pytest
-
-import os
 
 os.environ.setdefault("LOGS_TABLE_NAME", "test-logs-table")
 os.environ.setdefault("AWS_DEFAULT_REGION", "us-east-1")
 
 from dredge.aws_ir.models import OperationResult
+
 from src.handlers import ir_rollback
 
 
@@ -103,6 +104,13 @@ class TestRollbackModuleHandlersRegistry:
 
 
 class TestMarkRollbackStatus:
+    def test_failed_status_emits_failure_metric(self, mock_table):
+        with patch.object(ir_rollback, "emit_metric") as metric:
+            ir_rollback._mark_rollback_status(
+                "d-1", status="failed", logger=MagicMock(), error="AccessDenied"
+            )
+        metric.assert_called_once_with("ResponderRollbackFailures")
+
     def test_writes_status_and_timestamp(self, mock_table):
         ir_rollback._mark_rollback_status("d-1", status="succeeded", logger=MagicMock())
         call_kwargs = mock_table.update_item.call_args.kwargs
@@ -111,7 +119,9 @@ class TestMarkRollbackStatus:
         assert "rollback_updated_at" in call_kwargs["UpdateExpression"]
 
     def test_error_present_sets_rollback_error(self, mock_table):
-        ir_rollback._mark_rollback_status("d-1", status="failed", logger=MagicMock(), error="AccessDenied")
+        ir_rollback._mark_rollback_status(
+            "d-1", status="failed", logger=MagicMock(), error="AccessDenied"
+        )
         call_kwargs = mock_table.update_item.call_args.kwargs
         assert call_kwargs["ExpressionAttributeValues"][":err"] == "AccessDenied"
         assert "REMOVE rollback_error" not in call_kwargs["UpdateExpression"]
@@ -123,7 +133,9 @@ class TestMarkRollbackStatus:
         assert ":err" not in call_kwargs["ExpressionAttributeValues"]
 
     def test_error_message_is_truncated(self, mock_table):
-        ir_rollback._mark_rollback_status("d-1", status="failed", logger=MagicMock(), error="x" * 5000)
+        ir_rollback._mark_rollback_status(
+            "d-1", status="failed", logger=MagicMock(), error="x" * 5000
+        )
         call_kwargs = mock_table.update_item.call_args.kwargs
         assert len(call_kwargs["ExpressionAttributeValues"][":err"]) == 1000
 
@@ -175,7 +187,9 @@ class TestProcessRecordDispatch:
         assert logger.error.call_args.kwargs["event_name"] == "IR_ROLLBACK_NOT_SUPPORTED"
         call_kwargs = mock_table.update_item.call_args.kwargs
         assert call_kwargs["ExpressionAttributeValues"][":status"] == "failed"
-        assert "rollback is not supported" in call_kwargs["ExpressionAttributeValues"][":err"].lower()
+        assert (
+            "rollback is not supported" in call_kwargs["ExpressionAttributeValues"][":err"].lower()
+        )
 
     def test_already_rolled_back_logged_and_skipped(self, mock_table):
         mock_table.get_item.return_value = {"Item": make_item(rolled_back=True)}
@@ -194,7 +208,10 @@ class TestProcessRecordDispatch:
         record = make_record({"detection_id": "d-1"})
         ir_rollback._process_record(record, "req-1", "rh-1", logger)
         assert logger.error.call_args.kwargs["event_name"] == "IR_ROLLBACK_UNKNOWN_MODULE"
-        assert mock_table.update_item.call_args.kwargs["ExpressionAttributeValues"][":status"] == "failed"
+        assert (
+            mock_table.update_item.call_args.kwargs["ExpressionAttributeValues"][":status"]
+            == "failed"
+        )
 
     def test_missing_role_arn_logged_and_skipped(self, mock_table):
         mock_table.get_item.return_value = {"Item": make_item(role_arn=None)}
@@ -202,7 +219,10 @@ class TestProcessRecordDispatch:
         record = make_record({"detection_id": "d-1"})
         ir_rollback._process_record(record, "req-1", "rh-1", logger)
         assert logger.error.call_args.kwargs["event_name"] == "IR_ROLLBACK_NO_ROLE_ARN"
-        assert mock_table.update_item.call_args.kwargs["ExpressionAttributeValues"][":status"] == "failed"
+        assert (
+            mock_table.update_item.call_args.kwargs["ExpressionAttributeValues"][":status"]
+            == "failed"
+        )
 
     def test_invalid_rollback_kwargs_json_logged_and_skipped(self, mock_table):
         mock_table.get_item.return_value = {"Item": make_item(rollback_kwargs="{not-json")}
@@ -210,7 +230,10 @@ class TestProcessRecordDispatch:
         record = make_record({"detection_id": "d-1"})
         ir_rollback._process_record(record, "req-1", "rh-1", logger)
         assert logger.error.call_args.kwargs["event_name"] == "IR_ROLLBACK_INVALID_STATE"
-        assert mock_table.update_item.call_args.kwargs["ExpressionAttributeValues"][":status"] == "failed"
+        assert (
+            mock_table.update_item.call_args.kwargs["ExpressionAttributeValues"][":status"]
+            == "failed"
+        )
 
     def test_circuit_breaker_tripped_skips_action(self, mock_table, mock_dredge, monkeypatch):
         monkeypatch.setattr(ir_rollback, "_recent_action_count", lambda: 999)
@@ -220,7 +243,10 @@ class TestProcessRecordDispatch:
         ir_rollback._process_record(record, "req-1", "rh-1", logger)
         assert logger.error.call_args.kwargs["event_name"] == "IR_ROLLBACK_CIRCUIT_BREAKER_TRIPPED"
         mock_dredge.aws_ir.response.enable_access_key.assert_not_called()
-        assert mock_table.update_item.call_args.kwargs["ExpressionAttributeValues"][":status"] == "failed"
+        assert (
+            mock_table.update_item.call_args.kwargs["ExpressionAttributeValues"][":status"]
+            == "failed"
+        )
 
     def test_rate_limit_check_failure_fails_closed(self, mock_table, mock_dredge, monkeypatch):
         def boom():
@@ -233,7 +259,10 @@ class TestProcessRecordDispatch:
         ir_rollback._process_record(record, "req-1", "rh-1", logger)
         assert logger.error.call_args.kwargs["event_name"] == "IR_ROLLBACK_RATE_LIMIT_CHECK_FAILED"
         mock_dredge.aws_ir.response.enable_access_key.assert_not_called()
-        assert mock_table.update_item.call_args.kwargs["ExpressionAttributeValues"][":status"] == "failed"
+        assert (
+            mock_table.update_item.call_args.kwargs["ExpressionAttributeValues"][":status"]
+            == "failed"
+        )
 
     def test_assume_role_failure_logged_and_skipped(self, mock_table, monkeypatch):
         def boom(role_arn=None):
@@ -251,7 +280,10 @@ class TestProcessRecordDispatch:
         # must actually reach the stored error, not just a generic
         # "failed to assume <arn>" -- that's the whole point of surfacing
         # this in the UI instead of requiring a CloudWatch log dig.
-        assert "AccessDenied: not authorized to perform sts:AssumeRole" in call_kwargs["ExpressionAttributeValues"][":err"]
+        assert (
+            "AccessDenied: not authorized to perform sts:AssumeRole"
+            in call_kwargs["ExpressionAttributeValues"][":err"]
+        )
 
     def test_handler_exception_logged_and_skipped(self, mock_table, mock_dredge):
         mock_dredge.aws_ir.response.enable_access_key.side_effect = RuntimeError("boom")
@@ -284,7 +316,9 @@ class TestProcessRecordDispatch:
         assert call_kwargs["ExpressionAttributeValues"][":true"] is True
         assert call_kwargs["ExpressionAttributeValues"][":status"] == "succeeded"
 
-    def test_failed_rollback_logs_error_and_marks_rollback_status_failed(self, mock_table, mock_dredge):
+    def test_failed_rollback_logs_error_and_marks_rollback_status_failed(
+        self, mock_table, mock_dredge
+    ):
         # The undo call reached AWS and was rejected (permissions, the
         # resource no longer existing, etc.) -- rolled_back correctly
         # stays False, but this must still be visible in the UI as
@@ -314,7 +348,9 @@ class TestProcessRecordDispatch:
         event_names = [c.kwargs.get("event_name") for c in logger.error.call_args_list]
         assert "IR_ROLLBACK_STATE_UPDATE_FAILED" in event_names
 
-    def test_successful_rollback_writes_purple_notification(self, mock_table, mock_dredge, mock_outbox):
+    def test_successful_rollback_writes_purple_notification(
+        self, mock_table, mock_dredge, mock_outbox
+    ):
         mock_dredge.aws_ir.response.enable_access_key.return_value = ok_result(
             "enable_access_key", "user=alice,access_key_id=AKIA1"
         )
@@ -334,7 +370,9 @@ class TestProcessRecordDispatch:
         assert payload["undo_module"] == "enable_access_key"
         assert payload["operation"] == "enable_access_key"
 
-    def test_failed_rollback_does_not_write_notification(self, mock_table, mock_dredge, mock_outbox):
+    def test_failed_rollback_does_not_write_notification(
+        self, mock_table, mock_dredge, mock_outbox
+    ):
         mock_dredge.aws_ir.response.enable_access_key.return_value = OperationResult(
             operation="enable_access_key", target="t", success=False, errors=["boom"]
         )
@@ -380,7 +418,9 @@ class TestLambdaHandler:
         mock_table.get_item.return_value = {"Item": make_item()}
         ctx = MagicMock()
         ctx.aws_request_id = "req-1"
-        event = {"Records": [make_record({"detection_id": "d-1"}), make_record({"detection_id": "d-1"})]}
+        event = {
+            "Records": [make_record({"detection_id": "d-1"}), make_record({"detection_id": "d-1"})]
+        }
         result = ir_rollback.lambda_handler(event, ctx)
         assert result["statusCode"] == 200
         assert mock_dredge.aws_ir.response.enable_access_key.call_count == 2

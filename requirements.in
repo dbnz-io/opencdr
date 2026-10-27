@@ -1,0 +1,26 @@
+# Direct runtime dependencies. Resolve from Python 3.11 (the supported floor)
+# so the lock also works on the Python 3.12 Lambda runtime. Regenerate the lock
+# after changing this
+# file with:
+#
+#   ./scripts/lock_dependencies.sh
+#
+# requirements.txt is the deploy/install input; do not edit it by hand.
+boto3>=1.34.0
+botocore>=1.34.0
+requests>=2.32.0
+python-dateutil>=2.8.2
+pytz>=2024.1
+typing_extensions>=4.10.0
+
+# Rule-supplied regular expressions are evaluated with a per-call timeout.
+regex>=2024.5.15
+
+# Application-level boto3 tracing. Infrastructure tracing alone only records
+# the Lambda/API Gateway invocation boundary.
+aws-xray-sdk>=2.12.0
+
+# Dredge is fixed to an immutable Git commit and the downloaded source archive
+# is independently hash-pinned. A changed archive fails installation instead
+# of silently changing the incident-response implementation.
+dredge @ https://github.com/dbnz-io/dredge/archive/63eeae6e8823cff3b9bdd00cacdc9129d5d469cb.tar.gz#sha256=9459e2a0f7c760dfdba1aa55f974b295c80f8717254d3b54cad519c882b9c263

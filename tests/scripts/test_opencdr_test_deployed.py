@@ -13,6 +13,7 @@ with only passes/skips falls off the end of the function with no
 SystemExit at all. Tests below only wrap in pytest.raises(SystemExit)
 when a failure is actually expected.
 """
+
 from __future__ import annotations
 
 import json
@@ -26,7 +27,6 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent.parent.parent / "scripts"))
 
 import opencdr  # noqa: E402  (after sys.path manipulation)
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -212,7 +212,9 @@ class TestLambdaNotFound:
         signals_table = _make_signals_table()
 
         with pytest.raises(SystemExit) as exc_info:
-            _run_test_deployed(_make_args(), lambda_client=lambda_client, signals_table=signals_table)
+            _run_test_deployed(
+                _make_args(), lambda_client=lambda_client, signals_table=signals_table
+            )
         assert exc_info.value.code == 1
         lambda_client.invoke.assert_not_called()
         assert "not found" in capsys.readouterr().out.lower()
@@ -230,7 +232,9 @@ class TestInvocationFailures:
         signals_table = _make_signals_table()
 
         with pytest.raises(SystemExit) as exc_info:
-            _run_test_deployed(_make_args(), lambda_client=lambda_client, signals_table=signals_table)
+            _run_test_deployed(
+                _make_args(), lambda_client=lambda_client, signals_table=signals_table
+            )
         assert exc_info.value.code == 1
         signals_table.query.assert_not_called()
 
@@ -240,7 +244,9 @@ class TestInvocationFailures:
         signals_table = _make_signals_table()
 
         with pytest.raises(SystemExit) as exc_info:
-            _run_test_deployed(_make_args(), lambda_client=lambda_client, signals_table=signals_table)
+            _run_test_deployed(
+                _make_args(), lambda_client=lambda_client, signals_table=signals_table
+            )
         assert exc_info.value.code == 1
         signals_table.query.assert_not_called()
 
@@ -273,7 +279,9 @@ class TestProcessorStatusBranches:
         signals_table = _make_signals_table()
 
         with pytest.raises(SystemExit) as exc_info:
-            _run_test_deployed(_make_args(), lambda_client=lambda_client, signals_table=signals_table)
+            _run_test_deployed(
+                _make_args(), lambda_client=lambda_client, signals_table=signals_table
+            )
         assert exc_info.value.code == 1
 
     def test_unexpected_status_counts_as_failed(self, events_dir):
@@ -282,7 +290,9 @@ class TestProcessorStatusBranches:
         signals_table = _make_signals_table()
 
         with pytest.raises(SystemExit) as exc_info:
-            _run_test_deployed(_make_args(), lambda_client=lambda_client, signals_table=signals_table)
+            _run_test_deployed(
+                _make_args(), lambda_client=lambda_client, signals_table=signals_table
+            )
         assert exc_info.value.code == 1
 
     def test_processed_with_signals_found_passes(self, events_dir, capsys):
@@ -299,7 +309,9 @@ class TestProcessorStatusBranches:
         signals_table = _make_signals_table(counts=[0, 0, 0, 0, 0])
 
         with pytest.raises(SystemExit) as exc_info:
-            _run_test_deployed(_make_args(), lambda_client=lambda_client, signals_table=signals_table)
+            _run_test_deployed(
+                _make_args(), lambda_client=lambda_client, signals_table=signals_table
+            )
         assert exc_info.value.code == 1
         assert signals_table.query.call_count == 5
 
@@ -333,7 +345,9 @@ class TestEventFilter:
         lambda_client = _make_lambda_client()
         signals_table = _make_signals_table(counts=[1])
 
-        _run_test_deployed(_make_args(event="024"), lambda_client=lambda_client, signals_table=signals_table)
+        _run_test_deployed(
+            _make_args(event="024"), lambda_client=lambda_client, signals_table=signals_table
+        )
 
         assert lambda_client.invoke.call_count == 1
         payload = json.loads(lambda_client.invoke.call_args.kwargs["Payload"])
@@ -361,7 +375,9 @@ class TestExitCode:
         signals_table = _make_signals_table()
 
         with pytest.raises(SystemExit) as exc_info:
-            _run_test_deployed(_make_args(), lambda_client=lambda_client, signals_table=signals_table)
+            _run_test_deployed(
+                _make_args(), lambda_client=lambda_client, signals_table=signals_table
+            )
         assert exc_info.value.code == 1
 
     def test_summary_counts_printed(self, events_dir, capsys):

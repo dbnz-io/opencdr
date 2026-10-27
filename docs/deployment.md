@@ -15,22 +15,36 @@
 
 ## Manual deploy
 
+For operators managing multiple stages, AWS accounts, or OpenCDR checkouts from
+the same computer, install the separately released
+[`opencdr-deploy`](https://github.com/dbnz-io/opencdr-deploy) package. The
+commands below remain the underlying direct Serverless workflow.
+
 ```bash
-npm install    # installs serverless-python-requirements
+npm install    # installs the locked Serverless build toolchain
 serverless deploy --stage dev
 ```
 
-This single command provisions everything in [Architecture](architecture.md): all 10 Lambdas with their own IAM roles, all 8 DynamoDB tables, the S3/Glue/Firehose archival pipeline (see [Data Archival](data-archival.md)), all 9 SQS queues, both SNS topics, API Gateway with API-key auth, 16 CloudWatch alarms, a monthly cost budget, and the [CloudWatch Dashboard](observability.md). Nothing else needs to run first.
+This single command provisions everything in [Architecture](architecture.md): all 11 Lambdas with their own IAM roles, all 10 DynamoDB tables, the opt-in S3/Glue/Firehose archival pipeline, all 11 SQS queues, both SNS topics, API Gateway with API-key auth, 21 CloudWatch alarms, a monthly cost budget, and the [CloudWatch Dashboard](observability.md). Nothing else needs to run first for a development deployment.
 
-Two deploy-time parameters are worth knowing about, both optional:
+> **Production is a separate security decision.** The default API keys are not a
+> production identity boundary, and most Core state resources do not currently
+> receive PITR/retain/versioning controls automatically. Before using a production
+> stage, complete the deployer-owned [Production deployment responsibilities](production-deployment.md)
+> checklist.
+
+Five deploy-time parameters are worth knowing about, all optional:
 
 ```bash
 serverless deploy --stage dev \
   --param="alarmEmail=ops@example.com" \
-  --param="alertEmail=security@example.com"
+  --param="alertEmail=security@example.com" \
+  --param="xrayEnabled=false" \
+  --param="archiveEnabled=false" \
+  --param="securityProfile=hardened"
 ```
 
-`alarmEmail` subscribes that address to infrastructure alarms (Lambda errors, DLQ depth) via the `AlarmsSnsTopic`. `alertEmail` subscribes to security detection alerts via the separate `AlertsSnsTopic`. Both default to unset — you can always subscribe an address (or anything else SNS supports) to either topic later without redeploying. See [Observability](observability.md) for the full picture on alarm delivery, including the zero-app-code Slack option.
+`alarmEmail` subscribes that address to infrastructure alarms (Lambda errors, DLQ depth) via the `AlarmsSnsTopic`. `alertEmail` subscribes to security detection alerts via the separate `AlertsSnsTopic`. Both default to unset. `xrayEnabled` and `archiveEnabled` default to `false` and are explicit opt-ins. Enabling archival activates the three DynamoDB-to-archiver event mappings; the managed archive resources remain idle while it is off. **DynamoDB TTL remains enabled and data from the disabled interval is not backfilled.** `securityProfile` defaults to `standard`; `hardened` adds reversible deletion protection, retain policies, and scoped DLQ use to OpenCDR-owned resources without changing API exposure or configuring customer account services. See [Observability](observability.md), [Data Archival](data-archival.md), and [Resource security profiles](security-profiles.md).
 
 ## What's automatic vs. what needs a one-time step
 
@@ -38,24 +52,26 @@ This is the general pattern worth internalizing, not just an observability-speci
 
 | Automatic on every deploy | One-time manual step |
 |---|---|
-| All 10 Lambdas, all tables/queues/topics, the S3 archive pipeline | Enabling CloudTrail (prerequisite, not part of the stack) |
+| All core Lambdas, tables/queues/topics, and the encrypted archive bucket; Firehose data flow is opt-in | Enabling CloudTrail (prerequisite, not part of the stack); deciding whether to enable archival before relying on TTL |
 | The home account's IR role (`OpencdrIrRole`), wired to `responder` | Onboarding *additional* AWS accounts for cross-account IR — see [Incident Response](incident-response.md) |
-| CloudWatch Dashboard, custom metrics, X-Ray tracing | Alarm delivery destination (`alarmEmail` param, or the Slack SSM parameter) — see [Observability](observability.md) |
+| CloudWatch Dashboard, custom metrics, alarms, and opt-in X-Ray tracing | Alarm delivery destination (`alarmEmail` param, or the Slack SSM parameter); enable traces with `xrayEnabled=true` — see [Observability](observability.md) |
 | Cost-allocation tags (`Project`/`Stage`) on every resource, monthly `CostBudget` alert | Enabling Cost Explorer and activating those tags as cost allocation tags in Billing preferences — see [Cost tracking](observability.md#cost-tracking) |
 | The receiving side of cross-region event forwarding (`RegionForwarderRole`, bus policy) | Onboarding *additional regions* your account operates in — otherwise CloudTrail/GuardDuty activity outside the deployment region is silently missed. See [Cross-Region Event Forwarding](region-forwarding.md) |
 | Stack termination protection (CI only — see below) | Subscribing to the alerts SNS topic if you want email delivery for security alerts too |
-| Detection rule *table* and schema | Loading the 24 signal + 4 correlation rules into it (`scripts/load_rules.sh`) |
+| Detection rule *table* and schema | Loading the bundled signal and correlation rules into it (`scripts/load_rules.sh`) |
+| Development API-key authentication and encrypted connection details in SSM | Selecting and implementing production IAM/SigV4 or OIDC/JWT authentication, an API Gateway resource/network policy, and caller migration |
+| PITR/retain/versioning controls on the ingestion table and bucket | Classifying and protecting all remaining Core state, defining RPO/RTO, and proving restoration |
 
 ## CI/CD (GitHub Actions, OIDC)
 
-`.github/workflows/ci.yml` deploys to `dev` automatically on every push to `main`, authenticating via short-lived credentials federated through GitHub's OIDC provider — no long-lived AWS access keys stored in GitHub at all.
+`.github/workflows/ci.yml` deploys to `dev` automatically on every push to `main`, authenticating via short-lived credentials federated through GitHub's OIDC provider — no long-lived AWS access keys stored in GitHub at all. Push deployments keep archival enabled and preserve the stack's current resource security profile. Manual runs expose the archive and `standard`/`hardened` choices; reducing a hardened stack requires the separate downgrade acknowledgement.
 
-Pipeline stages, in order: `validate-rules` and the blocking `secrets-scan` → `test` → `deploy` → post-deploy checks (parallel) → `release`. `python-sast` runs independently as a non-blocking advisory check.
+Pipeline stages, in order: rule validation, secrets and supply-chain scans, and blocking Python quality/SAST gates → tests → package/build audit → deploy of that exact package → post-deploy checks (parallel) → release. Manual workflow runs expose opt-in X-Ray and archival choices; ordinary push deployments keep those extras off and IR in dry-run mode.
 
 The post-deploy stage used to be one long serial job; it's now independent jobs, all `needs: [deploy]` and nothing else, running in parallel — each has one concern, each is individually re-runnable from the GitHub UI if only it fails, and total wall-clock time is bounded by the slowest single job rather than the sum of all of them (the two pipeline checks each have up to ~90s of built-in retry/sleep for a warm-container rule-cache race, which used to be additive against everything else):
 
 - **`post-deploy-auth-check`** — asserts API-key auth actually enforces (valid/invalid key against `/rules` and `/signals`).
-- **`post-deploy-cloudtrail-check`** — fires a synthetic CloudTrail-shaped event straight at a dedicated, isolated canary rule to confirm a detection rule can genuinely fire end-to-end via a direct Lambda invoke, confirms TTL is actually enabled (not just declared in `serverless.yml`) on all four archived/expiring tables, and confirms the canary signal actually reached `archiver` (grepping its own CloudWatch logs for the canary's `detection_id`, not waiting on the slower eventually-consistent S3/Parquet write — see [Data Archival](data-archival.md#verified-by-ci-not-just-declared)).
+- **`post-deploy-cloudtrail-check`** — fires a synthetic CloudTrail-shaped event straight at a dedicated, isolated canary rule to confirm a detection rule can genuinely fire end-to-end via a direct Lambda invoke, confirms TTL is actually enabled (not just declared in `serverless.yml`) on all four expiring tables, and, when archival is enabled, confirms the canary signal actually reached `archiver` (grepping its own CloudWatch logs for the canary's `detection_id`, not waiting on the slower eventually-consistent S3/Parquet write — see [Data Archival](data-archival.md#verified-by-ci-not-just-declared)).
 - **`post-deploy-guardduty-check`** — the same direct-invoke canary pattern, but GuardDuty-shaped, proving `GuardDutyEventBridgeParser`'s finding-type parsing, severity bucketing, and `gd_resource_type` extraction all work against the real deployed code. **This check caught a real production bug on its first genuine run**: a GuardDuty-sourced detection's `raw_event` carries AWS's own float `severity` (e.g. `8.0`) — every real GuardDuty finding, not just this synthetic one — and `signal_writer.py`'s `json.loads()` reconstituted it as a native Python `float`, which DynamoDB's high-level `Table.put_item` rejects outright (`"Float types are not supported. Use Decimal types instead."`). Invisible for CloudTrail items (no floats anywhere in their `raw_event`), invisible to 1000+ unit tests (none of them round-trip a detection through JSON→SQS→JSON→DynamoDB), and would have silently dropped every real GuardDuty finding into the dead-letter queue in a live deployment. Fixed with `json.loads(..., parse_float=Decimal)` at the SQS-message-parsing boundary — see `tests/handlers/test_signal_writer.py`'s `TestFloatToDecimalConversion`.
 - **`post-deploy-notifier-check`** — confirms the test webhook endpoint is reachable; `continue-on-error` at the step level, so it never blocks `release` even though `release` still waits for the job to complete.
 
@@ -91,6 +107,11 @@ And enables CloudFormation stack termination protection automatically as the las
 3. **Decide on alarm delivery** (email param, or the Slack SSM parameter) if you want to know when the pipeline itself breaks, not just when it detects something. See [Observability](observability.md).
 4. **If you need cross-account IR**, onboard each additional account — see [Incident Response](incident-response.md). Single-account deployments need nothing here.
 5. **If your account operates in more than one region**, onboard each additional region: `./scripts/setup_region_forwarding.sh --stage dev --regions <region1>,<region2>`. Without this, activity outside the deployment region never generates a signal. See [Cross-Region Event Forwarding](region-forwarding.md).
+6. **Before creating a production stage**, complete the identity, network,
+   state-protection, recovery, immutable-promotion, and go-live evidence gates in
+   [Production deployment responsibilities](production-deployment.md). These are
+   customer/deployer controls and are intentionally not inferred from a successful
+   development deployment.
 
 
 ## Related pages
@@ -100,4 +121,5 @@ And enables CloudFormation stack termination protection automatically as the las
 - [Observability](observability.md) — the dashboard/metrics/traces/alarms every deploy includes
 - [`ci-bootstrap/README.md`](../ci-bootstrap/README.md) — OIDC role setup in full
 - [`docs/stack-protection.md`](stack-protection.md) — termination protection and drift detection
+- [Production deployment responsibilities](production-deployment.md) — deployer-owned authentication, recovery, promotion, and go-live gates
 - [Cross-Region Event Forwarding](region-forwarding.md) — onboarding additional regions

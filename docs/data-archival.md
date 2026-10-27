@@ -1,20 +1,47 @@
 # Data Archival & Retention
 
-*Why signals/alerts/logs now expire out of DynamoDB after 90 days, where they actually go first, and how to query the archive.*
+*How the optional Firehose-to-S3 archive works, how it interacts with DynamoDB TTL, and how to query it.*
+
+## Enabling or disabling the archive
+
+Archival is disabled by default so OpenCDR Core stays minimal. Enable it explicitly
+when Firehose-to-S3 retention is required:
+
+```bash
+serverless deploy --stage dev --param="archiveEnabled=true"
+```
+
+With `archiveEnabled=false`, the stack disables all three DynamoDB event-source
+mappings, so the `archiver` receives no records and nothing is delivered through
+Firehose to S3. The Lambda, Firehose streams, Glue catalog, alarms, and private
+encrypted bucket remain managed but idle. Keeping the complete resource graph is
+intentional: Serverless generates several Lambda resources internally, and trying
+to condition only part of that graph can leave invalid CloudFormation references.
+It also makes `true → false → true` transitions reversible and preserves existing
+archive objects. Re-enable the pipeline by deploying with `archiveEnabled=true`;
+normal AWS charges for provisioned/retained resources
+still apply even while no archive records are flowing.
+
+> **Data-loss boundary:** `archiveEnabled` does not control DynamoDB TTL.
+> Signals, alerts, logs, and outbox records still receive `expires_at` and expire
+> after `DYNAMODB_TTL_DAYS` (90 days by default). Records written while archival
+> is disabled are not copied to S3 and are not backfilled automatically when it
+> is re-enabled. Before disabling it, either accept that retention window or put
+> another tested export/backup mechanism in place.
 
 ## The problem this solves
 
 DynamoDB has no built-in retention — every signal, alert, and log line accumulates forever, and every GSI on the signals/logs tables stores a full copy of each item (`ProjectionType: ALL`), multiplying that storage. None of this data was ever unbounded by design; it just never had an expiration policy at all.
 
-The fix isn't "delete old data" on its own — that would throw away exactly the investigative history a detection-and-response tool exists to preserve. It's **archive first, then expire**: every signal, alert, and log line is streamed to S3 as Parquet before DynamoDB ever deletes it, so the 90-day TTL is a storage-cost decision, not a data-loss one.
+When archival is enabled, the design is **archive first, then expire**: every signal, alert, and log line is streamed to S3 as Parquet before DynamoDB deletes it, so the 90-day TTL is a storage-cost decision rather than intentional data loss. When archival is disabled, that guarantee no longer exists.
 
 ## What's archived, and what isn't
 
 | Table | Archived to S3? | TTL | Why |
 |---|---|---|---|
-| `signals-table` | Yes | 90 days (default) | Individual detections — the core investigative record |
-| `alerts-table` | Yes | 90 days (default) | Correlation-rule outputs — same reasoning as signals |
-| `logs-table` | Yes | 90 days (default) | OpenCDR's own operational/audit trail |
+| `signals-table-v2` | When enabled | 90 days (default) | Individual detections — the core investigative record |
+| `alerts-table` | When enabled | 90 days (default) | Correlation-rule outputs — same reasoning as signals |
+| `logs-table-v2` | When enabled | 90 days (default) | OpenCDR's own operational/audit trail |
 | `outbox-table` | **No** | 90 days (default) | Delivery-tracking metadata (`PENDING`/`SENT`/`FAILED`), not investigative history — nothing worth keeping once an item's been delivered |
 
 ## How it works
@@ -92,7 +119,7 @@ Independent of archival, `LOGS_MIN_LEVEL_TO_STORE` (unset by default — stores 
 `serverless.yml` declaring `TimeToLiveSpecification` and `archiver`'s streams doesn't by itself prove any of it actually works — that's exactly the class of gap that let a real bug (the correlation-alert extraction bug, see the roadmap) hide behind hundreds of passing unit tests until a real deployment exposed it. `.github/workflows/ci.yml`'s `post-deploy-cloudtrail-check` job (runs after every deploy to `dev`, in parallel with three other post-deploy jobs — see [Deployment](deployment.md#cicd-github-actions-oidc)) includes two checks against the real, just-deployed stack:
 
 1. **TTL configuration** — confirms `aws dynamodb describe-time-to-live` reports `ENABLED`/`expires_at` on all four tables (would catch a `serverless.yml` regression), and that the canary signal this same run just wrote actually has `expires_at` set (would catch an application-code regression — a future write path that forgets to set it, the exact class of bug found by grepping every outbox-write call site this session, where three separate places needed the same fix independently).
-2. **Archival pipeline** — confirms `archiver` actually processed the canary signal, by searching its own CloudWatch Logs for the canary's `detection_id` in the `ARCHIVE_BATCH_COMPLETE` summary log's `archived_ids` field (`src/handlers/archiver.py`; that field exists specifically to make this check possible without a new per-record log line — see the field's own comment for why volume matters here). **Deliberately does not wait for the actual Parquet file to land in S3** — Firehose's `BufferingHints` (128MB/300s) means that can take up to 5 minutes, a real and expected latency, not a bug, but too slow to gate every CI run on. Proving the DynamoDB Streams → `archiver` → Firehose `PutRecordBatch` leg worked is the fast, deterministic proxy for "this pipeline works" — that's also where an actual regression (a broken stream trigger, an IAM permission gap, a flattening bug) would surface.
+2. **Archival pipeline (when enabled)** — confirms `archiver` actually processed the canary signal, by searching its own CloudWatch Logs for the canary's `detection_id` in the `ARCHIVE_BATCH_COMPLETE` summary log's `archived_ids` field (`src/handlers/archiver.py`; that field exists specifically to make this check possible without a new per-record log line — see the field's own comment for why volume matters here). The workflow skips this check when its `archive_enabled` input is false. It **deliberately does not wait for the actual Parquet file to land in S3** — Firehose's `BufferingHints` (128MB/300s) means that can take up to 5 minutes, a real and expected latency, not a bug, but too slow to gate every CI run on. Proving the DynamoDB Streams → `archiver` → Firehose `PutRecordBatch` leg worked is the fast, deterministic proxy for "this pipeline works" — that's also where an actual regression (a broken stream trigger, an IAM permission gap, a flattening bug) would surface.
 
 What's still **not** verified by CI, and is realistically a manual check on your first real deploy rather than something worth automating: that the Parquet file actually lands in S3 under the right partition prefix and that Athena can query it. `org-forwarding` (the event-provenance fix) isn't CI-tested at all — it's inherently multi-account, and a single-account CI deploy has nothing to provision it against.
 

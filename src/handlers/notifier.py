@@ -271,12 +271,14 @@ def _runtime_context(primary: dict) -> str:
     if not primary.get("integration_id"):
         return ""
     # Bounded context only; raw command lines are deliberately excluded.
-    values = [("Integration", primary.get("integration_id")),
-              ("Host", _safe_dict(primary.get("host")).get("name")),
-              ("Process", _safe_dict(primary.get("process")).get("name")),
-              ("Container", _safe_dict(primary.get("container")).get("id")),
-              ("Namespace", _safe_dict(primary.get("kubernetes")).get("namespace")),
-              ("Pod", _safe_dict(primary.get("kubernetes")).get("pod"))]
+    values = [
+        ("Integration", primary.get("integration_id")),
+        ("Host", _safe_dict(primary.get("host")).get("name")),
+        ("Process", _safe_dict(primary.get("process")).get("name")),
+        ("Container", _safe_dict(primary.get("container")).get("id")),
+        ("Namespace", _safe_dict(primary.get("kubernetes")).get("namespace")),
+        ("Pod", _safe_dict(primary.get("kubernetes")).get("pod")),
+    ]
     return " | ".join(f"{label}: {str(value)[:128]}" for label, value in values if value)
 
 
@@ -359,7 +361,9 @@ def build_slack_payload(item: dict[str, Any]) -> dict[str, Any]:
     ]
 
     if _runtime_context(primary):
-        blocks.append({"type": "section", "text": {"type": "plain_text", "text": _runtime_context(primary)}})
+        blocks.append(
+            {"type": "section", "text": {"type": "plain_text", "text": _runtime_context(primary)}}
+        )
 
     # Evidence only for correlation alerts
     if refs:
@@ -441,7 +445,11 @@ def build_discord_payload(item: dict[str, Any]) -> dict[str, Any]:
                     },
                     {"name": "Matches", "value": _s(item.get("match_count"), "1"), "inline": True},
                     {"name": "Playbook", "value": playbook, "inline": False},
-                    *([{"name": "Runtime", "value": _runtime_context(primary), "inline": False}] if _runtime_context(primary) else []),
+                    *(
+                        [{"name": "Runtime", "value": _runtime_context(primary), "inline": False}]
+                        if _runtime_context(primary)
+                        else []
+                    ),
                 ],
                 "footer": {"text": " | ".join(footer_bits)} if footer_bits else {"text": "OpenCDR"},
             }
@@ -522,9 +530,13 @@ def build_email_message(item: dict[str, Any]) -> tuple[str, str]:
 # ----------------------------
 
 _REMEDIATION_COLOR_SLACK = "#2e7d32"
-_REMEDIATION_COLOR_DISCORD = 3066993  # discord.js GREEN constant, matches the palette severity_colors/color_map already use
+_REMEDIATION_COLOR_DISCORD = (
+    3066993  # discord.js GREEN constant, matches the palette severity_colors/color_map already use
+)
 _REMEDIATION_DRY_RUN_COLOR_SLACK = "#607d8b"
-_REMEDIATION_DRY_RUN_COLOR_DISCORD = 6323595  # 0x607d8b -- Material Blue Grey 500, not used anywhere else in this palette
+_REMEDIATION_DRY_RUN_COLOR_DISCORD = (
+    6323595  # 0x607d8b -- Material Blue Grey 500, not used anywhere else in this palette
+)
 
 _DRY_RUN_NOTE = (
     "DREDGE_DRY_RUN is on for this deployment — no AWS API call was made. "
@@ -559,7 +571,10 @@ def build_remediation_success_slack_payload(item: dict[str, Any]) -> dict[str, A
         blocks.append({"type": "context", "elements": [{"type": "mrkdwn", "text": _DRY_RUN_NOTE}]})
     if detection_id:
         blocks.append(
-            {"type": "context", "elements": [{"type": "mrkdwn", "text": f"detection_id `{detection_id}`"}]}
+            {
+                "type": "context",
+                "elements": [{"type": "mrkdwn", "text": f"detection_id `{detection_id}`"}],
+            }
         )
 
     color = _REMEDIATION_DRY_RUN_COLOR_SLACK if dry_run else _REMEDIATION_COLOR_SLACK
@@ -580,10 +595,18 @@ def build_remediation_success_discord_payload(item: dict[str, Any]) -> dict[str,
     return {
         "embeds": [
             {
-                "title": f"DRY RUN — SIMULATED REMEDIATION — {rule_id}" if dry_run else f"REMEDIATED — {rule_id}",
-                "color": _REMEDIATION_DRY_RUN_COLOR_DISCORD if dry_run else _REMEDIATION_COLOR_DISCORD,
+                "title": f"DRY RUN — SIMULATED REMEDIATION — {rule_id}"
+                if dry_run
+                else f"REMEDIATED — {rule_id}",
+                "color": _REMEDIATION_DRY_RUN_COLOR_DISCORD
+                if dry_run
+                else _REMEDIATION_COLOR_DISCORD,
                 "fields": fields,
-                "footer": {"text": f"detection_id: {item.get('detection_id')}" if item.get("detection_id") else "OpenCDR"},
+                "footer": {
+                    "text": f"detection_id: {item.get('detection_id')}"
+                    if item.get("detection_id")
+                    else "OpenCDR"
+                },
             }
         ]
     }
@@ -592,7 +615,9 @@ def build_remediation_success_discord_payload(item: dict[str, Any]) -> dict[str,
 def build_remediation_success_email_message(item: dict[str, Any]) -> tuple[str, str]:
     rule_id = _s(item.get("rule_id"), "unknown_rule")
     dry_run = bool(item.get("dry_run"))
-    subject = f"[OpenCDR] {'Dry run — remediation simulated' if dry_run else 'Remediated'} – {rule_id}"
+    subject = (
+        f"[OpenCDR] {'Dry run — remediation simulated' if dry_run else 'Remediated'} – {rule_id}"
+    )
     lines = [
         f"Status:    {'DRY RUN (SIMULATED)' if dry_run else 'REMEDIATED'}",
         f"Rule:      {rule_id}",
@@ -644,7 +669,10 @@ def build_rollback_success_slack_payload(item: dict[str, Any]) -> dict[str, Any]
     ]
     if detection_id:
         blocks.append(
-            {"type": "context", "elements": [{"type": "mrkdwn", "text": f"detection_id `{detection_id}`"}]}
+            {
+                "type": "context",
+                "elements": [{"type": "mrkdwn", "text": f"detection_id `{detection_id}`"}],
+            }
         )
 
     return {"attachments": [{"color": _ROLLBACK_COLOR_SLACK, "blocks": blocks}]}
@@ -659,11 +687,19 @@ def build_rollback_success_discord_payload(item: dict[str, Any]) -> dict[str, An
                 "title": f"ROLLED BACK — {rule_id}",
                 "color": _ROLLBACK_COLOR_DISCORD,
                 "fields": [
-                    {"name": "Original action", "value": _s(item.get("response_module"), "-"), "inline": True},
+                    {
+                        "name": "Original action",
+                        "value": _s(item.get("response_module"), "-"),
+                        "inline": True,
+                    },
                     {"name": "Undo", "value": _s(item.get("undo_module"), "-"), "inline": True},
                     {"name": "Target", "value": _s(item.get("target"), "-"), "inline": True},
                 ],
-                "footer": {"text": f"detection_id: {item.get('detection_id')}" if item.get("detection_id") else "OpenCDR"},
+                "footer": {
+                    "text": f"detection_id: {item.get('detection_id')}"
+                    if item.get("detection_id")
+                    else "OpenCDR"
+                },
             }
         ]
     }
@@ -727,7 +763,9 @@ def build_securityhub_finding(
     timestamp = _iso8601_z(_s(item.get("timestamp"), ""))
 
     if primary.get("integration_id") and timestamp:
-        timestamp = datetime.fromisoformat(timestamp.replace("Z", "+00:00")).isoformat(timespec="microseconds")
+        timestamp = datetime.fromisoformat(timestamp.replace("Z", "+00:00")).isoformat(
+            timespec="microseconds"
+        )
     activity_name = _s(primary.get("activity_name"), _s(api.get("operation"), rule_id))
     playbook = _s(item.get("playbook"), "No playbook provided.")
 
@@ -739,8 +777,11 @@ def build_securityhub_finding(
     description = playbook[:1024]
 
     if primary.get("integration_id") or primary.get("source") in {"falco", "custom"}:
-        resource = {"Type": "Other", "Id": "opencdr:integration:" + _s(primary.get("integration_id"), "runtime"),
-                    "Details": {"Other": {"context": _runtime_context(primary) or "Runtime finding"}}}
+        resource = {
+            "Type": "Other",
+            "Id": "opencdr:integration:" + _s(primary.get("integration_id"), "runtime"),
+            "Details": {"Other": {"context": _runtime_context(primary) or "Runtime finding"}},
+        }
     elif user_arn:
         resource = {"Type": "AwsIamUser", "Id": user_arn}
     elif user_name:
@@ -1142,8 +1183,16 @@ def lambda_handler(event, context):
 
         for channel in channels_to_send:
             try:
-                with (nullcontext() if channel == "webhook" else deliveries.delivery(identity, channel)):
-                    if (is_remediation or is_rollback) and channel in ("securityhub", "jira", "webhook"):
+                with (
+                    nullcontext()
+                    if channel == "webhook"
+                    else deliveries.delivery(identity, channel)
+                ):
+                    if (is_remediation or is_rollback) and channel in (
+                        "securityhub",
+                        "jira",
+                        "webhook",
+                    ):
                         # These builders assume the full alert shape (severity,
                         # primary_signal, etc.) that a remediation-success/
                         # rollback-success item doesn't have -- scoped to
@@ -1159,7 +1208,9 @@ def lambda_handler(event, context):
                     if channel == "slack":
                         url = _s(slack.get("webhook_url")).strip()
                         if not (bool(slack.get("enabled")) and url):
-                            raise RuntimeError("Slack selected but not enabled or webhook_url missing")
+                            raise RuntimeError(
+                                "Slack selected but not enabled or webhook_url missing"
+                            )
 
                         payload = (
                             build_rollback_success_slack_payload(item)
@@ -1235,7 +1286,9 @@ def lambda_handler(event, context):
                         if not bool(sh_cfg.get("enabled")):
                             raise RuntimeError("Security Hub selected but not enabled in settings")
                         if not _securityhub_product_arn:
-                            raise RuntimeError("Cannot derive Security Hub product ARN (missing account/region)")
+                            raise RuntimeError(
+                                "Cannot derive Security Hub product ARN (missing account/region)"
+                            )
 
                         finding = build_securityhub_finding(
                             item,
@@ -1305,7 +1358,9 @@ def lambda_handler(event, context):
                     elif channel == "webhook":
                         webhook_cfg = _safe_dict(channels.get("webhook"))
                         if not bool(webhook_cfg.get("enabled")):
-                            raise RuntimeError("Webhook channel selected but not enabled in settings")
+                            raise RuntimeError(
+                                "Webhook channel selected but not enabled in settings"
+                            )
                         targets = _safe_list(webhook_cfg.get("targets"))
                         if not targets:
                             raise RuntimeError("Webhook channel has no targets configured")
@@ -1321,14 +1376,20 @@ def lambda_handler(event, context):
                                     event_name="NOTIFIER_WEBHOOK_TARGET_SKIP",
                                     event_type="PROCESSING",
                                     message="Webhook target has no URL; skipping",
-                                    details={"webhook_name": target_name, "rule_id": item.get("rule_id")},
+                                    details={
+                                        "webhook_name": target_name,
+                                        "rule_id": item.get("rule_id"),
+                                    },
                                 )
                                 continue
 
                             try:
-                                target_key = "webhook:" + hashlib.sha256(
-                                    (target_name + "\0" + target_url).encode()
-                                ).hexdigest()
+                                target_key = (
+                                    "webhook:"
+                                    + hashlib.sha256(
+                                        (target_name + "\0" + target_url).encode()
+                                    ).hexdigest()
+                                )
                                 with deliveries.delivery(identity, target_key):
                                     t_status, t_body = _post_json(
                                         target_url, item, extra_headers=target_headers
@@ -1389,5 +1450,10 @@ def lambda_handler(event, context):
         details={"processed": processed, "sent": sent, "skipped": skipped, "failed": failed},
     )
 
-    return {"processed": processed, "sent": sent, "skipped": skipped, "failed": failed,
-            "batchItemFailures": batch_item_failures}
+    return {
+        "processed": processed,
+        "sent": sent,
+        "skipped": skipped,
+        "failed": failed,
+        "batchItemFailures": batch_item_failures,
+    }

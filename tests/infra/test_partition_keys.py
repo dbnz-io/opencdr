@@ -1,4 +1,5 @@
 """Tests for src/infra/partition_keys.py's day_bucket_key()."""
+
 from __future__ import annotations
 
 from datetime import UTC, datetime
@@ -12,7 +13,9 @@ class TestDayBucketKey:
         assert day_bucket_key("HIGH", "2026-08-12T14:30:00Z") == "HIGH#2026-08-12"
 
     def test_offset_timestamp(self):
-        assert day_bucket_key("OPENCDR-API", "2026-08-12T23:59:59+05:00") == "OPENCDR-API#2026-08-12"
+        assert (
+            day_bucket_key("OPENCDR-API", "2026-08-12T23:59:59+05:00") == "OPENCDR-API#2026-08-12"
+        )
 
     def test_utc_midnight_boundary(self):
         # 23:59:59 UTC on the 11th stays on the 11th, not the 12th.

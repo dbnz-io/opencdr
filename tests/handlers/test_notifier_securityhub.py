@@ -1,4 +1,5 @@
 """Tests for the Security Hub notification channel in notifier handler."""
+
 from __future__ import annotations
 
 import json
@@ -102,62 +103,102 @@ class TestIso8601Z:
 
 class TestBuildSecurityhubFinding:
     def test_required_asff_fields_present(self):
-        finding = build_securityhub_finding(make_alert(), product_arn=_PRODUCT_ARN, account_id=_ACCOUNT_ID)
-        for field in ("SchemaVersion", "Id", "ProductArn", "GeneratorId", "AwsAccountId",
-                      "Types", "CreatedAt", "UpdatedAt", "Severity", "Title",
-                      "Description", "Resources", "FindingProviderFields",
-                      "Workflow", "RecordState"):
+        finding = build_securityhub_finding(
+            make_alert(), product_arn=_PRODUCT_ARN, account_id=_ACCOUNT_ID
+        )
+        for field in (
+            "SchemaVersion",
+            "Id",
+            "ProductArn",
+            "GeneratorId",
+            "AwsAccountId",
+            "Types",
+            "CreatedAt",
+            "UpdatedAt",
+            "Severity",
+            "Title",
+            "Description",
+            "Resources",
+            "FindingProviderFields",
+            "Workflow",
+            "RecordState",
+        ):
             assert field in finding, f"Missing required ASFF field: {field}"
 
     def test_schema_version(self):
-        finding = build_securityhub_finding(make_alert(), product_arn=_PRODUCT_ARN, account_id=_ACCOUNT_ID)
+        finding = build_securityhub_finding(
+            make_alert(), product_arn=_PRODUCT_ARN, account_id=_ACCOUNT_ID
+        )
         assert finding["SchemaVersion"] == "2018-10-08"
 
     def test_id_includes_alert_id(self):
-        finding = build_securityhub_finding(make_alert(alert_id="abc-123"), product_arn=_PRODUCT_ARN, account_id=_ACCOUNT_ID)
+        finding = build_securityhub_finding(
+            make_alert(alert_id="abc-123"), product_arn=_PRODUCT_ARN, account_id=_ACCOUNT_ID
+        )
         assert "abc-123" in finding["Id"]
 
     def test_generator_id_includes_rule_id(self):
-        finding = build_securityhub_finding(make_alert(rule_id="rule-042"), product_arn=_PRODUCT_ARN, account_id=_ACCOUNT_ID)
+        finding = build_securityhub_finding(
+            make_alert(rule_id="rule-042"), product_arn=_PRODUCT_ARN, account_id=_ACCOUNT_ID
+        )
         assert "rule-042" in finding["GeneratorId"]
 
     def test_product_arn_propagated(self):
-        finding = build_securityhub_finding(make_alert(), product_arn=_PRODUCT_ARN, account_id=_ACCOUNT_ID)
+        finding = build_securityhub_finding(
+            make_alert(), product_arn=_PRODUCT_ARN, account_id=_ACCOUNT_ID
+        )
         assert finding["ProductArn"] == _PRODUCT_ARN
 
     def test_timestamp_gets_z_suffix(self):
-        finding = build_securityhub_finding(make_alert(timestamp="2026-01-01T00:00:00"), product_arn=_PRODUCT_ARN, account_id=_ACCOUNT_ID)
+        finding = build_securityhub_finding(
+            make_alert(timestamp="2026-01-01T00:00:00"),
+            product_arn=_PRODUCT_ARN,
+            account_id=_ACCOUNT_ID,
+        )
         assert finding["CreatedAt"].endswith("Z")
         assert finding["UpdatedAt"].endswith("Z")
 
-    @pytest.mark.parametrize("severity,expected_label,expected_min_normalized", [
-        ("CRITICAL", "CRITICAL", 80),
-        ("HIGH", "HIGH", 60),
-        ("MEDIUM", "MEDIUM", 30),
-        ("LOW", "LOW", 10),
-        ("UNKNOWN", "INFORMATIONAL", 0),
-    ])
+    @pytest.mark.parametrize(
+        "severity,expected_label,expected_min_normalized",
+        [
+            ("CRITICAL", "CRITICAL", 80),
+            ("HIGH", "HIGH", 60),
+            ("MEDIUM", "MEDIUM", 30),
+            ("LOW", "LOW", 10),
+            ("UNKNOWN", "INFORMATIONAL", 0),
+        ],
+    )
     def test_severity_mapping(self, severity, expected_label, expected_min_normalized):
-        finding = build_securityhub_finding(make_alert(severity=severity), product_arn=_PRODUCT_ARN, account_id=_ACCOUNT_ID)
+        finding = build_securityhub_finding(
+            make_alert(severity=severity), product_arn=_PRODUCT_ARN, account_id=_ACCOUNT_ID
+        )
         assert finding["Severity"]["Label"] == expected_label
         assert finding["Severity"]["Normalized"] >= expected_min_normalized
 
     def test_title_contains_rule_id_and_activity(self):
-        finding = build_securityhub_finding(make_alert(rule_id="rule-001"), product_arn=_PRODUCT_ARN, account_id=_ACCOUNT_ID)
+        finding = build_securityhub_finding(
+            make_alert(rule_id="rule-001"), product_arn=_PRODUCT_ARN, account_id=_ACCOUNT_ID
+        )
         assert "rule-001" in finding["Title"]
         assert "AssumeRole" in finding["Title"]
 
     def test_title_truncated_to_256(self):
         long_rule = "r" * 300
-        finding = build_securityhub_finding(make_alert(rule_id=long_rule), product_arn=_PRODUCT_ARN, account_id=_ACCOUNT_ID)
+        finding = build_securityhub_finding(
+            make_alert(rule_id=long_rule), product_arn=_PRODUCT_ARN, account_id=_ACCOUNT_ID
+        )
         assert len(finding["Title"]) <= 256
 
     def test_description_is_playbook(self):
-        finding = build_securityhub_finding(make_alert(playbook="Do the thing."), product_arn=_PRODUCT_ARN, account_id=_ACCOUNT_ID)
+        finding = build_securityhub_finding(
+            make_alert(playbook="Do the thing."), product_arn=_PRODUCT_ARN, account_id=_ACCOUNT_ID
+        )
         assert "Do the thing." in finding["Description"]
 
     def test_resource_uses_user_arn_when_present(self):
-        finding = build_securityhub_finding(make_alert(), product_arn=_PRODUCT_ARN, account_id=_ACCOUNT_ID)
+        finding = build_securityhub_finding(
+            make_alert(), product_arn=_PRODUCT_ARN, account_id=_ACCOUNT_ID
+        )
         resource = finding["Resources"][0]
         assert resource["Type"] == "AwsIamUser"
         assert resource["Id"] == "arn:aws:iam::123456789012:user/alice"
@@ -184,19 +225,27 @@ class TestBuildSecurityhubFinding:
         assert finding["AwsAccountId"] == "999999999999"
 
     def test_workflow_status_is_new(self):
-        finding = build_securityhub_finding(make_alert(), product_arn=_PRODUCT_ARN, account_id=_ACCOUNT_ID)
+        finding = build_securityhub_finding(
+            make_alert(), product_arn=_PRODUCT_ARN, account_id=_ACCOUNT_ID
+        )
         assert finding["Workflow"]["Status"] == "NEW"
 
     def test_record_state_is_active(self):
-        finding = build_securityhub_finding(make_alert(), product_arn=_PRODUCT_ARN, account_id=_ACCOUNT_ID)
+        finding = build_securityhub_finding(
+            make_alert(), product_arn=_PRODUCT_ARN, account_id=_ACCOUNT_ID
+        )
         assert finding["RecordState"] == "ACTIVE"
 
     def test_finding_provider_fields_severity_matches(self):
-        finding = build_securityhub_finding(make_alert(severity="CRITICAL"), product_arn=_PRODUCT_ARN, account_id=_ACCOUNT_ID)
+        finding = build_securityhub_finding(
+            make_alert(severity="CRITICAL"), product_arn=_PRODUCT_ARN, account_id=_ACCOUNT_ID
+        )
         assert finding["FindingProviderFields"]["Severity"]["Label"] == "CRITICAL"
 
     def test_at_least_one_resource(self):
-        finding = build_securityhub_finding(make_alert(), product_arn=_PRODUCT_ARN, account_id=_ACCOUNT_ID)
+        finding = build_securityhub_finding(
+            make_alert(), product_arn=_PRODUCT_ARN, account_id=_ACCOUNT_ID
+        )
         assert len(finding["Resources"]) >= 1
 
 
@@ -233,7 +282,10 @@ class TestRouteChannelsSecurityHub:
 
     def test_securityhub_honoured_in_list_routing(self):
         settings = make_settings_securityhub(routing={"HIGH": ["slack", "securityhub"]})
-        settings["channels"]["slack"] = {"enabled": True, "webhook_url": "https://hooks.slack.com/x"}
+        settings["channels"]["slack"] = {
+            "enabled": True,
+            "webhook_url": "https://hooks.slack.com/x",
+        }
         channels = _route_channels(make_alert(severity="HIGH"), settings)
         assert "securityhub" in channels
 

@@ -8,6 +8,7 @@ the whole signals table (src/handlers/alerter.py DynamoSignalsRepository).
 GSI keys must be top-level scalars, not nested inside a map, hence the
 mirror; only set when present so the GSI stays sparse.
 """
+
 from src.domain.detection_engine import build_detection_event
 from src.domain.ocsf_min_parser import Actor, ApiCall, Network, NormalizedEvent
 

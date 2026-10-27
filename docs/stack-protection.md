@@ -53,6 +53,19 @@ It's purely observational — reports drifted resources and fails the
 workflow run (visible via GitHub's own failure notifications for scheduled
 workflows) but takes no corrective action itself.
 
+API Gateway removes the explicitly empty `ResponseTemplates` object from
+Serverless-generated CORS `OPTIONS` methods after creation. CloudFormation reports
+that service-side normalization as drift even immediately after a successful
+deployment. The workflow passes the result through
+`scripts/filter_stack_drift.py`, which ignores only that exact tested property
+removal on generated `*Options` methods. Any other difference on the same method,
+or any other resource drift, still fails the workflow.
+
+Production drift monitoring belongs in the separate production-promotion
+repository because that repository owns the production account role, stage, region,
+and approval boundary. It should reuse the same filter script and run both before a
+promotion and on a schedule; see [Production readiness roadmap](production-readiness-roadmap.md).
+
 **If you're checking manually, or adapting this for your own pipeline**:
 
 ```bash

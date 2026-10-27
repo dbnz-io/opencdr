@@ -45,11 +45,11 @@ jobs:
           RULE_REQUIRED_FIELDS = ("rule_id", "rule_kind", "severity", "enabled")
           LIST_REQUIRED_FIELDS = ("rule_id", "rule_kind", "values")
           rule_dir = Path("support_files/detection_rules")
-          paths = sorted(rule_dir.glob("*.json"))
+          paths = sorted(rule_dir.rglob("*.json"))
 
           if not paths:
-              print("WARNING: no rule files found", file=sys.stderr)
-              sys.exit(0)
+              print("ERROR: no rule files found", file=sys.stderr)
+              sys.exit(1)
 
           errors = []
           for path in paths:
@@ -80,7 +80,6 @@ jobs:
   secrets-scan:
     name: Secrets Scan (gitleaks)
     runs-on: ubuntu-latest
-    continue-on-error: true
     permissions:
       contents: read
     steps:
@@ -88,19 +87,50 @@ jobs:
 
       - name: Install gitleaks
         run: |
-          VERSION=$(curl -sL https://api.github.com/repos/gitleaks/gitleaks/releases/latest | grep '"tag_name"' | cut -d '"' -f4 | sed 's/^v//')
-          curl -sSL "https://github.com/gitleaks/gitleaks/releases/download/v${VERSION}/gitleaks_${VERSION}_linux_x64.tar.gz" -o gitleaks.tar.gz
-          tar -xzf gitleaks.tar.gz gitleaks
+          VERSION=8.30.1
+          ARCHIVE="gitleaks_${VERSION}_linux_x64.tar.gz"
+          curl --fail --silent --show-error --location \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${VERSION}/${ARCHIVE}" \
+            --output "$ARCHIVE"
+          echo "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb  ${ARCHIVE}" | sha256sum --check --strict
+          tar -xzf "$ARCHIVE" gitleaks
           sudo mv gitleaks /usr/local/bin/
-          rm gitleaks.tar.gz
+          rm "$ARCHIVE"
 
       - name: Scan working tree for secrets
         run: gitleaks detect --source . --no-git --verbose --redact
 
-  python-sast:
-    name: Python SAST (bandit)
+      - name: Reject tracked local credentials and generated packages
+        run: |
+          forbidden=$(git ls-files | grep -E '^(\.opencdr\.json|\.requirements\.zip|\.serverless/)' || true)
+          if [ -n "$forbidden" ]; then
+            echo "::error::Forbidden credential/build artifacts are tracked:"
+            echo "$forbidden"
+            exit 1
+          fi
+
+  node-supply-chain:
+    name: Node Build-Chain Audit
     runs-on: ubuntu-latest
-    continue-on-error: true
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "20"
+          cache: npm
+
+      - name: Install exactly the locked build toolchain
+        run: npm ci
+
+      - name: Audit the build toolchain
+        run: npm audit --audit-level=high
+
+  python-quality:
+    name: Python Quality and SAST
+    runs-on: ubuntu-latest
     permissions:
       contents: read
     steps:
@@ -110,8 +140,16 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install bandit
-        run: pip install bandit
+      - name: Install the locked quality toolchain
+        run: pip install --require-hashes -r requirements-dev.txt
+
+      - name: Lint
+        run: |
+          ruff check src tests scripts mcp_server
+          ruff format --check src tests scripts mcp_server
+
+      - name: Type check
+        run: mypy src
 
       - name: Run bandit
         run: bandit -r src/ -ll -ii
@@ -127,7 +165,7 @@ jobs:
   test:
     name: Tests (Python ${{ matrix.python-version }})
     runs-on: ubuntu-latest
-    needs: [validate-rules]
+    needs: [validate-rules, secrets-scan, node-supply-chain, python-quality]
     permissions:
       contents: read
 
@@ -150,7 +188,11 @@ jobs:
           cache: pip
 
       - name: Install dependencies
-        run: pip install -r requirements-dev.txt
+        run: pip install --require-hashes -r requirements-dev.txt
+
+      - name: Audit locked Python runtime dependencies
+        if: matrix.python-version == '3.12'
+        run: python -m pip_audit -r requirements.txt
 
       - name: Run tests
         run: pytest tests/ -v --cov=src --cov-report=xml
@@ -164,7 +206,6 @@ jobs:
       - name: Generate coverage badge
         if: matrix.python-version == '3.12' && github.ref == 'refs/heads/main'
         run: |
-          pip install genbadge[coverage]
           genbadge coverage -i coverage.xml -o coverage-badge.svg
 
       - name: Upload coverage badge artifact

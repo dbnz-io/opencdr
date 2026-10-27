@@ -272,8 +272,12 @@ class CorrelationEngine:
             if integration:
                 # Runtime/custom correlation must explicitly bind the integration
                 # and group by a scoped entity, never a host's generic user name.
-                if not any(c.get("field") == "integration_id" and c.get("op") == "equals"
-                           and c.get("value") == integration for c in rule.signal_conditions):
+                if not any(
+                    c.get("field") == "integration_id"
+                    and c.get("op") == "equals"
+                    and c.get("value") == integration
+                    for c in rule.signal_conditions
+                ):
                     continue
                 if rule.group_by != "runtime_entity":
                     continue
@@ -301,10 +305,13 @@ class CorrelationEngine:
             )
 
             # Keep only those that match rule conditions (AND)
-            matched = [s for s in recent
-                       if s.get("integration_id") == integration
-                       and (s.get("provenance") or {}).get("mode") != "analysis"
-                       and _all_conditions_match(s, rule.signal_conditions)]
+            matched = [
+                s
+                for s in recent
+                if s.get("integration_id") == integration
+                and (s.get("provenance") or {}).get("mode") != "analysis"
+                and _all_conditions_match(s, rule.signal_conditions)
+            ]
 
             if len(matched) < rule.threshold:
                 continue
@@ -339,8 +346,7 @@ class CorrelationEngine:
         # retain the same logical identity and be rejected by the conditional
         # alert write.
         bucket = int(
-            trigger_time.timestamp()
-            // max(getattr(rule, "time_window_seconds", 300) or 300, 1)
+            trigger_time.timestamp() // max(getattr(rule, "time_window_seconds", 300) or 300, 1)
         )
         alert_key = _hash_id(
             str(getattr(rule, "rule_id", "") or ""),
@@ -386,8 +392,22 @@ class CorrelationEngine:
                 "timestamp": _s(s.get("timestamp")),
                 # normalized context
                 "source": _s(s.get("source")),
-                **({key: s.get(key, {}) for key in ("integration_id", "host", "process", "container", "kubernetes", "finding", "provenance")}
-                   if s.get("integration_id") else {}),
+                **(
+                    {
+                        key: s.get(key, {})
+                        for key in (
+                            "integration_id",
+                            "host",
+                            "process",
+                            "container",
+                            "kubernetes",
+                            "finding",
+                            "provenance",
+                        )
+                    }
+                    if s.get("integration_id")
+                    else {}
+                ),
                 "severity": _s(s.get("severity")),
                 "category": _s(s.get("category")),
                 "class_name": _s(s.get("class_name")),

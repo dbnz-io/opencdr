@@ -7,7 +7,11 @@ import time
 from ..domain.detection_engine import run_detection
 from ..domain.ocsf_min_parser import build_default_router
 from ..infra.aws_handler import AwsHandler
-from ..infra.detection_rules_repository import get_rule_catalog_metadata, load_detection_rules, mark_rule_catalog_observed
+from ..infra.detection_rules_repository import (
+    get_rule_catalog_metadata,
+    load_detection_rules,
+    mark_rule_catalog_observed,
+)
 from ..infra.logger import Logger
 from ..infra.xray_setup import patch_boto3
 
@@ -45,7 +49,11 @@ def get_rules(aws: AwsHandler, ocdr_logger: Logger):
     now = time.time()
     catalog = get_rule_catalog_metadata(aws)
     generation = str(catalog.get("generation") or "")
-    if RULES_CACHE is None or generation != RULES_GENERATION or (now - RULES_CACHE_LOADED_AT) >= RULES_TTL_SECONDS:
+    if (
+        RULES_CACHE is None
+        or generation != RULES_GENERATION
+        or (now - RULES_CACHE_LOADED_AT) >= RULES_TTL_SECONDS
+    ):
         ocdr_logger.info(
             event_name="RULES_CACHE_MISS",
             event_type="SYSTEM",
@@ -68,7 +76,11 @@ def get_lists(aws: AwsHandler, ocdr_logger: Logger) -> dict[str, list]:
     now = time.time()
     catalog = get_rule_catalog_metadata(aws)
     generation = str(catalog.get("generation") or "")
-    if LISTS_CACHE is None or generation != LISTS_GENERATION or (now - LISTS_CACHE_LOADED_AT) >= RULES_TTL_SECONDS:
+    if (
+        LISTS_CACHE is None
+        or generation != LISTS_GENERATION
+        or (now - LISTS_CACHE_LOADED_AT) >= RULES_TTL_SECONDS
+    ):
         ocdr_logger.info(
             event_name="LISTS_CACHE_MISS",
             event_type="SYSTEM",

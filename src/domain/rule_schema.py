@@ -172,14 +172,18 @@ def validate_rule_document(payload: Any) -> None:
     if not isinstance(response_module, str):
         raise ValueError("response_module must be a string")
     if response_module and response_module not in ALLOWED_RESPONSE_MODULES:
-        raise ValueError(f"response_module must be one of {sorted(ALLOWED_RESPONSE_MODULES)} or empty")
+        raise ValueError(
+            f"response_module must be one of {sorted(ALLOWED_RESPONSE_MODULES)} or empty"
+        )
 
     if rule_kind == "signal":
         _validate_conditions(payload.get("conditions"), "conditions", require_nonempty=True)
         source_conditions = payload["conditions"]
         if response_module and any(
             condition.get("field") == "integration_id"
-            or (condition.get("field") == "source" and condition.get("value") in {"falco", "custom"})
+            or (
+                condition.get("field") == "source" and condition.get("value") in {"falco", "custom"}
+            )
             for condition in source_conditions
         ):
             raise ValueError("AWS response modules are not supported for Falco/custom integrations")
@@ -188,7 +192,9 @@ def validate_rule_document(payload: Any) -> None:
     group_by = _require_nonempty_string(payload.get("group_by"), "group_by")
     group_root = group_by.strip().split(".", 1)[0]
     if group_root not in ALLOWED_FIELD_ROOTS:
-        raise ValueError(f"group_by root {group_root!r} is not one of {sorted(ALLOWED_FIELD_ROOTS)}")
+        raise ValueError(
+            f"group_by root {group_root!r} is not one of {sorted(ALLOWED_FIELD_ROOTS)}"
+        )
     threshold = payload.get("threshold")
     if isinstance(threshold, bool) or not isinstance(threshold, int):
         raise ValueError("threshold must be an integer")
@@ -202,7 +208,9 @@ def validate_rule_document(payload: Any) -> None:
         raise ValueError(
             f"time_window_seconds must be between {MIN_TIME_WINDOW_SECONDS} and {MAX_TIME_WINDOW_SECONDS}"
         )
-    _validate_conditions(payload.get("signal_conditions"), "signal_conditions", require_nonempty=False)
+    _validate_conditions(
+        payload.get("signal_conditions"), "signal_conditions", require_nonempty=False
+    )
     if response_module and any(
         condition.get("field") == "integration_id"
         or (condition.get("field") == "source" and condition.get("value") in {"falco", "custom"})

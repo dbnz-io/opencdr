@@ -65,16 +65,33 @@ def validate_candidate(payload: Any, *, available_lists: set[str] | None = None)
 
     if isinstance(payload, dict) and payload.get("rule_kind") != "list":
         conditions = payload.get("conditions") or payload.get("signal_conditions") or []
-        references = sorted({
-            str(item.get("list_id")) for item in conditions
-            if isinstance(item, dict) and item.get("op") in {"in_list", "not_in_list"} and item.get("list_id")
-        })
+        references = sorted(
+            {
+                str(item.get("list_id"))
+                for item in conditions
+                if isinstance(item, dict)
+                and item.get("op") in {"in_list", "not_in_list"}
+                and item.get("list_id")
+            }
+        )
         if available_lists is not None:
             for list_id in references:
                 if list_id not in available_lists:
-                    errors.append({"code": "missing_list", "path": "conditions", "message": f"Referenced list {list_id!r} is unavailable"})
+                    errors.append(
+                        {
+                            "code": "missing_list",
+                            "path": "conditions",
+                            "message": f"Referenced list {list_id!r} is unavailable",
+                        }
+                    )
         elif references:
-            warnings.append({"code": "unverified_list", "path": "conditions", "message": f"List dependencies were not supplied: {', '.join(references)}"})
+            warnings.append(
+                {
+                    "code": "unverified_list",
+                    "path": "conditions",
+                    "message": f"List dependencies were not supplied: {', '.join(references)}",
+                }
+            )
 
     return {
         "valid": not errors,
@@ -84,7 +101,12 @@ def validate_candidate(payload: Any, *, available_lists: set[str] | None = None)
     }
 
 
-def evaluate_candidate(payload: dict[str, Any], events: list[dict[str, Any]], *, lists: dict[str, list[str]] | None = None) -> dict[str, Any]:
+def evaluate_candidate(
+    payload: dict[str, Any],
+    events: list[dict[str, Any]],
+    *,
+    lists: dict[str, list[str]] | None = None,
+) -> dict[str, Any]:
     """Evaluate a candidate without notification, response, or persistence."""
     validation = validate_candidate(payload, available_lists=set((lists or {}).keys()))
     if not validation["valid"]:
@@ -99,20 +121,39 @@ def evaluate_candidate(payload: dict[str, Any], events: list[dict[str, Any]], *,
     rule["evaluation_mode"] = "analysis"
     kind = rule["rule_kind"]
     if kind == "list":
-        return {**validation, "matches": [], "evaluated": 0, "skipped": 0, "list_values": len(rule.get("values") or [])}
+        return {
+            **validation,
+            "matches": [],
+            "evaluated": 0,
+            "skipped": 0,
+            "list_values": len(rule.get("values") or []),
+        }
 
     if kind == "correlation":
         parsed = parse_correlation_rule(rule)
         repo = _SequenceRepository()
         engine = CorrelationEngine(repo=repo)
-        matches: list[dict[str, Any]] = []
+        correlation_matches: list[dict[str, Any]] = []
         for index, signal in enumerate(events):
             candidate_signal = deepcopy(signal)
             candidate_signal.setdefault("timestamp", f"2026-01-01T00:00:{index:02d}+00:00")
             repo.signals.append(candidate_signal)
             for alert in engine.correlate(new_signal=candidate_signal, rules=[rule]):
-                matches.append({"event_index": index, "rule_id": rule["rule_id"], "group_value": alert.get("group_value"), "match_count": alert.get("match_count")})
-        return {**validation, "matches": matches, "evaluated": len(events), "skipped": 0, "correlation": asdict(parsed) if parsed else None}
+                correlation_matches.append(
+                    {
+                        "event_index": index,
+                        "rule_id": rule["rule_id"],
+                        "group_value": alert.get("group_value"),
+                        "match_count": alert.get("match_count"),
+                    }
+                )
+        return {
+            **validation,
+            "matches": correlation_matches,
+            "evaluated": len(events),
+            "skipped": 0,
+            "correlation": asdict(parsed) if parsed else None,
+        }
 
     router = build_default_router()
     matches: list[dict[str, Any]] = []
@@ -123,8 +164,15 @@ def evaluate_candidate(payload: dict[str, Any], events: list[dict[str, Any]], *,
             skipped += 1
             continue
         if rule_matches(normalized, rule, lists=lists or {}):
-            matches.append({"event_index": index, "event_id": normalized.event_id, "rule_id": rule["rule_id"]})
-    return {**validation, "matches": matches, "evaluated": len(events) - skipped, "skipped": skipped}
+            matches.append(
+                {"event_index": index, "event_id": normalized.event_id, "rule_id": rule["rule_id"]}
+            )
+    return {
+        **validation,
+        "matches": matches,
+        "evaluated": len(events) - skipped,
+        "skipped": skipped,
+    }
 
 
 def _error_path(message: str) -> str:
@@ -136,6 +184,10 @@ class _SequenceRepository:
     def __init__(self) -> None:
         self.signals: list[dict[str, Any]] = []
 
-    def query_signals(self, *, since: Any, group_by_field: str, group_value: str, limit: int = 200) -> list[dict[str, Any]]:
+    def query_signals(
+        self, *, since: Any, group_by_field: str, group_value: str, limit: int = 200
+    ) -> list[dict[str, Any]]:
         del since
-        return [item for item in self.signals if str(_get_field(item, group_by_field)) == group_value][-limit:]
+        return [
+            item for item in self.signals if str(_get_field(item, group_by_field)) == group_value
+        ][-limit:]

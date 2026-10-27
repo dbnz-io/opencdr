@@ -4,6 +4,7 @@ _process_record). Phase 0 safety net: cap real (non-dry-run) destructive
 actions per rolling window, independent of the per-alert approval workflow
 planned for Phase 4.
 """
+
 from __future__ import annotations
 
 import json
@@ -78,7 +79,12 @@ class TestRecentActionCount:
         mock_logs_table.query.return_value = {
             "Items": [
                 action_log_item("IR_ACTION_SUCCESS"),
-                {"service": responder._SERVICE, "timestamp": "t", "event_name": "IR_NO_RESPONSE_MODULE", "details": {}},
+                {
+                    "service": responder._SERVICE,
+                    "timestamp": "t",
+                    "event_name": "IR_NO_RESPONSE_MODULE",
+                    "details": {},
+                },
             ]
         }
         assert responder._recent_action_count() == 1
@@ -127,22 +133,30 @@ class TestProcessRecordCircuitBreaker:
     def test_under_limit_executes_normally(self, mock_dredge, mock_logs_table, monkeypatch):
         monkeypatch.setattr(responder, "RATE_LIMIT_MAX_ACTIONS", 5)
         mock_logs_table.query.return_value = {"Items": []}
-        mock_dredge.aws_ir.response.disable_user.return_value = ok_result("disable_user", "user=bob")
+        mock_dredge.aws_ir.response.disable_user.return_value = ok_result(
+            "disable_user", "user=bob"
+        )
         logger = MagicMock()
-        record = make_record({"response_module": "disable_user", "user_name": "bob", "detection_id": "d-1"})
+        record = make_record(
+            {"response_module": "disable_user", "user_name": "bob", "detection_id": "d-1"}
+        )
 
         responder._process_record(record, "req-1", "rh-1", logger)
 
         mock_dredge.aws_ir.response.disable_user.assert_called_once_with(user_name="bob")
         assert logger.info.call_args.kwargs["event_name"] == "IR_ACTION_SUCCESS"
 
-    def test_at_limit_skips_action_and_logs_tripped(self, mock_dredge, mock_logs_table, monkeypatch):
+    def test_at_limit_skips_action_and_logs_tripped(
+        self, mock_dredge, mock_logs_table, monkeypatch
+    ):
         monkeypatch.setattr(responder, "RATE_LIMIT_MAX_ACTIONS", 2)
         mock_logs_table.query.return_value = {
             "Items": [action_log_item("IR_ACTION_SUCCESS"), action_log_item("IR_ACTION_FAILED")]
         }
         logger = MagicMock()
-        record = make_record({"response_module": "disable_user", "user_name": "bob", "detection_id": "d-1"})
+        record = make_record(
+            {"response_module": "disable_user", "user_name": "bob", "detection_id": "d-1"}
+        )
 
         responder._process_record(record, "req-1", "rh-1", logger)
 
@@ -156,21 +170,29 @@ class TestProcessRecordCircuitBreaker:
             "Items": [action_log_item("IR_ACTION_SUCCESS"), action_log_item("IR_ACTION_FAILED")]
         }
         logger = MagicMock()
-        record = make_record({"response_module": "disable_user", "user_name": "bob", "detection_id": "d-1"})
+        record = make_record(
+            {"response_module": "disable_user", "user_name": "bob", "detection_id": "d-1"}
+        )
 
         responder._process_record(record, "req-1", "rh-1", logger)
 
         mock_dredge.aws_ir.response.disable_user.assert_not_called()
         assert logger.error.call_args.kwargs["event_name"] == "IR_CIRCUIT_BREAKER_TRIPPED"
 
-    def test_dry_run_actions_dont_count_toward_limit(self, mock_dredge, mock_logs_table, monkeypatch):
+    def test_dry_run_actions_dont_count_toward_limit(
+        self, mock_dredge, mock_logs_table, monkeypatch
+    ):
         monkeypatch.setattr(responder, "RATE_LIMIT_MAX_ACTIONS", 1)
         mock_logs_table.query.return_value = {
             "Items": [action_log_item("IR_ACTION_SUCCESS", dry_run=True)] * 5
         }
-        mock_dredge.aws_ir.response.disable_user.return_value = ok_result("disable_user", "user=bob")
+        mock_dredge.aws_ir.response.disable_user.return_value = ok_result(
+            "disable_user", "user=bob"
+        )
         logger = MagicMock()
-        record = make_record({"response_module": "disable_user", "user_name": "bob", "detection_id": "d-1"})
+        record = make_record(
+            {"response_module": "disable_user", "user_name": "bob", "detection_id": "d-1"}
+        )
 
         responder._process_record(record, "req-1", "rh-1", logger)
 
@@ -179,7 +201,9 @@ class TestProcessRecordCircuitBreaker:
     def test_rate_limit_check_error_fails_closed(self, mock_dredge, mock_logs_table):
         mock_logs_table.query.side_effect = RuntimeError("dynamodb unavailable")
         logger = MagicMock()
-        record = make_record({"response_module": "disable_user", "user_name": "bob", "detection_id": "d-1"})
+        record = make_record(
+            {"response_module": "disable_user", "user_name": "bob", "detection_id": "d-1"}
+        )
 
         responder._process_record(record, "req-1", "rh-1", logger)
 

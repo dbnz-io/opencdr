@@ -1,4 +1,5 @@
 """Keep numeric values numeric across DynamoDB and JSON boundaries."""
+
 from decimal import Decimal
 
 

@@ -1,4 +1,5 @@
 """Tests for AwsHandler — AWS infrastructure adapter."""
+
 from __future__ import annotations
 
 import os
@@ -11,7 +12,6 @@ os.environ.setdefault("LOGS_TABLE_NAME", "test-logs-table")
 os.environ.setdefault("AWS_DEFAULT_REGION", "us-east-1")
 
 from src.infra.aws_handler import AwsHandler, _err_code, _is_conditional_failed
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -89,16 +89,18 @@ class TestDdbPutItem:
 class TestDdbPutItemIfAbsent:
     def test_success_returns_true(self):
         aws = make_handler()
-        assert aws.ddb_put_item_if_absent(
-            table_name="t", item={}, id_attribute="pk", id_value="1"
-        ) is True
+        assert (
+            aws.ddb_put_item_if_absent(table_name="t", item={}, id_attribute="pk", id_value="1")
+            is True
+        )
 
     def test_duplicate_returns_false(self):
         aws = make_handler()
         aws._ddb.put_item.side_effect = _client_error("ConditionalCheckFailedException")
-        assert aws.ddb_put_item_if_absent(
-            table_name="t", item={}, id_attribute="pk", id_value="1"
-        ) is False
+        assert (
+            aws.ddb_put_item_if_absent(table_name="t", item={}, id_attribute="pk", id_value="1")
+            is False
+        )
 
     def test_other_error_raises(self):
         aws = make_handler()

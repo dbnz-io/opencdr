@@ -23,21 +23,21 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from src.domain.detection_engine import run_detection
 from src.domain.ocsf_min_parser import build_default_router
 
-RULES_DIR  = Path(__file__).parent.parent / "support_files" / "detection_rules"
+RULES_DIR = Path(__file__).parent.parent / "support_files" / "detection_rules"
 EVENTS_DIR = Path(__file__).parent.parent / "support_files" / "test_events"
 
-RESET  = "\033[0m"
-RED    = "\033[31m"
-GREEN  = "\033[32m"
+RESET = "\033[0m"
+RED = "\033[31m"
+GREEN = "\033[32m"
 YELLOW = "\033[33m"
-CYAN   = "\033[36m"
-BOLD   = "\033[1m"
+CYAN = "\033[36m"
+BOLD = "\033[1m"
 
 SEVERITY_COLOR = {
     "CRITICAL": RED + BOLD,
-    "HIGH":     RED,
-    "MEDIUM":   YELLOW,
-    "LOW":      CYAN,
+    "HIGH": RED,
+    "MEDIUM": YELLOW,
+    "LOW": CYAN,
 }
 
 
@@ -71,7 +71,7 @@ def color_severity(severity: str) -> str:
 
 def run_all(filter_event: str = None, filter_rule: str = None):
     router = build_default_router()
-    rules  = load_signal_rules()
+    rules = load_signal_rules()
     events = load_test_events()
 
     if filter_event:
@@ -91,7 +91,7 @@ def run_all(filter_event: str = None, filter_rule: str = None):
     print(f"Events loaded: {len(events)}\n")
     print("─" * 70)
 
-    fired_rules   = set()
+    fired_rules = set()
     total_matches = 0
 
     for event_data in events:
@@ -107,13 +107,17 @@ def run_all(filter_event: str = None, filter_rule: str = None):
 
         if not detections:
             print(f"{YELLOW}[MISS]{RESET}  {filename}")
-            print(f"        ↳ parsed as {CYAN}{normalized.activity_name}{RESET} "
-                  f"(actor: {normalized.actor.user_name or 'unknown'}) — no rules matched\n")
+            print(
+                f"        ↳ parsed as {CYAN}{normalized.activity_name}{RESET} "
+                f"(actor: {normalized.actor.user_name or 'unknown'}) — no rules matched\n"
+            )
             continue
 
         print(f"{GREEN}[HIT] {RESET}  {filename}")
-        print(f"        ↳ parsed as {CYAN}{normalized.activity_name}{RESET} "
-              f"(actor: {normalized.actor.user_name or 'unknown'})")
+        print(
+            f"        ↳ parsed as {CYAN}{normalized.activity_name}{RESET} "
+            f"(actor: {normalized.actor.user_name or 'unknown'})"
+        )
 
         for d in detections:
             sev = d.get("severity", "UNKNOWN")
@@ -141,7 +145,7 @@ def run_all(filter_event: str = None, filter_rule: str = None):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Test OpenCDR detection rules locally.")
     parser.add_argument("--event", help="Filter by event filename substring")
-    parser.add_argument("--rule",  help="Filter by rule_id substring")
+    parser.add_argument("--rule", help="Filter by rule_id substring")
     args = parser.parse_args()
 
     run_all(filter_event=args.event, filter_rule=args.rule)

@@ -18,12 +18,21 @@ calls and never touches event handling.
 Every handler calls patch_boto3() once, at module import time (cold
 start), before constructing any boto3 client/resource.
 """
+
 from __future__ import annotations
+
+import os
 
 from aws_xray_sdk.core import patch, xray_recorder
 
 
 def patch_boto3() -> None:
+    # AWS_XRAY_SDK_ENABLED is the SDK's standard runtime switch. Check it here
+    # as well so disabled deployments do not even install boto3 wrappers at
+    # cold start. The infrastructure setting independently disables Lambda
+    # and API Gateway active tracing.
+    if os.getenv("AWS_XRAY_SDK_ENABLED", "true").strip().lower() in {"false", "0", "no", "off"}:
+        return
     # Outside a real Lambda invocation (local scripts, tests) there's no
     # active X-Ray segment; without this, a patched boto3 call in that
     # context raises SegmentNotFoundException instead of just not tracing.

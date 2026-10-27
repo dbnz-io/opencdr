@@ -7,6 +7,7 @@ Additional tests to cover gaps in correlation_engine.py:
   - parse_correlation_rule invalid inputs
   - _build_alert exception branches
 """
+
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
@@ -53,10 +54,9 @@ class FakeRepo:
         self._signals = signals
 
     def query_signals(self, *, since, group_by_field, group_value, limit=200):
-        return [
-            s for s in self._signals
-            if str(self._get(s, group_by_field)) == group_value
-        ][:limit]
+        return [s for s in self._signals if str(self._get(s, group_by_field)) == group_value][
+            :limit
+        ]
 
     @staticmethod
     def _get(obj, path):
@@ -332,9 +332,7 @@ class TestSignalConditionOperatorsViaEngine:
         signals = [make_signal(timestamp=ts(-i)) for i in range(3)]
         rule = make_rule(
             threshold=3,
-            signal_conditions=[
-                {"field": "actor.user_name", "op": "matches", "value": r"^alice$"}
-            ],
+            signal_conditions=[{"field": "actor.user_name", "op": "matches", "value": r"^alice$"}],
         )
         alerts = self._fire(rule, signals)
         assert len(alerts) == 1

@@ -1,6 +1,7 @@
 """Tests for src/domain/settings_secrets.py -- the shared `ssm:` reference
 convention used by both api.py (write path) and notifier.py (read path)
 for indirecting settings secrets through SSM Parameter Store."""
+
 from __future__ import annotations
 
 from src.domain.settings_secrets import (
@@ -28,11 +29,17 @@ class TestIsSsmRef:
 class TestSsmParamNameAndRef:
     def test_ssm_param_name_uses_stage_env_var(self, monkeypatch):
         monkeypatch.setenv("STAGE", "prod")
-        assert ssm_param_name("global", "slack", "webhook_url") == "/opencdr-prod/settings/global/slack/webhook_url"
+        assert (
+            ssm_param_name("global", "slack", "webhook_url")
+            == "/opencdr-prod/settings/global/slack/webhook_url"
+        )
 
     def test_ssm_param_name_defaults_to_dev(self, monkeypatch):
         monkeypatch.delenv("STAGE", raising=False)
-        assert ssm_param_name("global", "jira", "api_token") == "/opencdr-dev/settings/global/jira/api_token"
+        assert (
+            ssm_param_name("global", "jira", "api_token")
+            == "/opencdr-dev/settings/global/jira/api_token"
+        )
 
     def test_ref_round_trips_param_name(self):
         name = "/opencdr-dev/settings/global/slack/webhook_url"

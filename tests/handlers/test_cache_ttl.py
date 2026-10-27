@@ -3,6 +3,7 @@ reliable time-to-effect"). RULES_CACHE/LISTS_CACHE (processor.py) and
 CORR_RULES_CACHE (alerter.py) previously cached forever once loaded; both
 now expire after a TTL, same pattern as notifier.py's settings cache.
 """
+
 from __future__ import annotations
 
 import os
@@ -35,7 +36,9 @@ class TestProcessorRulesCacheExpiry:
         aws = MagicMock()
         monkeypatch.setattr(processor, "RULES_TTL_SECONDS", 60)
 
-        with patch("src.handlers.processor.load_detection_rules", return_value=[{"rule_id": "r1"}]) as load_rules:
+        with patch(
+            "src.handlers.processor.load_detection_rules", return_value=[{"rule_id": "r1"}]
+        ) as load_rules:
             with patch("src.handlers.processor.time.time", return_value=1000.0):
                 processor.get_rules(aws, logger)
             with patch("src.handlers.processor.time.time", return_value=1030.0):
@@ -74,7 +77,9 @@ class TestAlerterCorrRulesCacheExpiry:
         aws = MagicMock()
         monkeypatch.setattr(alerter, "CORR_RULES_TTL_SECONDS", 60)
 
-        with patch("src.handlers.alerter.load_detection_rules", return_value=[{"rule_id": "c1"}]) as load_rules:
+        with patch(
+            "src.handlers.alerter.load_detection_rules", return_value=[{"rule_id": "c1"}]
+        ) as load_rules:
             with patch("src.handlers.alerter.time.time", return_value=1000.0):
                 alerter.get_correlation_rules(aws=aws, logger=logger)
             with patch("src.handlers.alerter.time.time", return_value=1030.0):
@@ -89,7 +94,9 @@ class TestAlerterCorrRulesCacheExpiry:
         aws = MagicMock()
         monkeypatch.setattr(alerter, "CORR_RULES_TTL_SECONDS", 60)
 
-        with patch("src.handlers.alerter.load_detection_rules", return_value=[{"rule_id": "c1"}]) as load_rules:
+        with patch(
+            "src.handlers.alerter.load_detection_rules", return_value=[{"rule_id": "c1"}]
+        ) as load_rules:
             with patch("src.handlers.alerter.time.time", return_value=1000.0):
                 first = alerter.get_correlation_rules(aws=aws, logger=logger)
             with patch("src.handlers.alerter.time.time", return_value=1010.0):

@@ -7,6 +7,7 @@ rather than silent regressions. GET /settings redaction is covered here
 (TestSettingsCrud.test_get_settings_redacts_credentials) and further in
 tests/handlers/test_api_settings_redaction.py.
 """
+
 from __future__ import annotations
 
 import base64
@@ -27,7 +28,14 @@ from src.handlers import api
 
 
 def make_event(
-    method: str, path: str, *, qs=None, path_params=None, body=None, is_base64=False, api_key_id=None
+    method: str,
+    path: str,
+    *,
+    qs=None,
+    path_params=None,
+    body=None,
+    is_base64=False,
+    api_key_id=None,
 ) -> dict:
     event = {
         "httpMethod": method,
@@ -85,6 +93,7 @@ class TestStatusAndHelp:
         assert body["status"] == "ok"
         assert body["product"] == "OpenCDR Core"
         assert body["management_contract_version"] == "1.0.0"
+        assert body["security_profile"] == "standard"
         assert body["capabilities"]["account_local"] is True
         assert set(body["deployment"]) == {"stage", "account_id", "home_region"}
         assert body["request_id"] == "test-req-id"
@@ -187,11 +196,20 @@ class TestListSignals:
         # query call -- multi-day fan-out has its own dedicated coverage
         # in TestListSignalsDateBucketing below.
         with patch.object(api, "signals_table") as mock_table:
-            mock_table.query.return_value = {"Items": [{"detection_id": "d1"}], "LastEvaluatedKey": None}
+            mock_table.query.return_value = {
+                "Items": [{"detection_id": "d1"}],
+                "LastEvaluatedKey": None,
+            }
             resp = api.lambda_handler(
                 make_event(
-                    "GET", "/signals",
-                    qs={"severity": "high", "page_size": "5", "date_from": "2026-08-12", "date_to": "2026-08-12"},
+                    "GET",
+                    "/signals",
+                    qs={
+                        "severity": "high",
+                        "page_size": "5",
+                        "date_from": "2026-08-12",
+                        "date_to": "2026-08-12",
+                    },
                 ),
                 make_context(),
             )
@@ -214,14 +232,18 @@ class TestListSignals:
     def test_by_event_id_uses_gsi(self):
         with patch.object(api, "signals_table") as mock_table:
             mock_table.query.return_value = {"Items": [], "LastEvaluatedKey": None}
-            api.lambda_handler(make_event("GET", "/signals", qs={"event_id": "evt-1"}), make_context())
+            api.lambda_handler(
+                make_event("GET", "/signals", qs={"event_id": "evt-1"}), make_context()
+            )
         _, kwargs = mock_table.query.call_args
         assert kwargs["IndexName"] == "gsi_signal_event_id"
 
     def test_by_category_uses_gsi(self):
         with patch.object(api, "signals_table") as mock_table:
             mock_table.query.return_value = {"Items": [], "LastEvaluatedKey": None}
-            api.lambda_handler(make_event("GET", "/signals", qs={"category": "iam"}), make_context())
+            api.lambda_handler(
+                make_event("GET", "/signals", qs={"category": "iam"}), make_context()
+            )
         _, kwargs = mock_table.query.call_args
         assert kwargs["IndexName"] == "gsi_signal_category_id"
 
@@ -244,7 +266,9 @@ class TestListSignals:
         with patch.object(api, "signals_table") as mock_table2:
             mock_table2.query.return_value = {"Items": [{"id": 2}], "LastEvaluatedKey": None}
             resp2 = api.lambda_handler(
-                make_event("GET", "/signals", qs={"severity": "high", "next_token": token, **date_qs}),
+                make_event(
+                    "GET", "/signals", qs={"severity": "high", "next_token": token, **date_qs}
+                ),
                 make_context(),
             )
             _, kwargs = mock_table2.query.call_args
@@ -271,7 +295,9 @@ class TestListSignalsDateBucketing:
 
         with patch.object(api, "signals_table") as mock_table:
             mock_table.query.return_value = {"Items": [], "LastEvaluatedKey": None}
-            resp = api.lambda_handler(make_event("GET", "/signals", qs={"severity": "high"}), make_context())
+            resp = api.lambda_handler(
+                make_event("GET", "/signals", qs={"severity": "high"}), make_context()
+            )
 
         body = body_of(resp)
         assert body["query"]["date_from"] == expected_from
@@ -280,7 +306,8 @@ class TestListSignalsDateBucketing:
     def test_date_range_wider_than_max_is_rejected(self):
         resp = api.lambda_handler(
             make_event(
-                "GET", "/signals",
+                "GET",
+                "/signals",
                 qs={"severity": "high", "date_from": "2026-01-01", "date_to": "2026-12-31"},
             ),
             make_context(),
@@ -290,7 +317,8 @@ class TestListSignalsDateBucketing:
     def test_date_from_after_date_to_is_rejected(self):
         resp = api.lambda_handler(
             make_event(
-                "GET", "/signals",
+                "GET",
+                "/signals",
                 qs={"severity": "high", "date_from": "2026-08-12", "date_to": "2026-08-01"},
             ),
             make_context(),
@@ -316,7 +344,8 @@ class TestListSignalsDateBucketing:
             ]
             resp = api.lambda_handler(
                 make_event(
-                    "GET", "/signals",
+                    "GET",
+                    "/signals",
                     qs={"severity": "high", "date_from": "2026-08-10", "date_to": "2026-08-12"},
                 ),
                 make_context(),
@@ -342,7 +371,8 @@ class TestListSignalsDateBucketing:
             }
             resp = api.lambda_handler(
                 make_event(
-                    "GET", "/signals",
+                    "GET",
+                    "/signals",
                     qs={"severity": "high", "date_from": "2026-08-10", "date_to": "2026-08-12"},
                 ),
                 make_context(),
@@ -360,7 +390,9 @@ class TestSignalStats:
         with patch.object(api, "signals_table") as mock_table:
             mock_table.query.return_value = {"Count": 3, "LastEvaluatedKey": None}
             resp = api.lambda_handler(
-                make_event("GET", "/signals/stats", qs={"date_from": "2026-08-17", "date_to": "2026-08-17"}),
+                make_event(
+                    "GET", "/signals/stats", qs={"date_from": "2026-08-17", "date_to": "2026-08-17"}
+                ),
                 make_context(),
             )
 
@@ -369,7 +401,13 @@ class TestSignalStats:
         assert body["date_from"] == "2026-08-17"
         assert body["date_to"] == "2026-08-17"
         assert body["counts"] == {
-            "CRITICAL": 3, "HIGH": 3, "MEDIUM": 3, "LOW": 3, "INFO": 3, "INFORMATIONAL": 3, "UNKNOWN": 3,
+            "CRITICAL": 3,
+            "HIGH": 3,
+            "MEDIUM": 3,
+            "LOW": 3,
+            "INFO": 3,
+            "INFORMATIONAL": 3,
+            "UNKNOWN": 3,
         }
         assert body["total"] == 21
         assert mock_table.query.call_count == 7
@@ -378,11 +416,21 @@ class TestSignalStats:
         with patch.object(api, "signals_table") as mock_table:
             mock_table.query.return_value = {"Count": 0, "LastEvaluatedKey": None}
             resp = api.lambda_handler(
-                make_event("GET", "/signals/stats", qs={"date_from": "2026-08-17", "date_to": "2026-08-17"}),
+                make_event(
+                    "GET", "/signals/stats", qs={"date_from": "2026-08-17", "date_to": "2026-08-17"}
+                ),
                 make_context(),
             )
         body = body_of(resp)
-        assert set(body["counts"].keys()) == {"CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO", "INFORMATIONAL", "UNKNOWN"}
+        assert set(body["counts"].keys()) == {
+            "CRITICAL",
+            "HIGH",
+            "MEDIUM",
+            "LOW",
+            "INFO",
+            "INFORMATIONAL",
+            "UNKNOWN",
+        }
         assert body["total"] == 0
 
     def test_sums_across_multiple_days(self):
@@ -390,7 +438,9 @@ class TestSignalStats:
         with patch.object(api, "signals_table") as mock_table:
             mock_table.query.return_value = {"Count": 1, "LastEvaluatedKey": None}
             resp = api.lambda_handler(
-                make_event("GET", "/signals/stats", qs={"date_from": "2026-08-15", "date_to": "2026-08-17"}),
+                make_event(
+                    "GET", "/signals/stats", qs={"date_from": "2026-08-15", "date_to": "2026-08-17"}
+                ),
                 make_context(),
             )
         body = body_of(resp)
@@ -404,8 +454,20 @@ class TestSignalStats:
         # across pages, not just take the first response's Count.
         with patch.object(api, "signals_table") as mock_table:
             mock_table.query.side_effect = [
-                {"Count": 500, "LastEvaluatedKey": {"severity_bucket": "CRITICAL#2026-08-17", "timestamp": "t1"}},
-                {"Count": 500, "LastEvaluatedKey": {"severity_bucket": "CRITICAL#2026-08-17", "timestamp": "t2"}},
+                {
+                    "Count": 500,
+                    "LastEvaluatedKey": {
+                        "severity_bucket": "CRITICAL#2026-08-17",
+                        "timestamp": "t1",
+                    },
+                },
+                {
+                    "Count": 500,
+                    "LastEvaluatedKey": {
+                        "severity_bucket": "CRITICAL#2026-08-17",
+                        "timestamp": "t2",
+                    },
+                },
                 {"Count": 42, "LastEvaluatedKey": None},
             ]
             total = api._count_signals_for_day("CRITICAL", "2026-08-17")
@@ -429,7 +491,9 @@ class TestSignalStats:
 
     def test_date_range_wider_than_max_is_rejected(self):
         resp = api.lambda_handler(
-            make_event("GET", "/signals/stats", qs={"date_from": "2026-01-01", "date_to": "2026-12-31"}),
+            make_event(
+                "GET", "/signals/stats", qs={"date_from": "2026-01-01", "date_to": "2026-12-31"}
+            ),
             make_context(),
         )
         assert resp["statusCode"] == 400
@@ -438,7 +502,9 @@ class TestSignalStats:
         with patch.object(api, "signals_table") as mock_table:
             mock_table.query.return_value = {"Count": 0, "LastEvaluatedKey": None}
             api.lambda_handler(
-                make_event("GET", "/signals/stats", qs={"date_from": "2026-08-17", "date_to": "2026-08-17"}),
+                make_event(
+                    "GET", "/signals/stats", qs={"date_from": "2026-08-17", "date_to": "2026-08-17"}
+                ),
                 make_context(),
             )
 
@@ -447,8 +513,13 @@ class TestSignalStats:
             for call in mock_table.query.call_args_list
         }
         assert queried_buckets == {
-            "CRITICAL#2026-08-17", "HIGH#2026-08-17", "MEDIUM#2026-08-17",
-            "LOW#2026-08-17", "INFO#2026-08-17", "INFORMATIONAL#2026-08-17", "UNKNOWN#2026-08-17",
+            "CRITICAL#2026-08-17",
+            "HIGH#2026-08-17",
+            "MEDIUM#2026-08-17",
+            "LOW#2026-08-17",
+            "INFO#2026-08-17",
+            "INFORMATIONAL#2026-08-17",
+            "UNKNOWN#2026-08-17",
         }
         for call in mock_table.query.call_args_list:
             assert call.kwargs["Select"] == "COUNT"
@@ -469,8 +540,13 @@ class TestListLogs:
             mock_table.query.return_value = {"Items": [{"x": 1}], "LastEvaluatedKey": None}
             resp = api.lambda_handler(
                 make_event(
-                    "GET", "/logs",
-                    qs={"service": "OPENCDR-API", "date_from": "2026-08-12", "date_to": "2026-08-12"},
+                    "GET",
+                    "/logs",
+                    qs={
+                        "service": "OPENCDR-API",
+                        "date_from": "2026-08-12",
+                        "date_to": "2026-08-12",
+                    },
                 ),
                 make_context(),
             )
@@ -498,7 +574,10 @@ class TestListLogs:
 class TestListRules:
     def test_with_rule_kind_uses_query_not_scan(self):
         with patch.object(api, "detection_rules_table") as mock_table:
-            mock_table.query.return_value = {"Items": [{"rule_id": "001"}], "LastEvaluatedKey": None}
+            mock_table.query.return_value = {
+                "Items": [{"rule_id": "001"}],
+                "LastEvaluatedKey": None,
+            }
             resp = api.lambda_handler(
                 make_event("GET", "/rules", qs={"rule_kind": "signal"}), make_context()
             )
@@ -550,7 +629,9 @@ class TestListRules:
                     "severity": "MEDIUM",
                     "enabled": True,
                     "response_module": "",
-                    "conditions": [{"field": "activity_name", "op": "equals", "value": "ConsoleLogin"}],
+                    "conditions": [
+                        {"field": "activity_name", "op": "equals", "value": "ConsoleLogin"}
+                    ],
                 }
             ),
         }
@@ -564,7 +645,9 @@ class TestListRules:
         assert item["description"] == "Console login without MFA"
         assert item["severity"] == "MEDIUM"
         assert item["enabled"] is True
-        assert item["conditions"] == [{"field": "activity_name", "op": "equals", "value": "ConsoleLogin"}]
+        assert item["conditions"] == [
+            {"field": "activity_name", "op": "equals", "value": "ConsoleLogin"}
+        ]
         # Real table keys win over any copy embedded in rule_body.
         assert item["rule_id"] == "001_console_login_no_mfa"
         assert item["rule_kind"] == "signal"
@@ -573,7 +656,12 @@ class TestListRules:
         """A rule created/edited through this API's own POST/PUT (which write
         flat, no rule_body) must be returned exactly as stored -- no
         regression from adding the rule_body unpacking above."""
-        stored = {"rule_kind": "signal", "rule_id": "030_custom", "description": "x", "enabled": True}
+        stored = {
+            "rule_kind": "signal",
+            "rule_id": "030_custom",
+            "description": "x",
+            "enabled": True,
+        }
         with patch.object(api, "detection_rules_table") as mock_table:
             mock_table.query.return_value = {"Items": [stored], "LastEvaluatedKey": None}
             resp = api.lambda_handler(
@@ -616,7 +704,9 @@ class TestRuleCrud:
         stored = {
             "rule_kind": "signal",
             "rule_id": "001",
-            "rule_body": json.dumps({"rule_id": "001", "rule_kind": "signal", "severity": "HIGH", "enabled": False}),
+            "rule_body": json.dumps(
+                {"rule_id": "001", "rule_kind": "signal", "severity": "HIGH", "enabled": False}
+            ),
         }
         with patch.object(api, "detection_rules_table") as mock_table:
             mock_table.get_item.return_value = {"Item": stored}
@@ -658,13 +748,17 @@ class TestRuleCrud:
     def test_create_rule_missing_rule_kind_rejected(self):
         bad = dict(VALID_RULE_BODY)
         bad.pop("rule_kind")
-        resp = api.lambda_handler(make_event("POST", "/rules", body=json.dumps(bad)), make_context())
+        resp = api.lambda_handler(
+            make_event("POST", "/rules", body=json.dumps(bad)), make_context()
+        )
         assert resp["statusCode"] == 400
 
     def test_create_rule_invalid_condition_op_rejected(self):
         bad = dict(VALID_RULE_BODY)
         bad["conditions"] = [{"field": "x", "op": "frobnicate", "value": "y"}]
-        resp = api.lambda_handler(make_event("POST", "/rules", body=json.dumps(bad)), make_context())
+        resp = api.lambda_handler(
+            make_event("POST", "/rules", body=json.dumps(bad)), make_context()
+        )
         assert resp["statusCode"] == 400
 
     def test_create_rule_conflict_returns_409(self):
@@ -871,7 +965,9 @@ class TestSettingsCrud:
 
     def test_channel_enabled_must_be_bool(self):
         body = {"channels": {"slack": {"enabled": "yes"}}}
-        resp = api.lambda_handler(make_event("POST", "/settings", body=json.dumps(body)), make_context())
+        resp = api.lambda_handler(
+            make_event("POST", "/settings", body=json.dumps(body)), make_context()
+        )
         assert resp["statusCode"] == 400
 
     def test_upsert_settings_by_id(self):
@@ -1037,7 +1133,9 @@ class TestGetKeyScopes:
         monkeypatch.undo()
         api._key_scope_cache.clear()
         with patch.object(
-            api.apigateway, "get_api_key", return_value={"name": f"{api._API_KEY_NAME_PREFIX}-settings"}
+            api.apigateway,
+            "get_api_key",
+            return_value={"name": f"{api._API_KEY_NAME_PREFIX}-settings"},
         ) as mock_get:
             scopes = api._get_key_scopes("key-id-1")
         assert scopes == {"settings"}
@@ -1047,7 +1145,9 @@ class TestGetKeyScopes:
         monkeypatch.undo()
         api._key_scope_cache.clear()
         with patch.object(
-            api.apigateway, "get_api_key", return_value={"name": f"{api._API_KEY_NAME_PREFIX}-settings"}
+            api.apigateway,
+            "get_api_key",
+            return_value={"name": f"{api._API_KEY_NAME_PREFIX}-settings"},
         ) as mock_get:
             api._get_key_scopes("key-id-2")
             api._get_key_scopes("key-id-2")
@@ -1082,10 +1182,14 @@ class TestApiKeyScoping:
         assert "read" in body_of(resp)["message"]
 
     def test_settings_scoped_key_can_read_and_write_settings(self, monkeypatch):
-        monkeypatch.setattr(api, "_get_key_scopes", lambda api_key_id: frozenset({"read", "settings"}))
+        monkeypatch.setattr(
+            api, "_get_key_scopes", lambda api_key_id: frozenset({"read", "settings"})
+        )
         with patch.object(api, "settings_table") as mock_table:
             mock_table.get_item.return_value = {"Item": {"setting_id": "global", "channels": {}}}
-            resp = api.lambda_handler(make_event("GET", "/settings", api_key_id="k3"), make_context())
+            resp = api.lambda_handler(
+                make_event("GET", "/settings", api_key_id="k3"), make_context()
+            )
         assert resp["statusCode"] == 200
 
     def test_bare_full_access_key_succeeds_on_every_scope(self, monkeypatch):
@@ -1098,12 +1202,16 @@ class TestApiKeyScoping:
 
     def test_missing_api_key_id_is_rejected_on_scoped_route(self, monkeypatch):
         monkeypatch.undo()  # exercise the real _get_key_scopes(None) -> no scopes path
-        resp = api.lambda_handler(make_event("GET", "/signals", qs={"severity": "HIGH"}), make_context())
+        resp = api.lambda_handler(
+            make_event("GET", "/signals", qs={"severity": "HIGH"}), make_context()
+        )
         assert resp["statusCode"] == 403
 
     def test_settings_only_key_cannot_read_signal_stats(self, monkeypatch):
         monkeypatch.setattr(api, "_get_key_scopes", lambda api_key_id: frozenset({"settings"}))
-        resp = api.lambda_handler(make_event("GET", "/signals/stats", api_key_id="k5"), make_context())
+        resp = api.lambda_handler(
+            make_event("GET", "/signals/stats", api_key_id="k5"), make_context()
+        )
         assert resp["statusCode"] == 403
         assert "read" in body_of(resp)["message"]
 

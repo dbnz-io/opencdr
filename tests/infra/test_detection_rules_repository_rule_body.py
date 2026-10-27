@@ -8,6 +8,7 @@ this schema and never mocks a rule_body field at all, which is exactly why
 it never caught that every rule's conditions were silently evaluating as []
 (found via the Phase 5 post-deploy integrity check against a real deploy).
 """
+
 from __future__ import annotations
 
 import json

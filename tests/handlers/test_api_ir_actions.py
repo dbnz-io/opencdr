@@ -5,6 +5,7 @@ src/handlers/responder.py); GET lists/fetches them, POST .../rollback
 enqueues the actual undo onto ir-rollback-queue for rollbackHandler
 (src/handlers/ir_rollback.py) to execute asynchronously.
 """
+
 from __future__ import annotations
 
 import json
@@ -105,7 +106,9 @@ class TestRollbackIrAction:
 
     def test_unsupported_rollback_returns_400(self):
         with patch.object(api, "ir_actions_table") as mock_table:
-            mock_table.get_item.return_value = {"Item": {**SUPPORTED_ITEM, "rollback_supported": False}}
+            mock_table.get_item.return_value = {
+                "Item": {**SUPPORTED_ITEM, "rollback_supported": False}
+            }
             resp = api.lambda_handler(
                 make_event("POST", "/ir-actions/d-1/rollback", path_params={"detection_id": "d-1"}),
                 make_context(),
@@ -123,7 +126,9 @@ class TestRollbackIrAction:
 
     def test_already_pending_returns_409(self):
         with patch.object(api, "ir_actions_table") as mock_table:
-            mock_table.get_item.return_value = {"Item": {**SUPPORTED_ITEM, "rollback_status": "pending"}}
+            mock_table.get_item.return_value = {
+                "Item": {**SUPPORTED_ITEM, "rollback_status": "pending"}
+            }
             resp = api.lambda_handler(
                 make_event("POST", "/ir-actions/d-1/rollback", path_params={"detection_id": "d-1"}),
                 make_context(),
@@ -140,7 +145,11 @@ class TestRollbackIrAction:
             patch.object(api, "IR_ROLLBACK_QUEUE_URL", "https://sqs.example/queue/ir-rollback"),
         ):
             mock_table.get_item.return_value = {
-                "Item": {**SUPPORTED_ITEM, "rollback_status": "failed", "rollback_error": "AccessDenied"}
+                "Item": {
+                    **SUPPORTED_ITEM,
+                    "rollback_status": "failed",
+                    "rollback_error": "AccessDenied",
+                }
             }
             resp = api.lambda_handler(
                 make_event("POST", "/ir-actions/d-1/rollback", path_params={"detection_id": "d-1"}),

@@ -69,6 +69,7 @@ def _bounded_regex_search(pattern: str, subject: str, field, op) -> bool | None:
         )
         return None
 
+
 # ----------------------------
 # Field Resolver
 # ----------------------------
@@ -203,9 +204,7 @@ def evaluate_condition(
     return False
 
 
-def rule_matches(
-    event: NormalizedEvent, rule: dict, lists: dict[str, list] | None = None
-) -> bool:
+def rule_matches(event: NormalizedEvent, rule: dict, lists: dict[str, list] | None = None) -> bool:
     conditions = rule.get("conditions", [])
 
     if not conditions:
@@ -265,14 +264,27 @@ def build_detection_event(
 
     if normalized_event.integration_id:
         from .ingestion import CONTEXT_FIELDS, identity
+
         detection.update({key: getattr(normalized_event, key) for key in CONTEXT_FIELDS})
-        entity = normalized_event.container.get("id") or normalized_event.host.get("id") or normalized_event.host.get("name")
+        entity = (
+            normalized_event.container.get("id")
+            or normalized_event.host.get("id")
+            or normalized_event.host.get("name")
+        )
         if entity:
-            detection["runtime_entity"] = normalized_event.integration_id + ":" + identity(normalized_event.host.get("name"), entity)
-        detection.update(integration_id=normalized_event.integration_id,
-                         provenance=normalized_event.provenance,
-                         event_time=normalized_event.time, cloud_provider=normalized_event.cloud_provider,
-                         response_module=None, playbook=None)
+            detection["runtime_entity"] = (
+                normalized_event.integration_id
+                + ":"
+                + identity(normalized_event.host.get("name"), entity)
+            )
+        detection.update(
+            integration_id=normalized_event.integration_id,
+            provenance=normalized_event.provenance,
+            event_time=normalized_event.time,
+            cloud_provider=normalized_event.cloud_provider,
+            response_module=None,
+            playbook=None,
+        )
 
     # Denormalized mirror of actor.user_name for gsi_signal_actor_user_name
     # (serverless.yml) -- GSI keys must be top-level scalars, not nested

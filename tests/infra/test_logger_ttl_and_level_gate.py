@@ -7,6 +7,7 @@
    levels actually get persisted to DynamoDB, independent of the always-
    happens print() to stdout/CloudWatch.
 """
+
 from __future__ import annotations
 
 import json

@@ -10,6 +10,7 @@ identical shape of bug -- reading raw_event.detail.requestParameters, which
 a correlation alert never has, with no fallback to
 primary_signal.raw_event_min.detail.requestParameters, which it does.
 """
+
 from unittest.mock import MagicMock
 
 from src.handlers import responder

@@ -6,6 +6,7 @@ responder.py/notifier.py -- uses ReportBatchItemFailures so a genuinely
 failed write is retried by SQS rather than silently dropped, which is
 the whole point of the buffer.
 """
+
 from __future__ import annotations
 
 import json
@@ -122,7 +123,10 @@ class TestFloatToDecimalConversion:
                     "raw_event": {
                         "source": "aws.guardduty",
                         "detail-type": "GuardDuty Finding",
-                        "detail": {"type": "UnauthorizedAccess:IAMUser/TorIPCaller", "severity": 8.0},
+                        "detail": {
+                            "type": "UnauthorizedAccess:IAMUser/TorIPCaller",
+                            "severity": 8.0,
+                        },
                     },
                 },
                 message_id="msg-gd",

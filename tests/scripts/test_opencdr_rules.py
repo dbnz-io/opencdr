@@ -1,4 +1,5 @@
 """Tests for `opencdr.py rules load/list/get/delete`."""
+
 from __future__ import annotations
 
 import json
@@ -12,7 +13,6 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent.parent.parent / "scripts"))
 
 import opencdr  # noqa: E402  (after sys.path manipulation)
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -68,13 +68,17 @@ class TestRulesLoad:
 
     def test_skip_list_files_are_skipped_not_loaded(self, rules_dir):
         _write_rule(rules_dir, "test_atomic_rule.json", {"rule_id": "x", "rule_kind": "signal"})
-        _write_rule(rules_dir, "test_correlation_rule.json", {"rule_id": "y", "rule_kind": "correlation"})
+        _write_rule(
+            rules_dir, "test_correlation_rule.json", {"rule_id": "y", "rule_kind": "correlation"}
+        )
         _write_rule(rules_dir, "test_detection_rule.json", {"rule_id": "z", "rule_kind": "signal"})
         calls = _run_rules_load(_make_load_args())
         assert calls == []
 
     def test_real_rule_is_loaded_via_put_upsert(self, rules_dir):
-        _write_rule(rules_dir, "024_guardduty.json", {"rule_id": "024_guardduty", "rule_kind": "signal"})
+        _write_rule(
+            rules_dir, "024_guardduty.json", {"rule_id": "024_guardduty", "rule_kind": "signal"}
+        )
         calls = _run_rules_load(_make_load_args())
         assert len(calls) == 1
         method, path, payload = calls[0]
@@ -100,24 +104,32 @@ class TestRulesLoad:
             _run_rules_load(_make_load_args())
 
     def test_dry_run_makes_no_api_calls(self, rules_dir, capsys):
-        _write_rule(rules_dir, "024_guardduty.json", {"rule_id": "024_guardduty", "rule_kind": "signal"})
+        _write_rule(
+            rules_dir, "024_guardduty.json", {"rule_id": "024_guardduty", "rule_kind": "signal"}
+        )
         calls = _run_rules_load(_make_load_args(dry_run=True))
         assert calls == []
         assert "[DRY]" in capsys.readouterr().out
 
     def test_api_error_status_counts_as_failed(self, rules_dir):
-        _write_rule(rules_dir, "024_guardduty.json", {"rule_id": "024_guardduty", "rule_kind": "signal"})
+        _write_rule(
+            rules_dir, "024_guardduty.json", {"rule_id": "024_guardduty", "rule_kind": "signal"}
+        )
         with pytest.raises(SystemExit) as exc_info:
             _run_rules_load(_make_load_args(), api_response=(400, {"message": "bad rule"}))
         assert exc_info.value.code == 1
 
     def test_201_status_counts_as_loaded_not_failed(self, rules_dir):
-        _write_rule(rules_dir, "024_guardduty.json", {"rule_id": "024_guardduty", "rule_kind": "signal"})
+        _write_rule(
+            rules_dir, "024_guardduty.json", {"rule_id": "024_guardduty", "rule_kind": "signal"}
+        )
         # Should not raise -- 201 is a success status, no sys.exit(1).
         _run_rules_load(_make_load_args(), api_response=(201, {"ok": True}))
 
     def test_summary_counts_all_three_buckets(self, rules_dir, capsys):
-        _write_rule(rules_dir, "024_guardduty.json", {"rule_id": "024_guardduty", "rule_kind": "signal"})
+        _write_rule(
+            rules_dir, "024_guardduty.json", {"rule_id": "024_guardduty", "rule_kind": "signal"}
+        )
         _write_rule(rules_dir, "test_atomic_rule.json", {"rule_id": "x", "rule_kind": "signal"})
         _write_rule(rules_dir, "bad.json", {"rule_kind": "signal"})
         with pytest.raises(SystemExit):
@@ -172,7 +184,19 @@ class TestRulesList:
         args = SimpleNamespace(kind=None, page_size=25, next_token=None)
         _run_rules_list(
             args,
-            api_response=(200, {"items": [{"rule_id": "024_guardduty", "rule_kind": "signal", "severity": "HIGH", "enabled": True}]}),
+            api_response=(
+                200,
+                {
+                    "items": [
+                        {
+                            "rule_id": "024_guardduty",
+                            "rule_kind": "signal",
+                            "severity": "HIGH",
+                            "enabled": True,
+                        }
+                    ]
+                },
+            ),
         )
         assert "024_guardduty" in capsys.readouterr().out
 
@@ -180,7 +204,14 @@ class TestRulesList:
         args = SimpleNamespace(kind=None, page_size=25, next_token=None)
         _run_rules_list(
             args,
-            api_response=(200, {"items": [{"rule_id": "x", "rule_kind": "signal"}], "has_next": True, "next_token": "tok2"}),
+            api_response=(
+                200,
+                {
+                    "items": [{"rule_id": "x", "rule_kind": "signal"}],
+                    "has_next": True,
+                    "next_token": "tok2",
+                },
+            ),
         )
         out = capsys.readouterr().out
         assert "tok2" in out

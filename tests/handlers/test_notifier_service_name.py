@@ -7,6 +7,7 @@ ever wrote used a service name GET /logs?service=OPENCDR-NOTIFIER (what
 serverless.yml's SERVICE_NAME env var and every other Lambda actually use)
 could never match.
 """
+
 from __future__ import annotations
 
 import os
@@ -31,7 +32,9 @@ class TestLoggerUsesEnvironmentServiceName:
 
         with (
             patch.object(notifier, "Logger") as mock_logger_cls,
-            patch.object(notifier, "load_global_settings", return_value={"notifications_enabled": False}),
+            patch.object(
+                notifier, "load_global_settings", return_value={"notifications_enabled": False}
+            ),
             patch.object(notifier, "AwsHandler"),
         ):
             notifier.lambda_handler({"Records": []}, make_context())

@@ -1,4 +1,5 @@
 """Durable per-destination receipts and fail-closed incident-response claims."""
+
 import hashlib
 import logging
 import os
@@ -25,9 +26,14 @@ class DeliveryBusy(Exception):
 def delivery_id(record: dict, item: dict) -> str:
     attributes = record.get("messageAttributes") or {}
     published_id = (attributes.get("delivery_id") or {}).get("stringValue")
-    return str(published_id or item.get("alert_key") or item.get("detection_id")
-               or item.get("alert_id") or record.get("messageId")
-               or hashlib.sha256(record.get("body", "").encode()).hexdigest())
+    return str(
+        published_id
+        or item.get("alert_key")
+        or item.get("detection_id")
+        or item.get("alert_id")
+        or record.get("messageId")
+        or hashlib.sha256(record.get("body", "").encode()).hexdigest()
+    )
 
 
 class DeliveryState:
@@ -51,32 +57,45 @@ class DeliveryState:
         key = hashlib.sha256(f"{identity}\0{destination}".encode()).hexdigest()
         token = uuid.uuid4().hex
         now = int(time.time())
-        item = {"delivery_key": key, "identity": identity, "destination": destination,
-                "status": "IN_FLIGHT", "token": token, "created_at": now,
-                "lease_until": now + 120}
+        item = {
+            "delivery_key": key,
+            "identity": identity,
+            "destination": destination,
+            "status": "IN_FLIGHT",
+            "token": token,
+            "created_at": now,
+            "lease_until": now + 120,
+        }
         if replay:
             item["expires_at"] = ttl_expires_at()
         condition = "attribute_not_exists(delivery_key)"
         args = {}
         if replay:
             condition += " OR (#s = :inflight AND lease_until < :now)"
-            args = {"ExpressionAttributeNames": {"#s": "status"},
-                    "ExpressionAttributeValues": {":inflight": "IN_FLIGHT", ":now": now}}
+            args = {
+                "ExpressionAttributeNames": {"#s": "status"},
+                "ExpressionAttributeValues": {":inflight": "IN_FLIGHT", ":now": now},
+            }
         try:
             self.table.put_item(Item=item, ConditionExpression=condition, **args)
         except ClientError as exc:
             if exc.response["Error"]["Code"] != "ConditionalCheckFailedException":
                 raise
-            stored = self.table.get_item(Key={"delivery_key": key}, ConsistentRead=True).get("Item", {})
+            stored = self.table.get_item(Key={"delivery_key": key}, ConsistentRead=True).get(
+                "Item", {}
+            )
             if stored.get("status") == "DONE":
                 raise AlreadyDelivered from exc
-            raise DeliveryBusy(f"Delivery {key} is in progress or has an uncertain outcome") from exc
+            raise DeliveryBusy(
+                f"Delivery {key} is in progress or has an uncertain outcome"
+            ) from exc
         try:
             yield
         except Exception:
             if replay:
                 self.table.delete_item(
-                    Key={"delivery_key": key}, ConditionExpression="#t = :token",
+                    Key={"delivery_key": key},
+                    ConditionExpression="#t = :token",
                     ExpressionAttributeNames={"#t": "token"},
                     ExpressionAttributeValues={":token": token},
                 )

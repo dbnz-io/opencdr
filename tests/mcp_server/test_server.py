@@ -7,6 +7,7 @@ just that these tool wrappers call _resolve_api/_request/the merge helpers
 correctly and turn HTTP status codes into the right tool-facing result or
 error.
 """
+
 from __future__ import annotations
 
 import sys
@@ -36,7 +37,9 @@ class TestResolveApi:
         monkeypatch.setenv("OPENCDR_API_URL", "https://env.example.com")
         monkeypatch.setenv("OPENCDR_API_KEY", "env-key")
         with patch.object(
-            opencdr, "_load_config", return_value={"url": "https://file.example.com", "key": "file-key"}
+            opencdr,
+            "_load_config",
+            return_value={"url": "https://file.example.com", "key": "file-key"},
         ):
             url, key = server._resolve_api()
         assert url == "https://env.example.com"
@@ -65,7 +68,9 @@ class TestSettingsGet:
         ) as mock_req:
             result = server.opencdr_settings_get("global")
         assert result == {"setting_id": "global", "channels": {}}
-        mock_req.assert_called_once_with("GET", "/settings/global", "https://api.example.com", "test-key")
+        mock_req.assert_called_once_with(
+            "GET", "/settings/global", "https://api.example.com", "test-key"
+        )
 
     def test_404_returns_found_false(self, api_env):
         with patch.object(opencdr, "_request", return_value=(404, {})):
@@ -121,7 +126,9 @@ class TestSettingsSet:
             return 200, kwargs["json"]
 
         with patch.object(opencdr, "_request", side_effect=fake_request):
-            result = server.opencdr_settings_set(guardduty_notify={"by_severity": {"CRITICAL": True}})
+            result = server.opencdr_settings_set(
+                guardduty_notify={"by_severity": {"CRITICAL": True}}
+            )
 
         assert result["guardduty_notify"]["by_severity"] == {"HIGH": True, "CRITICAL": True}
 
@@ -152,7 +159,9 @@ class TestSettingsDelete:
         with patch.object(opencdr, "_request", return_value=(200, {"ok": True})) as mock_req:
             result = server.opencdr_settings_delete("global")
         assert result == {"deleted": True, "setting_id": "global"}
-        mock_req.assert_called_once_with("DELETE", "/settings/global", "https://api.example.com", "test-key")
+        mock_req.assert_called_once_with(
+            "DELETE", "/settings/global", "https://api.example.com", "test-key"
+        )
 
     def test_404_returns_found_false(self, api_env):
         with patch.object(opencdr, "_request", return_value=(404, {})):
@@ -209,7 +218,10 @@ class TestRulesGet:
             result = server.opencdr_rules_get("001_console_login", "signal")
         assert result == rule
         mock_req.assert_called_once_with(
-            "GET", "/rules/001_console_login?rule_kind=signal", "https://api.example.com", "test-key"
+            "GET",
+            "/rules/001_console_login?rule_kind=signal",
+            "https://api.example.com",
+            "test-key",
         )
 
     def test_404_returns_found_false(self, api_env):
@@ -226,7 +238,9 @@ class TestRulesGet:
 class TestRulesUpsert:
     def test_puts_to_correct_path_with_body(self, api_env):
         rule = {"severity": "HIGH", "conditions": []}
-        with patch.object(opencdr, "_request", return_value=(200, {**rule, "rule_id": "x"})) as mock_req:
+        with patch.object(
+            opencdr, "_request", return_value=(200, {**rule, "rule_id": "x"})
+        ) as mock_req:
             result = server.opencdr_rules_upsert("x", "signal", rule)
         # Explicit rule_id/rule_kind are injected into the payload.
         mock_req.assert_called_once_with(
@@ -281,7 +295,9 @@ class TestListsList:
 
 class TestListsShow:
     def test_returns_list_body(self, api_env):
-        with patch.object(opencdr, "_request", return_value=(200, {"rule_id": "x", "values": ["a"]})):
+        with patch.object(
+            opencdr, "_request", return_value=(200, {"rule_id": "x", "values": ["a"]})
+        ):
             result = server.opencdr_lists_show("x")
         assert result == {"rule_id": "x", "values": ["a"]}
 
@@ -294,7 +310,9 @@ class TestListsShow:
 class TestListsReplace:
     def test_builds_correct_payload(self, api_env):
         with patch.object(opencdr, "_request", return_value=(200, {"ok": True})) as mock_req:
-            server.opencdr_lists_replace("automation-identities", "CI identities", ["ci-deploy-role"])
+            server.opencdr_lists_replace(
+                "automation-identities", "CI identities", ["ci-deploy-role"]
+            )
         mock_req.assert_called_once_with(
             "PUT",
             "/rules/automation-identities?rule_kind=list",
@@ -415,19 +433,28 @@ class TestSignalsList:
 
 class TestSignalsStats:
     def test_no_dates_omits_query_string(self, api_env):
-        with patch.object(opencdr, "_request", return_value=(200, {"counts": {}, "total": 0})) as mock_req:
+        with patch.object(
+            opencdr, "_request", return_value=(200, {"counts": {}, "total": 0})
+        ) as mock_req:
             server.opencdr_signals_stats()
         assert mock_req.call_args.args[1] == "/signals/stats"
 
     def test_both_dates_included_in_qs(self, api_env):
-        with patch.object(opencdr, "_request", return_value=(200, {"counts": {}, "total": 0})) as mock_req:
+        with patch.object(
+            opencdr, "_request", return_value=(200, {"counts": {}, "total": 0})
+        ) as mock_req:
             server.opencdr_signals_stats(date_from="2026-08-01", date_to="2026-08-12")
         path = mock_req.call_args.args[1]
         assert "date_from=2026-08-01" in path
         assert "date_to=2026-08-12" in path
 
     def test_returns_body_on_success(self, api_env):
-        body = {"date_from": "2026-08-06", "date_to": "2026-08-12", "counts": {"HIGH": 2}, "total": 2}
+        body = {
+            "date_from": "2026-08-06",
+            "date_to": "2026-08-12",
+            "counts": {"HIGH": 2},
+            "total": 2,
+        }
         with patch.object(opencdr, "_request", return_value=(200, body)):
             result = server.opencdr_signals_stats()
         assert result == body
@@ -511,7 +538,9 @@ class TestIrRolesUpsert:
 
     def test_enabled_false_passed_through(self, api_env):
         with patch.object(opencdr, "_request", return_value=(200, {"ok": True})) as mock_req:
-            server.opencdr_ir_roles_upsert("123456789012", "arn:aws:iam::123456789012:role/IR", enabled=False)
+            server.opencdr_ir_roles_upsert(
+                "123456789012", "arn:aws:iam::123456789012:role/IR", enabled=False
+            )
         assert mock_req.call_args.kwargs["json"]["enabled"] is False
 
     def test_error_status_raises(self, api_env):
@@ -557,7 +586,9 @@ class TestIrActionsGet:
         with patch.object(opencdr, "_request", return_value=(200, action)) as mock_req:
             result = server.opencdr_ir_actions_get("d-1")
         assert result == action
-        mock_req.assert_called_once_with("GET", "/ir-actions/d-1", "https://api.example.com", "test-key")
+        mock_req.assert_called_once_with(
+            "GET", "/ir-actions/d-1", "https://api.example.com", "test-key"
+        )
 
     def test_404_returns_found_false(self, api_env):
         with patch.object(opencdr, "_request", return_value=(404, {})):
@@ -567,7 +598,9 @@ class TestIrActionsGet:
 
 class TestIrActionsRollback:
     def test_calls_correct_path(self, api_env):
-        with patch.object(opencdr, "_request", return_value=(202, {"detection_id": "d-1"})) as mock_req:
+        with patch.object(
+            opencdr, "_request", return_value=(202, {"detection_id": "d-1"})
+        ) as mock_req:
             server.opencdr_ir_actions_rollback("d-1")
         mock_req.assert_called_once_with(
             "POST",
@@ -578,7 +611,11 @@ class TestIrActionsRollback:
         )
 
     def test_success_returns_body(self, api_env):
-        with patch.object(opencdr, "_request", return_value=(202, {"message": "Rollback enqueued", "detection_id": "d-1"})):
+        with patch.object(
+            opencdr,
+            "_request",
+            return_value=(202, {"message": "Rollback enqueued", "detection_id": "d-1"}),
+        ):
             result = server.opencdr_ir_actions_rollback("d-1")
         assert result == {"message": "Rollback enqueued", "detection_id": "d-1"}
 
@@ -588,11 +625,15 @@ class TestIrActionsRollback:
         assert result == {"found": False, "detection_id": "d-404"}
 
     def test_unsupported_rollback_raises(self, api_env):
-        with patch.object(opencdr, "_request", return_value=(400, {"message": "Rollback is not supported"})):
+        with patch.object(
+            opencdr, "_request", return_value=(400, {"message": "Rollback is not supported"})
+        ):
             with pytest.raises(RuntimeError, match="not supported"):
                 server.opencdr_ir_actions_rollback("d-1")
 
     def test_already_rolled_back_raises(self, api_env):
-        with patch.object(opencdr, "_request", return_value=(409, {"message": "already been rolled back"})):
+        with patch.object(
+            opencdr, "_request", return_value=(409, {"message": "already been rolled back"})
+        ):
             with pytest.raises(RuntimeError, match="already been rolled back"):
                 server.opencdr_ir_actions_rollback("d-1")

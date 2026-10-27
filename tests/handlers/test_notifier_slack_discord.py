@@ -1,4 +1,5 @@
 """Tests for Slack and Discord notification channels in notifier handler."""
+
 from __future__ import annotations
 
 import json
@@ -17,7 +18,6 @@ from src.handlers.notifier import (
     build_slack_payload,
     lambda_handler,
 )
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -38,7 +38,11 @@ def make_alert(**overrides) -> dict:
             "api": {"operation": "AssumeRole"},
         },
         "signal_refs": [
-            {"timestamp": "2026-01-01T00:00:00Z", "rule_id": "rule-001", "detection_id": "det-aabbcc"},
+            {
+                "timestamp": "2026-01-01T00:00:00Z",
+                "rule_id": "rule-001",
+                "detection_id": "det-aabbcc",
+            },
         ],
     }
     base.update(overrides)

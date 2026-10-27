@@ -5,6 +5,7 @@ failure, an explicitly disabled account, and an assume-role failure. Unit
 tests for the resolution/caching logic itself live in
 tests/handlers/test_responder_init.py.
 """
+
 from __future__ import annotations
 
 import json
@@ -68,7 +69,9 @@ class TestAccountDisabled:
 class TestAssumeRoleFailed:
     def test_get_dredge_exception_skips_and_logs(self, monkeypatch, mock_logs_table):
         monkeypatch.setattr(
-            responder, "_resolve_role_arn", lambda account_id: "arn:aws:iam::222222222222:role/opencdr-ir-role"
+            responder,
+            "_resolve_role_arn",
+            lambda account_id: "arn:aws:iam::222222222222:role/opencdr-ir-role",
         )
 
         def _raise(role_arn):

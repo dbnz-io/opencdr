@@ -1,4 +1,5 @@
 """Tests for `opencdr.py status` (cmd_status)."""
+
 from __future__ import annotations
 
 import sys
@@ -12,7 +13,13 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent / "scripts"))
 import opencdr  # noqa: E402  (after sys.path manipulation)
 
 
-def _run_status(*, api_response=(200, {"service": "OPENCDR-API", "time": "2026-08-14T00:00:00Z", "request_id": "r-1"})):
+def _run_status(
+    *,
+    api_response=(
+        200,
+        {"service": "OPENCDR-API", "time": "2026-08-14T00:00:00Z", "request_id": "r-1"},
+    ),
+):
     with (
         patch.object(opencdr, "_load_config", return_value={}),
         patch.object(opencdr, "_require_api", return_value=("https://api.example.com", "test-key")),
@@ -30,15 +37,24 @@ class TestStatus:
         assert path == "/status"
 
     def test_prints_service_and_time(self, capsys):
-        _run_status(api_response=(200, {
-            "product": "OpenCDR Core",
-            "service": "OPENCDR-API",
-            "core_version": "0.3.0",
-            "management_contract_version": "1.0.0",
-            "deployment": {"account_id": "123456789012", "home_region": "us-east-1", "stage": "prod"},
-            "time": "2026-08-14T00:00:00Z",
-            "request_id": "r-1",
-        }))
+        _run_status(
+            api_response=(
+                200,
+                {
+                    "product": "OpenCDR Core",
+                    "service": "OPENCDR-API",
+                    "core_version": "0.3.0",
+                    "management_contract_version": "1.0.0",
+                    "deployment": {
+                        "account_id": "123456789012",
+                        "home_region": "us-east-1",
+                        "stage": "prod",
+                    },
+                    "time": "2026-08-14T00:00:00Z",
+                    "request_id": "r-1",
+                },
+            )
+        )
         out = capsys.readouterr().out
         assert "OpenCDR Core" in out
         assert "OPENCDR-API" in out

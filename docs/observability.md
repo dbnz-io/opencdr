@@ -6,11 +6,11 @@ This is about the health of OpenCDR's own pipeline — is `processor` erroring, 
 
 ## Automatic, zero configuration
 
-Every `serverless deploy` provisions all of the following. There is nothing to turn on.
+Every `serverless deploy` provisions all of the following by default. X-Ray and the Firehose-to-S3 archive can each be deliberately disabled at deploy time.
 
 ### CloudWatch Dashboard
 
-One dashboard per stage, named `opencdr-<stage>-ops`. Fastest way to find it: the stack's `DashboardUrl` CloudFormation output, printed at the end of every deploy (or `aws cloudformation describe-stacks --stack-name opencdr-<stage> --query "Stacks[0].Outputs"`). It has five widgets: Lambda errors across all 9 functions, Lambda p99 duration, Lambda invocations, depth across all four queues (`notifications-dlq`, `responses-dlq`, `stream-failures` — the last one now also catches `archiver`'s own stream-processing failures, see [`data-archival.md`](data-archival.md) — and `signals-write-dlq`), and the five custom metrics below via CloudWatch `SEARCH` expressions (needed because their dimensions — `rule_id`, `destination`, etc. — aren't knowable at template-write time).
+One dashboard per stage, named `opencdr-<stage>-ops`. Fastest way to find it: the stack's `DashboardUrl` CloudFormation output, printed at the end of every deploy (or `aws cloudformation describe-stacks --stack-name opencdr-<stage> --query "Stacks[0].Outputs"`). It has five widgets: Lambda errors, p99 duration, invocations, queue depth, and the custom metrics below via CloudWatch `SEARCH` expressions. The archiver series remains visible but has no invocation data while `archiveEnabled=false`.
 
 ### Custom metrics
 
@@ -23,18 +23,25 @@ Emitted via CloudWatch Embedded Metric Format (EMF, `src/infra/metrics.py`) unde
 | `PublishSuccess` | `destination` | `publisher` | Outbox → SQS delivery is working, per destination queue |
 | `PublishFailure` | `destination` | `publisher` | Outbox → SQS delivery is failing, per destination queue |
 | `ResponderActionsExecuted` | `response_module`, `result` | `responder` | Whether automated IR actions are succeeding or failing, per module |
+| `ResponderRollbackFailures` | none | `rollbackHandler` | Any failed rollback, including validation, role-assumption, rate-limit, or execution failures |
 
 This is the layer that answers the question Lambda's own built-in metrics can't: a Lambda reporting 0 errors tells you nothing about whether a rule silently stopped matching. `SignalsCreated` dropping to zero while error counts stay flat is exactly that failure mode.
 
 ### X-Ray tracing
 
-`provider.tracing: {lambda: true, apiGateway: true}` in `serverless.yml` — every invocation across all 10 Lambdas and every API Gateway request is traced, viewable in the X-Ray console for the deployed account.
+X-Ray is disabled by default. Enable it for a deployment with:
+
+```bash
+serverless deploy --stage dev --param="xrayEnabled=true"
+```
+
+CloudWatch logs, EMF custom metrics, alarms, and the dashboard remain enabled when tracing is off. Disable X-Ray again with `--param="xrayEnabled=false"`. The generated Lambda roles retain the two inert X-Ray write permissions when tracing is disabled; no segments or telemetry records are emitted, and keeping those statements avoids maintaining duplicate versions of every Serverless-generated per-function role.
 
 That setting alone only traces the *invocation boundary* — it doesn't instrument what a handler's code does internally, so without more, the service map would show Lambda nodes but never DynamoDB or SQS. Closed with a small amount of application code after all: `src/infra/xray_setup.py` calls `aws_xray_sdk`'s `patch(["boto3"])` (AWS's own SDK, deliberately narrower than `patch_all()` — this codebase doesn't use `requests`/sqlite3/mysql for anything that needs tracing) once per handler at cold start, so every DynamoDB/SQS/SNS call shows up as its own node too. Worth being explicit that this walks back the "zero application code" framing this page used to have — but it's a different risk than the OTel instrumentor bug described below: that library wrapped Lambda invocation and API Gateway event parsing and crashed before the handler ever ran, where this only wraps outgoing `boto3` calls and never touches event handling.
 
 ## Alarms exist automatically — delivery is the one-time step
 
-16 CloudWatch Alarms are created on every deploy: one per-function `AWS/Lambda` Errors alarm for 8 of the 9 functions (`processor`, `signalWriter`, `alerter`, `publisher`, `notifier`, `responder`, `api`, `archiver` — `alarmNotifier` itself doesn't have one), four SQS DLQ/queue-depth alarms (`notifications-dlq`, `responses-dlq`, `stream-failures`, `signals-write-dlq`), three DynamoDB-stream `IteratorAge` alarms (`alerter`, `publisher`, `archiver` — the last one covers all three of `archiver`'s own streams, not individually attributed, since `AWS/Lambda IteratorAge` is dimensioned by function name only), and one DynamoDB `ThrottledRequests` alarm on `logs-table-v2` (the tripwire for whether that table's day-bucketed partition key alone is holding up under load, without the SQS write-buffer `signals-table-v2` has — see [Architecture](architecture.md#dynamodb-tables)). All of them fire into `AlarmsSnsTopic` (`opencdr-<stage>-alarms`) — but a topic with no subscription doesn't notify anyone. Two ways to fix that, both zero application code:
+Twenty-one CloudWatch Alarms are created: ingestion failure/lag alarms; one `AWS/Lambda` Errors alarm for each pipeline function; direct rollback-failure coverage; five SQS DLQ/queue-depth alarms; three DynamoDB-stream `IteratorAge` alarms; and one DynamoDB `ThrottledRequests` alarm on `logs-table-v2`. When `archiveEnabled=false`, the two archiver alarms remain deployed but stay inactive because its event mappings are disabled. All alarms fire into `AlarmsSnsTopic` (`opencdr-<stage>-alarms`) — but a topic with no subscription doesn't notify anyone. Two ways to fix that, both zero application code:
 
 ### Option 1 — email (fastest, no Lambda involved)
 
@@ -85,7 +92,7 @@ Once both are done, get a spend breakdown for a stage with:
 
 ## Portability — the honest tradeoff
 
-This entire layer — X-Ray, EMF metrics, CloudWatch Alarms and Dashboard — is AWS-native, not portable to a non-AWS observability backend. That was a deliberate choice, not an oversight: an earlier attempt at a vendor-agnostic OTLP pipeline (configurable exporter destination, no vendor SDK) worked for its intended scope but hit a real bug in a third-party Lambda instrumentation library that broke the `api` Lambda in production. Given the choice between debugging that library and shipping something AWS-native that works reliably today, AWS-native won. If you're deploying into a client's account who already runs their own observability stack, everything on this page still surfaces in *their* CloudWatch/X-Ray — it's not locked to a separate dbnz-owned backend — but it won't forward into Datadog/Grafana/Splunk/etc. without you building that forwarding yourself (see [Notifications](notifications.md#sns-fan-out-for-anything-the-built-in-channels-dont-cover) for the same SNS fan-out pattern applied to security alerts, which generalizes to this too).
+This entire layer — optional X-Ray plus EMF metrics, CloudWatch Alarms and Dashboard — is AWS-native, not portable to a non-AWS observability backend. That was a deliberate choice, not an oversight: an earlier attempt at a vendor-agnostic OTLP pipeline (configurable exporter destination, no vendor SDK) worked for its intended scope but hit a real bug in a third-party Lambda instrumentation library that broke the `api` Lambda in production. Given the choice between debugging that library and shipping something AWS-native that works reliably today, AWS-native won. If you're deploying into a client's account who already runs their own observability stack, everything on this page still surfaces in *their* CloudWatch/X-Ray — it's not locked to a separate dbnz-owned backend — but it won't forward into Datadog/Grafana/Splunk/etc. without you building that forwarding yourself (see [Notifications](notifications.md#sns-fan-out-for-anything-the-built-in-channels-dont-cover) for the same SNS fan-out pattern applied to security alerts, which generalizes to this too).
 
 ## Related pages
 

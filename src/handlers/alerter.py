@@ -11,7 +11,11 @@ from boto3.dynamodb.types import TypeDeserializer
 
 from ..domain.correlation_engine import CorrelationEngine
 from ..infra.aws_handler import AwsHandler
-from ..infra.detection_rules_repository import get_rule_catalog_metadata, load_detection_rules, mark_rule_catalog_observed
+from ..infra.detection_rules_repository import (
+    get_rule_catalog_metadata,
+    load_detection_rules,
+    mark_rule_catalog_observed,
+)
 from ..infra.logger import Logger
 from ..infra.metrics import emit_metric
 from ..infra.xray_setup import patch_boto3
@@ -70,7 +74,11 @@ def get_correlation_rules(*, aws: AwsHandler, logger: Logger) -> list[dict[str, 
     now = time.time()
     catalog = get_rule_catalog_metadata(aws)
     generation = str(catalog.get("generation") or "")
-    if CORR_RULES_CACHE is None or generation != CORR_RULES_GENERATION or (now - CORR_RULES_CACHE_LOADED_AT) >= CORR_RULES_TTL_SECONDS:
+    if (
+        CORR_RULES_CACHE is None
+        or generation != CORR_RULES_GENERATION
+        or (now - CORR_RULES_CACHE_LOADED_AT) >= CORR_RULES_TTL_SECONDS
+    ):
         CORR_RULES_CACHE = load_detection_rules(aws, logger, rule_kind="correlation")
         CORR_RULES_CACHE_LOADED_AT = now
         CORR_RULES_GENERATION = generation
@@ -127,17 +135,26 @@ class DynamoSignalsRepository:
             # Query only this integration, newest first, with bounded page work.
             table = self.aws._ddb_resource.Table(self.table_name)
             integration = group_value.split(":", 1)[0]
-            kwargs = {"IndexName": "gsi_signal_integration", "ScanIndexForward": False,
-                      "KeyConditionExpression": Key("integration_id").eq(integration) & Key("timestamp").gte(since.isoformat()),
-                      "Limit": 300}
-            results = []
+            kwargs: dict[str, Any] = {
+                "IndexName": "gsi_signal_integration",
+                "ScanIndexForward": False,
+                "KeyConditionExpression": Key("integration_id").eq(integration)
+                & Key("timestamp").gte(since.isoformat()),
+                "Limit": 300,
+            }
+            results: list[dict[str, Any]] = []
             for _ in range(10):
                 page = table.query(**kwargs)
-                results.extend(s for s in page.get("Items", []) if s.get("runtime_entity") == group_value)
+                results.extend(
+                    s for s in page.get("Items", []) if s.get("runtime_entity") == group_value
+                )
                 if len(results) >= limit or not page.get("LastEvaluatedKey"):
                     return results[:limit]
                 kwargs["ExclusiveStartKey"] = page["LastEvaluatedKey"]
-            self.logger.warning(event_name="RUNTIME_CORRELATION_QUERY_LIMIT", message="Runtime correlation lookback exceeded 3000 records; narrow the integration or window")
+            self.logger.warning(
+                event_name="RUNTIME_CORRELATION_QUERY_LIMIT",
+                message="Runtime correlation lookback exceeded 3000 records; narrow the integration or window",
+            )
             return results[:limit]
         if indexed:
             index_name, key_attr = indexed
@@ -189,7 +206,8 @@ class DynamoSignalsRepository:
         results: list[dict[str, Any]] = []
         query_kwargs: dict[str, Any] = {
             "IndexName": index_name,
-            "KeyConditionExpression": Key(key_attr).eq(group_value) & Key("timestamp").gte(since.isoformat()),
+            "KeyConditionExpression": Key(key_attr).eq(group_value)
+            & Key("timestamp").gte(since.isoformat()),
         }
 
         while True:
@@ -443,14 +461,18 @@ def lambda_handler(event, context):
                 if inserted and SIGNALS_TABLE_NAME:
                     aws.sqs_send(
                         queue_url=SIGNALS_WRITE_QUEUE_URL,
-                        body={**alert, "item_type": "correlation",
-                              "detection_id": str(alert["alert_id"])},
+                        body={
+                            **alert,
+                            "item_type": "correlation",
+                            "detection_id": str(alert["alert_id"]),
+                        },
                         success_event_name="SIGNAL_ENQUEUED",
                         failure_event_name="SIGNAL_ENQUEUE_FAIL",
                     )
             elif OUTBOX_TABLE_NAME:
                 aws.put_outbox_record(
-                    table_name=OUTBOX_TABLE_NAME, payload=alert,
+                    table_name=OUTBOX_TABLE_NAME,
+                    payload=alert,
                     destinations=["notifications", "responses"],
                 )
                 outboxed += 1

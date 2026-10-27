@@ -1,4 +1,5 @@
 """Tests for the processor Lambda handler (event → detection → signal/alert/outbox)."""
+
 from __future__ import annotations
 
 import os
@@ -7,7 +8,10 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 os.environ.setdefault("LOGS_TABLE_NAME", "test-logs-table")
-os.environ.setdefault("SIGNALS_WRITE_QUEUE_URL", "https://sqs.us-east-1.amazonaws.com/123456789012/test-signals-write-queue")
+os.environ.setdefault(
+    "SIGNALS_WRITE_QUEUE_URL",
+    "https://sqs.us-east-1.amazonaws.com/123456789012/test-signals-write-queue",
+)
 os.environ.setdefault("ALERTS_TABLE_NAME", "test-alerts-table")
 os.environ.setdefault("OUTBOX_TABLE_NAME", "test-outbox-table")
 os.environ.setdefault("AWS_DEFAULT_REGION", "us-east-1")
@@ -20,7 +24,9 @@ from src.handlers.processor import get_lists, get_rules, lambda_handler
 # ---------------------------------------------------------------------------
 
 
-def make_cloudtrail_event(event_name="CreateUser", event_source="iam.amazonaws.com", **detail_overrides) -> dict:
+def make_cloudtrail_event(
+    event_name="CreateUser", event_source="iam.amazonaws.com", **detail_overrides
+) -> dict:
     detail = {
         "eventSource": event_source,
         "eventName": event_name,
@@ -304,7 +310,9 @@ class TestRuleCaching:
     def test_get_rules_loads_once_and_caches(self):
         logger = MagicMock()
         aws = MagicMock()
-        with patch("src.handlers.processor.load_detection_rules", return_value=[make_signal_rule()]) as load_rules:
+        with patch(
+            "src.handlers.processor.load_detection_rules", return_value=[make_signal_rule()]
+        ) as load_rules:
             first = get_rules(aws, logger)
             second = get_rules(aws, logger)
 
@@ -315,7 +323,9 @@ class TestRuleCaching:
         logger = MagicMock()
         aws = MagicMock()
         raw_lists = [{"rule_id": "blocklist-ips", "values": ["1.2.3.4"]}]
-        with patch("src.handlers.processor.load_detection_rules", return_value=raw_lists) as load_rules:
+        with patch(
+            "src.handlers.processor.load_detection_rules", return_value=raw_lists
+        ) as load_rules:
             first = get_lists(aws, logger)
             second = get_lists(aws, logger)
 
@@ -326,7 +336,10 @@ class TestRuleCaching:
     def test_lambda_handler_reuses_cache_across_invocations(self):
         rules = [make_signal_rule()]
         patcher, instance = patched_aws_handler()
-        with patcher, patch("src.handlers.processor.load_detection_rules", return_value=rules) as load_rules:
+        with (
+            patcher,
+            patch("src.handlers.processor.load_detection_rules", return_value=rules) as load_rules,
+        ):
             lambda_handler(make_cloudtrail_event(), make_context())
             lambda_handler(make_cloudtrail_event(), make_context())
 

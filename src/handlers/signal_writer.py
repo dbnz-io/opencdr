@@ -24,6 +24,7 @@ un-acked and eligible for SQS's own retry/backoff -> DLQ after
 maxReceiveCount, while successfully-processed messages in the same
 batch (including legitimate duplicates) are acked normally.
 """
+
 from __future__ import annotations
 
 import json
@@ -86,12 +87,20 @@ def lambda_handler(event: dict, context) -> dict:
             # alert/outbox transaction even if a retry finds the signal already
             # stored: the previous invocation may have failed between the two.
             if signal_item.get("ingestion_managed") and signal_item.get("notify"):
-                alert = {**signal_item, "alert_key": signal_item["detection_id"],
-                         "alert_id": signal_item["detection_id"], "type": "signal", "match_count": 1}
+                alert = {
+                    **signal_item,
+                    "alert_key": signal_item["detection_id"],
+                    "alert_id": signal_item["detection_id"],
+                    "type": "signal",
+                    "match_count": 1,
+                }
                 aws.put_alert_with_outbox(
                     alerts_table=os.environ["ALERTS_TABLE_NAME"],
                     outbox_table=os.environ["OUTBOX_TABLE_NAME"],
-                    alert_item=alert, payload=alert, destinations=["notifications"])
+                    alert_item=alert,
+                    payload=alert,
+                    destinations=["notifications"],
+                )
             if inserted:
                 emit_metric(
                     "SignalsCreated",

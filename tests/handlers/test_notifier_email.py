@@ -1,4 +1,5 @@
 """Tests for email (SNS) notification channel in notifier handler."""
+
 from __future__ import annotations
 
 import json
@@ -15,7 +16,6 @@ from src.handlers.notifier import (
     build_email_message,
     lambda_handler,
 )
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -36,15 +36,25 @@ def make_alert(**overrides) -> dict:
             "api": {"operation": "AssumeRole"},
         },
         "signal_refs": [
-            {"timestamp": "2026-01-01T00:00:00Z", "rule_id": "rule-001", "detection_id": "det-aabbcc"},
-            {"timestamp": "2026-01-01T00:01:00Z", "rule_id": "rule-001", "detection_id": "det-ddeeff"},
+            {
+                "timestamp": "2026-01-01T00:00:00Z",
+                "rule_id": "rule-001",
+                "detection_id": "det-aabbcc",
+            },
+            {
+                "timestamp": "2026-01-01T00:01:00Z",
+                "rule_id": "rule-001",
+                "detection_id": "det-ddeeff",
+            },
         ],
     }
     base.update(overrides)
     return base
 
 
-def make_settings(*, email_enabled=True, topic_arn="arn:aws:sns:us-east-1:123:alerts", routing=None) -> dict:
+def make_settings(
+    *, email_enabled=True, topic_arn="arn:aws:sns:us-east-1:123:alerts", routing=None
+) -> dict:
     return {
         "notifications_enabled": True,
         "channels": {
@@ -145,7 +155,9 @@ class TestRouteChannelsEmail:
 
     def test_auto_fanout_includes_email_via_env_topic_arn(self):
         settings = make_settings(email_enabled=True, topic_arn="")
-        with patch("src.handlers.notifier.ALERTS_SNS_TOPIC_ARN", "arn:aws:sns:us-east-1:123:alerts"):
+        with patch(
+            "src.handlers.notifier.ALERTS_SNS_TOPIC_ARN", "arn:aws:sns:us-east-1:123:alerts"
+        ):
             channels = _route_channels(make_alert(), settings)
         assert "email" in channels
 
@@ -220,7 +232,9 @@ class TestLambdaHandlerEmail:
         with (
             patch("src.handlers.notifier.load_global_settings", return_value=settings),
             patch("src.handlers.notifier.AwsHandler") as MockAws,
-            patch("src.handlers.notifier.ALERTS_SNS_TOPIC_ARN", "arn:aws:sns:us-east-1:123:env-alerts"),
+            patch(
+                "src.handlers.notifier.ALERTS_SNS_TOPIC_ARN", "arn:aws:sns:us-east-1:123:env-alerts"
+            ),
         ):
             aws_instance = self._make_aws_mock()
             MockAws.return_value = aws_instance

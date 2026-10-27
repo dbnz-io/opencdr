@@ -5,6 +5,7 @@ firing again, with no signal anywhere. Fixed with stdlib `logging` --
 kept deliberately decoupled from the custom infra Logger class, since
 this is pure domain logic with no infra dependency today.
 """
+
 import logging
 
 from src.domain.detection_engine import evaluate_condition
@@ -52,6 +53,8 @@ class TestRegexFailureLogging:
 
     def test_valid_regex_does_not_log(self, caplog):
         with caplog.at_level(logging.WARNING, logger="src.domain.detection_engine"):
-            evaluate_condition(make_event(), {"field": "activity_name", "op": "matches", "value": "^Create.*"})
+            evaluate_condition(
+                make_event(), {"field": "activity_name", "op": "matches", "value": "^Create.*"}
+            )
 
         assert len(caplog.records) == 0

@@ -24,6 +24,7 @@ as a JSON string, and precomputes the account/year/month/day/hour
 partition fields directly in Python, where they're actually testable.
 Firehose's processor just extracts fields that already exist verbatim.
 """
+
 from __future__ import annotations
 
 import json

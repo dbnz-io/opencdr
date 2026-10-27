@@ -33,6 +33,7 @@ import socket
 import urllib.parse
 
 _log = logging.getLogger(__name__)
+IPAddress = ipaddress.IPv4Address | ipaddress.IPv6Address
 
 
 class EgressBlocked(ValueError):
@@ -49,13 +50,13 @@ def _allowed_hosts() -> list[str]:
     ]
 
 
-def _ip_is_blocked(ip: ipaddress._BaseAddress) -> bool:
+def _ip_is_blocked(ip: IPAddress) -> bool:
     if ip.is_loopback or ip.is_link_local:
         return True
     return _flag("NOTIFY_BLOCK_PRIVATE_IPS") and ip.is_private
 
 
-def _candidate_ips(host: str) -> list[ipaddress._BaseAddress]:
+def _candidate_ips(host: str) -> list[IPAddress]:
     """IP literals for `host`. If host is a name, resolve only when
     NOTIFY_RESOLVE_HOSTS is set (off by default -> no DNS in the hot path)."""
     try:
@@ -68,7 +69,7 @@ def _candidate_ips(host: str) -> list[ipaddress._BaseAddress]:
         infos = socket.getaddrinfo(host, None)
     except OSError:
         return []  # resolution failed -- let the real request fail naturally
-    out = []
+    out: list[IPAddress] = []
     for info in infos:
         try:
             out.append(ipaddress.ip_address(info[4][0]))

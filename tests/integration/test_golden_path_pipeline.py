@@ -158,12 +158,16 @@ def test_cross_source_correlation_actor_based_disable_user(monkeypatch):
         "024_guardduty_iam_credential_compromise.json",
         rules_dir=GUARDDUTY_RULES_DIR,
     )
-    cloudtrail_signal = _make_signal("009_admin_policy_attached.json", "009_admin_policy_attached.json")
+    cloudtrail_signal = _make_signal(
+        "009_admin_policy_attached.json", "009_admin_policy_attached.json"
+    )
 
     assert guardduty_signal["actor"]["user_name"] == "attacker"
     assert cloudtrail_signal["actor"]["user_name"] == "attacker"
 
-    correlation_rule = _load_json(CORRELATION_RULES_DIR / "029_correlation_guardduty_credential_compromise_then_privesc.json")
+    correlation_rule = _load_json(
+        CORRELATION_RULES_DIR / "029_correlation_guardduty_credential_compromise_then_privesc.json"
+    )
     assert correlation_rule["response_module"] == "disable_user"
     assert correlation_rule["threshold"] == 2
 
@@ -208,12 +212,16 @@ def test_cross_source_correlation_source_ip_based_visibility_only(monkeypatch):
         "025_guardduty_ec2_backdoor_malware.json",
         rules_dir=GUARDDUTY_RULES_DIR,
     )
-    cloudtrail_signal = _make_signal("016_secretsmanager_accessed.json", "016_secretsmanager_accessed.json")
+    cloudtrail_signal = _make_signal(
+        "016_secretsmanager_accessed.json", "016_secretsmanager_accessed.json"
+    )
 
     assert guardduty_signal["network"]["source_ip"] == "203.0.113.2"
     assert cloudtrail_signal["network"]["source_ip"] == "203.0.113.2"
 
-    correlation_rule = _load_json(CORRELATION_RULES_DIR / "030_correlation_guardduty_backdoor_then_secrets_access.json")
+    correlation_rule = _load_json(
+        CORRELATION_RULES_DIR / "030_correlation_guardduty_backdoor_then_secrets_access.json"
+    )
     assert correlation_rule["response_module"] == ""
     assert correlation_rule["threshold"] == 2
 
@@ -260,7 +268,14 @@ def test_security_group_rule_revoked_with_translated_shape(monkeypatch):
 
     dredge.aws_ir.response.deauthorize_security_group_rules.assert_called_once_with(
         group_id="sg-0abc123",
-        ingress_rules=[{"IpProtocol": "tcp", "IpRanges": [{"CidrIp": "0.0.0.0/0"}], "FromPort": 22, "ToPort": 22}],
+        ingress_rules=[
+            {
+                "IpProtocol": "tcp",
+                "IpRanges": [{"CidrIp": "0.0.0.0/0"}],
+                "FromPort": 22,
+                "ToPort": 22,
+            }
+        ],
         egress_rules=None,
     )
     logger.error.assert_not_called()
@@ -330,17 +345,29 @@ def test_security_group_rollback_round_trips_end_to_end(monkeypatch):
 
     rollback_logger = MagicMock()
     ir_rollback._process_record(
-        _sqs_record({"detection_id": action_row["detection_id"]}), "req-6", "rh-golden-path-6", rollback_logger
+        _sqs_record({"detection_id": action_row["detection_id"]}),
+        "req-6",
+        "rh-golden-path-6",
+        rollback_logger,
     )
 
     rollback_dredge.aws_ir.response.authorize_security_group_rules.assert_called_once_with(
         group_id="sg-0abc123",
-        ingress_rules=[{"IpProtocol": "tcp", "IpRanges": [{"CidrIp": "0.0.0.0/0"}], "FromPort": 22, "ToPort": 22}],
+        ingress_rules=[
+            {
+                "IpProtocol": "tcp",
+                "IpRanges": [{"CidrIp": "0.0.0.0/0"}],
+                "FromPort": 22,
+                "ToPort": 22,
+            }
+        ],
         egress_rules=None,
     )
     rollback_logger.error.assert_not_called()
     rollback_table.update_item.assert_called_once()
-    assert rollback_table.update_item.call_args.kwargs["Key"] == {"detection_id": action_row["detection_id"]}
+    assert rollback_table.update_item.call_args.kwargs["Key"] == {
+        "detection_id": action_row["detection_id"]
+    }
 
     rollback_outbox.put_item.assert_called_once()
     notify_payload = json.loads(rollback_outbox.put_item.call_args.kwargs["Item"]["payload"])
@@ -410,7 +437,10 @@ def test_disable_user_rollback_round_trips_end_to_end(monkeypatch):
 
     rollback_logger = MagicMock()
     ir_rollback._process_record(
-        _sqs_record({"detection_id": action_row["detection_id"]}), "req-8", "rh-golden-path-8", rollback_logger
+        _sqs_record({"detection_id": action_row["detection_id"]}),
+        "req-8",
+        "rh-golden-path-8",
+        rollback_logger,
     )
 
     rollback_dredge.aws_ir.response.restore_user.assert_called_once_with(
