@@ -110,7 +110,8 @@ _READ_TOOLS = {
     "opencdr_ir_actions_get",
 }
 _RULES_SETTINGS_WRITE = {
-    "opencdr_integrations_put", "opencdr_integrations_preview",
+    "opencdr_integrations_put",
+    "opencdr_integrations_preview",
     "opencdr_rules_upsert",
     "opencdr_rules_delete",
     "opencdr_lists_replace",

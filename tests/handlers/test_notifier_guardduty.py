@@ -6,6 +6,7 @@ _route_channels (which only picks channels once an item is eligible to send)
 and from the item-level notify flag (which processor.py sets True for every
 GuardDuty match so it's still visible in the alerts table/API).
 """
+
 from __future__ import annotations
 
 import json
@@ -16,7 +17,6 @@ os.environ.setdefault("LOGS_TABLE_NAME", "test-logs-table")
 os.environ.setdefault("AWS_DEFAULT_REGION", "us-east-1")
 
 from src.handlers.notifier import _guardduty_should_notify, lambda_handler
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -40,14 +40,20 @@ def make_gd_item(**overrides) -> dict:
             "api": {"operation": "UnauthorizedAccess:IAMUser/TorIPCaller"},
         },
         "signal_refs": [
-            {"timestamp": "2026-01-01T00:00:00Z", "rule_id": "024_guardduty_iam_credential_compromise", "detection_id": "det-gd-1"},
+            {
+                "timestamp": "2026-01-01T00:00:00Z",
+                "rule_id": "024_guardduty_iam_credential_compromise",
+                "detection_id": "det-gd-1",
+            },
         ],
     }
     base.update(overrides)
     return base
 
 
-def make_settings(guardduty_notify=None, routing=None, webhook="https://hooks.slack.com/test") -> dict:
+def make_settings(
+    guardduty_notify=None, routing=None, webhook="https://hooks.slack.com/test"
+) -> dict:
     return {
         "notifications_enabled": True,
         "channels": {
@@ -177,7 +183,11 @@ class TestLambdaHandlerGuardDutyGating:
                 "api": {"operation": "AttachUserPolicy"},
             },
             "signal_refs": [
-                {"timestamp": "2026-01-01T00:00:00Z", "rule_id": "009_admin_policy_attached", "detection_id": "det-ct-1"},
+                {
+                    "timestamp": "2026-01-01T00:00:00Z",
+                    "rule_id": "009_admin_policy_attached",
+                    "detection_id": "det-ct-1",
+                },
             ],
         }
         with (

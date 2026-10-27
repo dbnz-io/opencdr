@@ -6,6 +6,7 @@ covers the pure helpers directly, one full happy-path run (fresh install,
 Slack only), the "decline everything" path, and the one channel with
 genuinely different validation logic (Jira's all-four-fields-required rule).
 """
+
 from __future__ import annotations
 
 import json
@@ -18,7 +19,6 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent.parent.parent / "scripts"))
 
 import opencdr  # noqa: E402  (after sys.path manipulation)
-
 
 # ---------------------------------------------------------------------------
 # _prompt / _confirm / _step -- pure(ish) helpers
@@ -37,7 +37,10 @@ class TestPrompt:
     def test_secret_uses_getpass_not_input(self):
         with (
             patch("getpass.getpass", return_value="hidden-value") as mock_getpass,
-            patch("builtins.input", side_effect=AssertionError("should not call input() for a secret prompt")),
+            patch(
+                "builtins.input",
+                side_effect=AssertionError("should not call input() for a secret prompt"),
+            ),
         ):
             assert opencdr._prompt("API key", secret=True) == "hidden-value"
             mock_getpass.assert_called_once()
@@ -95,7 +98,10 @@ class TestPromptApiCredentials:
             url, key = opencdr._prompt_api_credentials({})
         assert url == "https://api.example.com"
         assert key == "test-key"
-        assert json.loads(config_file.read_text()) == {"url": "https://api.example.com", "key": "test-key"}
+        assert json.loads(config_file.read_text()) == {
+            "url": "https://api.example.com",
+            "key": "test-key",
+        }
 
     def test_trailing_slash_stripped(self, config_file):
         with (
@@ -152,7 +158,13 @@ def wizard_dirs(tmp_path, monkeypatch):
     return path
 
 
-def _run_wizard(*, inputs: list[str], secrets: list[str], status_response=(200, {"service": "OPENCDR-API"}), settings_response=(200, {"ok": True})):
+def _run_wizard(
+    *,
+    inputs: list[str],
+    secrets: list[str],
+    status_response=(200, {"service": "OPENCDR-API"}),
+    settings_response=(200, {"ok": True}),
+):
     request_calls = []
 
     def fake_request(method, path, url, key, **kwargs):
@@ -175,12 +187,12 @@ class TestRunSetupWizardFreshInstall:
         calls = _run_wizard(
             inputs=[
                 "https://api.example.com",  # API base URL
-                "y",   # Configure Slack?
-                "n",   # Configure Discord?
-                "n",   # Configure email?
-                "n",   # Configure Jira?
-                "n",   # Configure Security Hub?
-                "n",   # Configure custom webhook?
+                "y",  # Configure Slack?
+                "n",  # Configure Discord?
+                "n",  # Configure email?
+                "n",  # Configure Jira?
+                "n",  # Configure Security Hub?
+                "n",  # Configure custom webhook?
             ],
             secrets=["test-api-key", "https://hooks.slack.com/test"],
         )
@@ -188,7 +200,10 @@ class TestRunSetupWizardFreshInstall:
         put_calls = [c for c in calls if c[0] == "PUT" and c[1] == "/settings/global"]
         assert len(put_calls) == 1
         payload = put_calls[0][2]
-        assert payload["channels"]["slack"] == {"enabled": True, "webhook_url": "https://hooks.slack.com/test"}
+        assert payload["channels"]["slack"] == {
+            "enabled": True,
+            "webhook_url": "https://hooks.slack.com/test",
+        }
         assert payload["notifications_enabled"] is True
         assert "setup complete" in capsys.readouterr().out.lower()
 
@@ -196,7 +211,12 @@ class TestRunSetupWizardFreshInstall:
         calls = _run_wizard(
             inputs=[
                 "https://api.example.com",
-                "n", "n", "n", "n", "n", "n",  # decline all 6 channels
+                "n",
+                "n",
+                "n",
+                "n",
+                "n",
+                "n",  # decline all 6 channels
             ],
             secrets=["test-api-key"],
         )
@@ -219,16 +239,16 @@ class TestRunSetupWizardFreshInstall:
         # the token blank exercises the "all four required" validation.
         calls = _run_wizard(
             inputs=[
-                "https://api.example.com",   # API base URL
-                "n",                         # Slack
-                "n",                         # Discord
-                "n",                         # Email
-                "y",                         # Jira -- yes
+                "https://api.example.com",  # API base URL
+                "n",  # Slack
+                "n",  # Discord
+                "n",  # Email
+                "y",  # Jira -- yes
                 "https://yourco.atlassian.net",  # jira base URL
-                "SEC",                        # jira project key
-                "soc@yourco.com",             # jira user email
-                "n",                          # Security Hub
-                "n",                          # Custom webhook
+                "SEC",  # jira project key
+                "soc@yourco.com",  # jira user email
+                "n",  # Security Hub
+                "n",  # Custom webhook
             ],
             secrets=[
                 "test-api-key",

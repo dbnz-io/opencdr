@@ -10,6 +10,7 @@ Resolution order (see _resolve_role_arn's docstring in responder.py):
 conftest.py sets a default OPENCDR_IR_ROLE_ARN and stubs the "sts" boto3
 client so importing src.handlers.responder never makes a real network call.
 """
+
 from __future__ import annotations
 
 import os
@@ -22,6 +23,7 @@ os.environ.setdefault("IR_ACCOUNT_ROLES_TABLE_NAME", "test-ir-account-roles-tabl
 os.environ.setdefault("AWS_DEFAULT_REGION", "us-east-1")
 
 from dredge import Dredge
+
 from src.handlers import responder
 
 
@@ -90,7 +92,11 @@ class TestResolveRoleArnWithAccount:
     def test_result_is_cached_within_ttl(self, monkeypatch, mock_roles_table):
         monkeypatch.setenv("OPENCDR_IR_ROLE_ARN", "arn:aws:iam::111111111111:role/home-role")
         mock_roles_table.get_item.return_value = {
-            "Item": {"aws_account_id": "222222222222", "role_arn": "arn:aws:iam::222222222222:role/x", "enabled": True}
+            "Item": {
+                "aws_account_id": "222222222222",
+                "role_arn": "arn:aws:iam::222222222222:role/x",
+                "enabled": True,
+            }
         }
         responder._resolve_role_arn("222222222222")
         responder._resolve_role_arn("222222222222")
@@ -100,7 +106,11 @@ class TestResolveRoleArnWithAccount:
         monkeypatch.setenv("OPENCDR_IR_ROLE_ARN", "arn:aws:iam::111111111111:role/home-role")
         monkeypatch.setattr(responder, "ROLE_ARN_CACHE_TTL_SECONDS", 0)
         mock_roles_table.get_item.return_value = {
-            "Item": {"aws_account_id": "222222222222", "role_arn": "arn:aws:iam::222222222222:role/x", "enabled": True}
+            "Item": {
+                "aws_account_id": "222222222222",
+                "role_arn": "arn:aws:iam::222222222222:role/x",
+                "enabled": True,
+            }
         }
         responder._resolve_role_arn("222222222222")
         responder._resolve_role_arn("222222222222")

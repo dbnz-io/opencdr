@@ -9,7 +9,7 @@
 - **Delivery uses the outbox pattern.** `alerter` doesn't call SQS directly — it writes a row to an outbox table in the same logical operation as writing the alert, and a separate `publisher` Lambda (triggered by the outbox table's own DynamoDB stream) claims and publishes that row to SQS. This gives at-least-once delivery without alerter and publisher being directly coupled, and survives a `publisher` failure without losing the alert (the outbox row just stays `PENDING` and gets retried, up to `PUBLISHER_MAX_ATTEMPTS`).
 - **`processor`'s EventBridge rule is single-region by default.** CloudTrail delivers an event to the default bus in whichever region the API call happened in — true even for a multi-region trail — and GuardDuty detectors are per-region. An account operating in more than one region needs an explicit, opt-in step per additional region to not be blind everywhere except the deployment region. See [Cross-Region Event Forwarding](region-forwarding.md).
 
-## The ten Lambda functions
+## The eleven Lambda functions
 
 | Function | Trigger | Responsibility |
 |---|---|---|
@@ -22,7 +22,7 @@
 | `rollbackHandler` | SQS (`ir-rollback-queue`) | Undo a previously-executed, rollback-eligible action on request — assumes the same per-account IR role, own circuit-breaker budget separate from `responder`'s. See [Incident Response](incident-response.md#rollback) |
 | `api` | API Gateway (HTTP, API-key auth) | Query signals/logs/rules, manage settings and IR-role mappings, enqueue rollback requests to `rollbackHandler` |
 | `alarmNotifier` | SNS (`AlarmsSnsTopic`) | Format a CloudWatch Alarm state-change notification and forward it to Slack — operational/infra health, separate from the security-alert pipeline above |
-| `archiver` | DynamoDB streams on the signals/alerts/logs tables | Flatten and forward new records to S3 (Parquet, via Firehose) before they TTL out of DynamoDB — see [`data-archival.md`](data-archival.md) |
+| `archiver` (optional; disabled by default) | DynamoDB streams on the signals/alerts/logs tables | Flatten and forward new records to S3 (Parquet, via Firehose) before they TTL out of DynamoDB — see [`data-archival.md`](data-archival.md) |
 
 Each function has its **own** IAM role (`provider.iam.role.mode: perFunction`), not one shared role for the whole stack — `processor` can't touch DynamoDB streams, `notifier` can't touch DynamoDB streams it doesn't own, and only `responder` can call `sts:AssumeRole`, and only on roles matching one naming convention. See [Security](security.md).
 

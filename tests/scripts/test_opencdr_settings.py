@@ -1,4 +1,5 @@
 """Tests for `opencdr.py settings set` — Security Hub and Jira integrations."""
+
 from __future__ import annotations
 
 import argparse
@@ -13,7 +14,6 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent.parent.parent / "scripts"))
 
 import opencdr  # noqa: E402  (after sys.path manipulation)
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -130,14 +130,18 @@ class TestSettingsSetSecurityHub:
         assert payload["channels"]["slack"]["webhook_url"] == "https://hooks.slack.com/x"
 
     def test_enable_securityhub_combined_with_discord(self):
-        args = _make_args(enable_securityhub=True, discord_webhook="https://discord.com/api/webhooks/x")
+        args = _make_args(
+            enable_securityhub=True, discord_webhook="https://discord.com/api/webhooks/x"
+        )
         _, calls = _run_settings_set(args)
         payload = calls[0][2]
         assert "securityhub" in payload["channels"]
         assert "discord" in payload["channels"]
 
     def test_enable_securityhub_combined_with_email(self):
-        args = _make_args(enable_securityhub=True, email_topic_arn="arn:aws:sns:us-east-1:123:topic")
+        args = _make_args(
+            enable_securityhub=True, email_topic_arn="arn:aws:sns:us-east-1:123:topic"
+        )
         _, calls = _run_settings_set(args)
         payload = calls[0][2]
         assert "securityhub" in payload["channels"]
@@ -195,7 +199,9 @@ class TestArgparser:
         sgs.add_argument("--slack-webhook", dest="slack_webhook")
         sgs.add_argument("--discord-webhook", dest="discord_webhook")
         sgs.add_argument("--email-topic-arn", dest="email_topic_arn")
-        sgs.add_argument("--enable-securityhub", dest="enable_securityhub", action="store_true", default=False)
+        sgs.add_argument(
+            "--enable-securityhub", dest="enable_securityhub", action="store_true", default=False
+        )
         return parser
 
     def test_enable_securityhub_flag_defaults_to_false(self):
@@ -234,11 +240,7 @@ class TestArgparser:
                     for sub_name, sub_sub in sub_action.choices.items():
                         if sub_name != "set":
                             continue
-                        option_strings = [
-                            s
-                            for a in sub_sub._actions
-                            for s in a.option_strings
-                        ]
+                        option_strings = [s for a in sub_sub._actions for s in a.option_strings]
                         found = "--enable-securityhub" in option_strings
         assert found, "--enable-securityhub not registered in the real parser"
 
@@ -385,7 +387,9 @@ class TestArgparserJira:
 
 class TestSettingsSetWebhook:
     def test_webhook_url_builds_correct_payload(self):
-        _, calls = _run_settings_set(_make_args(webhook_url="https://events.pagerduty.com/v2/enqueue"))
+        _, calls = _run_settings_set(
+            _make_args(webhook_url="https://events.pagerduty.com/v2/enqueue")
+        )
         webhook = calls[0][2]["channels"]["webhook"]
         assert webhook["enabled"] is True
         assert len(webhook["targets"]) == 1
@@ -397,35 +401,43 @@ class TestSettingsSetWebhook:
         assert target["name"] == "default"
 
     def test_custom_webhook_name_used(self):
-        _, calls = _run_settings_set(_make_args(
-            webhook_url="https://example.com/hook",
-            webhook_name="pagerduty",
-        ))
+        _, calls = _run_settings_set(
+            _make_args(
+                webhook_url="https://example.com/hook",
+                webhook_name="pagerduty",
+            )
+        )
         target = calls[0][2]["channels"]["webhook"]["targets"][0]
         assert target["name"] == "pagerduty"
 
     def test_webhook_header_parsed(self):
-        _, calls = _run_settings_set(_make_args(
-            webhook_url="https://example.com/hook",
-            webhook_headers=["Authorization=GenieKey abc123"],
-        ))
+        _, calls = _run_settings_set(
+            _make_args(
+                webhook_url="https://example.com/hook",
+                webhook_headers=["Authorization=GenieKey abc123"],
+            )
+        )
         target = calls[0][2]["channels"]["webhook"]["targets"][0]
         assert target["headers"]["Authorization"] == "GenieKey abc123"
 
     def test_multiple_webhook_headers_parsed(self):
-        _, calls = _run_settings_set(_make_args(
-            webhook_url="https://example.com/hook",
-            webhook_headers=["Authorization=Bearer tok", "X-Custom=val"],
-        ))
+        _, calls = _run_settings_set(
+            _make_args(
+                webhook_url="https://example.com/hook",
+                webhook_headers=["Authorization=Bearer tok", "X-Custom=val"],
+            )
+        )
         headers = calls[0][2]["channels"]["webhook"]["targets"][0]["headers"]
         assert headers["Authorization"] == "Bearer tok"
         assert headers["X-Custom"] == "val"
 
     def test_header_value_with_equals_sign(self):
-        _, calls = _run_settings_set(_make_args(
-            webhook_url="https://example.com/hook",
-            webhook_headers=["Authorization=Bearer tok=padded"],
-        ))
+        _, calls = _run_settings_set(
+            _make_args(
+                webhook_url="https://example.com/hook",
+                webhook_headers=["Authorization=Bearer tok=padded"],
+            )
+        )
         headers = calls[0][2]["channels"]["webhook"]["targets"][0]["headers"]
         assert headers["Authorization"] == "Bearer tok=padded"
 
@@ -434,10 +446,12 @@ class TestSettingsSetWebhook:
         assert "webhook" not in calls[0][2].get("channels", {})
 
     def test_webhook_combined_with_slack(self):
-        _, calls = _run_settings_set(_make_args(
-            webhook_url="https://example.com/hook",
-            slack_webhook="https://hooks.slack.com/x",
-        ))
+        _, calls = _run_settings_set(
+            _make_args(
+                webhook_url="https://example.com/hook",
+                slack_webhook="https://hooks.slack.com/x",
+            )
+        )
         payload = calls[0][2]
         assert "webhook" in payload["channels"]
         assert "slack" in payload["channels"]
@@ -448,17 +462,21 @@ class TestSettingsSetWebhook:
             patch.object(opencdr, "_require_api", return_value=("https://api.example.com", "key")),
             pytest.raises(SystemExit) as exc_info,
         ):
-            opencdr.cmd_settings_set(_make_args(
-                webhook_url="https://example.com/hook",
-                webhook_headers=["INVALID_NO_EQUALS"],
-            ))
+            opencdr.cmd_settings_set(
+                _make_args(
+                    webhook_url="https://example.com/hook",
+                    webhook_headers=["INVALID_NO_EQUALS"],
+                )
+            )
         assert exc_info.value.code == 1
 
     def test_empty_headers_list_produces_empty_dict(self):
-        _, calls = _run_settings_set(_make_args(
-            webhook_url="https://example.com/hook",
-            webhook_headers=[],
-        ))
+        _, calls = _run_settings_set(
+            _make_args(
+                webhook_url="https://example.com/hook",
+                webhook_headers=[],
+            )
+        )
         target = calls[0][2]["channels"]["webhook"]["targets"][0]
         assert target["headers"] == {}
 
@@ -543,12 +561,14 @@ class TestSettingsSetGuardDutyNotify:
         assert calls[0][2]["guardduty_notify"] == {"by_severity_and_service": {"HIGH:EC2": True}}
 
     def test_all_four_combined(self):
-        _, calls = _run_settings_set(_make_args(
-            guardduty_notify_default="false",
-            guardduty_notify_severity=["CRITICAL=true"],
-            guardduty_notify_service=["IAMUser=true"],
-            guardduty_notify_severity_service=["HIGH:EC2=true"],
-        ))
+        _, calls = _run_settings_set(
+            _make_args(
+                guardduty_notify_default="false",
+                guardduty_notify_severity=["CRITICAL=true"],
+                guardduty_notify_service=["IAMUser=true"],
+                guardduty_notify_severity_service=["HIGH:EC2=true"],
+            )
+        )
         gd = calls[0][2]["guardduty_notify"]
         assert gd == {
             "default": False,
@@ -572,10 +592,12 @@ class TestSettingsSetGuardDutyNotify:
         assert "guardduty_notify" not in calls[0][2]
 
     def test_guardduty_notify_combined_with_channel_flag(self):
-        _, calls = _run_settings_set(_make_args(
-            slack_webhook="https://hooks.slack.com/x",
-            guardduty_notify_default="true",
-        ))
+        _, calls = _run_settings_set(
+            _make_args(
+                slack_webhook="https://hooks.slack.com/x",
+                guardduty_notify_default="true",
+            )
+        )
         payload = calls[0][2]
         assert payload["channels"]["slack"]["enabled"] is True
         assert payload["guardduty_notify"] == {"default": True}
@@ -674,7 +696,9 @@ class TestMergeGuardDutyNotify:
             "by_severity": {"LOW": False},
             "by_service": {"IAMUser": True},
         }
-        merged = opencdr._merge_guardduty_notify(existing, {"by_severity_and_service": {"HIGH:EC2": True}})
+        merged = opencdr._merge_guardduty_notify(
+            existing, {"by_severity_and_service": {"HIGH:EC2": True}}
+        )
         assert merged["default"] is False
         assert merged["by_severity"] == {"LOW": False}
         assert merged["by_service"] == {"IAMUser": True}
@@ -688,12 +712,16 @@ class TestMergeGuardDutyNotify:
 
 class TestMergeChannels:
     def test_new_channel_added_to_empty(self):
-        merged = opencdr._merge_channels({}, {"slack": {"enabled": True, "webhook_url": "https://x"}})
+        merged = opencdr._merge_channels(
+            {}, {"slack": {"enabled": True, "webhook_url": "https://x"}}
+        )
         assert merged["slack"]["enabled"] is True
 
     def test_existing_channel_not_touched(self):
         existing = {"slack": {"enabled": True, "webhook_url": "https://old"}}
-        merged = opencdr._merge_channels(existing, {"discord": {"enabled": True, "webhook_url": "https://new"}})
+        merged = opencdr._merge_channels(
+            existing, {"discord": {"enabled": True, "webhook_url": "https://new"}}
+        )
         assert merged["slack"]["webhook_url"] == "https://old"
         assert "discord" in merged
 
@@ -702,7 +730,9 @@ class TestMergeChannels:
             "slack": {"enabled": True, "webhook_url": "https://old"},
             "email": {"enabled": True, "topic_arn": "arn:aws:sns:us-east-1:123:topic"},
         }
-        merged = opencdr._merge_channels(existing, {"slack": {"enabled": True, "webhook_url": "https://new"}})
+        merged = opencdr._merge_channels(
+            existing, {"slack": {"enabled": True, "webhook_url": "https://new"}}
+        )
         assert merged["slack"]["webhook_url"] == "https://new"
         assert merged["email"]["topic_arn"] == "arn:aws:sns:us-east-1:123:topic"
 
@@ -743,7 +773,12 @@ class TestMergeChannels:
     def test_webhook_first_target_no_existing(self):
         merged = opencdr._merge_channels(
             {},
-            {"webhook": {"enabled": True, "targets": [{"name": "pd", "url": "https://pd.example.com", "headers": {}}]}},
+            {
+                "webhook": {
+                    "enabled": True,
+                    "targets": [{"name": "pd", "url": "https://pd.example.com", "headers": {}}],
+                }
+            },
         )
         assert len(merged["webhook"]["targets"]) == 1
 
@@ -756,7 +791,9 @@ class TestMergeChannels:
 class TestSettingsSetMerge:
     def test_does_not_overwrite_existing_channel(self):
         existing = {
-            "channels": {"slack": {"enabled": True, "webhook_url": "https://hooks.slack.com/existing"}},
+            "channels": {
+                "slack": {"enabled": True, "webhook_url": "https://hooks.slack.com/existing"}
+            },
             "notifications_enabled": True,
         }
         _, calls = _run_settings_set(
@@ -788,7 +825,9 @@ class TestSettingsSetMerge:
             "channels": {
                 "webhook": {
                     "enabled": True,
-                    "targets": [{"name": "pagerduty", "url": "https://pd.example.com", "headers": {}}],
+                    "targets": [
+                        {"name": "pagerduty", "url": "https://pd.example.com", "headers": {}}
+                    ],
                 }
             },
             "notifications_enabled": True,

@@ -10,6 +10,7 @@ deployment, so AlarmsEmailSubscription's Condition (HasAlarmEmail) never
 created a subscription, and every one of those alarms had been firing into
 a topic with zero subscribers.
 """
+
 from __future__ import annotations
 
 import json
@@ -44,9 +45,7 @@ def _get_webhook_url() -> str:
 
     stage = os.getenv("STAGE", "dev")
     ssm = boto3.client("ssm")
-    resp = ssm.get_parameter(
-        Name=f"/opencdr-{stage}/ops-alerts/slack-webhook", WithDecryption=True
-    )
+    resp = ssm.get_parameter(Name=f"/opencdr-{stage}/ops-alerts/slack-webhook", WithDecryption=True)
     _webhook_cache = resp["Parameter"]["Value"]
     # codeql[py/unused-global-variable] -- module-level TTL cache
     # (declared `global` above); read on the *next* invocation via the

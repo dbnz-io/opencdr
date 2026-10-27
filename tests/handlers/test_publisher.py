@@ -1,13 +1,13 @@
 """Tests for the outbox publisher handler (drains outbox table -> SQS)."""
+
 from __future__ import annotations
 
 import json
+import os
 from unittest.mock import MagicMock, patch
 
 import pytest
 from botocore.exceptions import ClientError
-
-import os
 
 os.environ.setdefault("LOGS_TABLE_NAME", "test-logs-table")
 os.environ.setdefault("AWS_DEFAULT_REGION", "us-east-1")
@@ -18,7 +18,6 @@ from src.handlers.publisher import (
     _err_code,
     lambda_handler,
 )
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -84,7 +83,10 @@ def make_stream_record(event_name="INSERT", new_image=None) -> dict:
 
 class TestErrCode:
     def test_client_error_returns_code(self):
-        assert _err_code(_client_error("ConditionalCheckFailedException")) == "ConditionalCheckFailedException"
+        assert (
+            _err_code(_client_error("ConditionalCheckFailedException"))
+            == "ConditionalCheckFailedException"
+        )
 
     def test_generic_exception_returns_class_name(self):
         assert _err_code(ValueError("x")) == "ValueError"
@@ -106,13 +108,19 @@ class TestQueueUrlForDestination:
         pub = make_publisher()
         cfg = make_cfg()
         for variant in ("notifications", "NOTIFICATIONS", "Notification", " notifications "):
-            assert pub._queue_url_for_destination(destination=variant, cfg=cfg) == cfg.notifications_queue_url
+            assert (
+                pub._queue_url_for_destination(destination=variant, cfg=cfg)
+                == cfg.notifications_queue_url
+            )
 
     def test_responses_variants(self):
         pub = make_publisher()
         cfg = make_cfg()
         for variant in ("responses", "RESPONSE", "Responses"):
-            assert pub._queue_url_for_destination(destination=variant, cfg=cfg) == cfg.responses_queue_url
+            assert (
+                pub._queue_url_for_destination(destination=variant, cfg=cfg)
+                == cfg.responses_queue_url
+            )
 
     def test_missing_notifications_url_raises_runtime_error(self):
         pub = make_publisher()
@@ -147,7 +155,9 @@ class TestClaimOutbox:
 
     def test_other_client_error_propagates(self):
         pub = make_publisher()
-        pub.outbox_table.update_item.side_effect = _client_error("ProvisionedThroughputExceededException")
+        pub.outbox_table.update_item.side_effect = _client_error(
+            "ProvisionedThroughputExceededException"
+        )
         with pytest.raises(ClientError):
             pub._claim_outbox(outbox_id="ob-1")
 
@@ -293,7 +303,9 @@ class TestProcessRecordSkipPaths:
         step happens before the try/except in process_record, so it is NOT marked
         FAILED — it propagates straight out."""
         pub = make_publisher()
-        pub.outbox_table.update_item.side_effect = _client_error("ProvisionedThroughputExceededException")
+        pub.outbox_table.update_item.side_effect = _client_error(
+            "ProvisionedThroughputExceededException"
+        )
         image = ddb_string_image(outbox_id="ob-1", status="PENDING")
         with pytest.raises(ClientError):
             set_claim_result(pub, image)
@@ -338,13 +350,20 @@ class TestProcessRecordPublishSuccess:
         aws.sqs_send.return_value = "msg-1"
         pub = make_publisher(aws=aws)
         image = ddb_string_image(
-            outbox_id="ob-1", status="PENDING", destination="notifications",
-            signal_id="sig-1", rule_id="rule-1",
+            outbox_id="ob-1",
+            status="PENDING",
+            destination="notifications",
+            signal_id="sig-1",
+            rule_id="rule-1",
         )
         image["payload"] = {"M": {}}
         set_claim_result(pub, image)
         pub.process_record(record=make_stream_record(new_image=image), cfg=make_cfg())
-        assert aws.sqs_send.call_args.kwargs["attributes"] == {"delivery_id": "ob-1", "signal_id": "sig-1", "rule_id": "rule-1"}
+        assert aws.sqs_send.call_args.kwargs["attributes"] == {
+            "delivery_id": "ob-1",
+            "signal_id": "sig-1",
+            "rule_id": "rule-1",
+        }
 
 
 class TestProcessRecordPublishFailure:
@@ -366,7 +385,10 @@ class TestProcessRecordPublishFailure:
     def test_bad_payload_resets_to_pending_for_retry_and_reraises(self):
         pub = make_publisher()
         image = ddb_string_image(
-            outbox_id="ob-1", status="PENDING", destination="notifications", payload="{not json",
+            outbox_id="ob-1",
+            status="PENDING",
+            destination="notifications",
+            payload="{not json",
         )
         with pytest.raises(ValueError):
             set_claim_result(pub, image)
@@ -413,7 +435,10 @@ class TestProcessRecordPublishFailure:
         aws.sqs_send.assert_called_once()
         assert aws.sqs_send.call_args.kwargs["queue_url"] == make_cfg().responses_queue_url
         sent_kwargs = pub.outbox_table.update_item.call_args_list[-1].kwargs
-        assert set(sent_kwargs["ExpressionAttributeValues"][":sd"]) == {"notifications", "responses"}
+        assert set(sent_kwargs["ExpressionAttributeValues"][":sd"]) == {
+            "notifications",
+            "responses",
+        }
 
 
 class TestBoundedRetry:
@@ -448,9 +473,11 @@ class TestBoundedRetry:
 class TestLambdaHandler:
     def test_processes_each_record_and_returns_count(self):
         fake_cfg = make_cfg()
-        with patch("src.handlers.publisher.load_publisher_config", return_value=fake_cfg), \
-             patch("src.handlers.publisher.AwsHandler"), \
-             patch("src.handlers.publisher.OutboxPublisher") as mock_publisher_cls:
+        with (
+            patch("src.handlers.publisher.load_publisher_config", return_value=fake_cfg),
+            patch("src.handlers.publisher.AwsHandler"),
+            patch("src.handlers.publisher.OutboxPublisher") as mock_publisher_cls,
+        ):
             mock_publisher = MagicMock()
             mock_publisher_cls.return_value = mock_publisher
 
@@ -468,9 +495,11 @@ class TestLambdaHandler:
         propagates out of lambda_handler immediately — records after N in the same
         batch are never attempted."""
         fake_cfg = make_cfg()
-        with patch("src.handlers.publisher.load_publisher_config", return_value=fake_cfg), \
-             patch("src.handlers.publisher.AwsHandler"), \
-             patch("src.handlers.publisher.OutboxPublisher") as mock_publisher_cls:
+        with (
+            patch("src.handlers.publisher.load_publisher_config", return_value=fake_cfg),
+            patch("src.handlers.publisher.AwsHandler"),
+            patch("src.handlers.publisher.OutboxPublisher") as mock_publisher_cls,
+        ):
             mock_publisher = MagicMock()
             mock_publisher.process_record.side_effect = [RuntimeError("boom"), None]
             mock_publisher_cls.return_value = mock_publisher

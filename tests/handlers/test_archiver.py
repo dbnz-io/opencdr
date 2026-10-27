@@ -6,6 +6,7 @@ functions directly, plus lambda_handler's INSERT-only filtering,
 per-record flatten isolation, and delivery-failure-raises-for-retry
 behavior.
 """
+
 from __future__ import annotations
 
 import json
@@ -27,7 +28,13 @@ from src.handlers import archiver
 class TestPartitionFields:
     def test_derives_from_iso_timestamp_and_account(self):
         pf = archiver.partition_fields("2026-03-15T14:30:00Z", "123456789012")
-        assert pf == {"account": "123456789012", "year": "2026", "month": "03", "day": "15", "hour": "14"}
+        assert pf == {
+            "account": "123456789012",
+            "year": "2026",
+            "month": "03",
+            "day": "15",
+            "hour": "14",
+        }
 
     def test_missing_account_falls_back_to_none(self):
         pf = archiver.partition_fields("2026-03-15T14:30:00Z", None)

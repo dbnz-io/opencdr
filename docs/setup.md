@@ -14,7 +14,7 @@ Not every step applies to every deployment — single-account, single-region set
 
 ```bash
 npm install -g serverless
-npm install    # installs serverless-python-requirements
+npm install    # installs the locked Serverless build toolchain
 ```
 
 ## 2. Deploy the stack
@@ -23,16 +23,18 @@ npm install    # installs serverless-python-requirements
 serverless deploy --stage dev
 ```
 
-Optional deploy-time parameters, all can be set later without redeploying:
+Optional deploy-time parameters, all can be changed on a later redeploy:
 
 ```bash
 serverless deploy --stage dev \
   --param="alarmEmail=ops@example.com" \
   --param="alertEmail=security@example.com" \
-  --param="monthlyBudgetUsd=50"
+  --param="monthlyBudgetUsd=50" \
+  --param="archiveEnabled=false" \
+  --param="securityProfile=hardened"
 ```
 
-This provisions everything — all 10 Lambdas, all 8 tables, the S3/Glue/Firehose archival pipeline, all 9 SQS queues, both SNS topics, API Gateway, 16 CloudWatch alarms, the dashboard, X-Ray tracing, and the cost budget. Full detail: [Architecture](architecture.md), [Deployment](deployment.md), [Data Archival](data-archival.md).
+This provisions everything — all 11 Lambdas, all 10 tables, the managed S3/Glue/Firehose archival resources, all 11 SQS queues, both SNS topics, API Gateway, 21 CloudWatch alarms, the dashboard, and the cost budget. Archival and X-Ray are opt-in; `archiveEnabled=true` activates the three DynamoDB event mappings while the pipeline resources remain managed but idle by default. DynamoDB TTL remains active, so records written while archival is off expire without an OpenCDR archive and are not backfilled. `securityProfile=hardened` adds reversible protection only to resources OpenCDR owns; see [Resource security profiles](security-profiles.md). Full detail: [Architecture](architecture.md), [Deployment](deployment.md), [Data Archival](data-archival.md).
 
 ## 3. Load the bundled detection rules
 
@@ -42,7 +44,7 @@ This provisions everything — all 10 Lambdas, all 8 tables, the S3/Glue/Firehos
 
 24 signal rules + 6 correlation rules (see [dbnz-io/opencdr-detection-rules](https://github.com/dbnz-io/opencdr-detection-rules) for the full list and schema — rule content lives in its own repo, consumed here as a git submodule; `git submodule update --init` first if you cloned without `--recurse-submodules`). See [Detection Rules](detection-rules.md) for how rules are stored and loaded here if you want to add your own before or after this step.
 
-**⚠️ Automated response can take real, destructive action.** Rules load with every `response_module` stripped by default, regardless of `DREDGE_DRY_RUN` — a majority of the 30 bundled rules ship with a `response_module` set (exact, current count in [Response modules](incident-response.md#response-modules), deliberately not repeated here where it can drift). `DREDGE_DRY_RUN` itself now **defaults to live (`false`) in CI** (see [How the responder authorizes itself](incident-response.md#how-the-responder-authorizes-itself)) — so the rule-level strip above is the layer actually protecting a fresh deploy from taking real action, not the dry-run flag. Pass `--with-response-modules` once you've reviewed [Response modules](incident-response.md#response-modules) and actually want them armed.
+**⚠️ Automated response can take real, destructive action.** Rules load with every `response_module` stripped by default, and CI deploys `DREDGE_DRY_RUN=true` unless a manual workflow explicitly disables it. Pass `--with-response-modules` and choose live execution only once you've reviewed [Response modules](incident-response.md#response-modules) and actually want them armed.
 
 ## 4. Configure at least one notification channel
 
@@ -137,6 +139,26 @@ Then set the resulting role ARN as the `OPENCDR_CI_DEPLOY_ROLE_ARN` repo variabl
 
 Fires sample events at the deployed stack and confirms signals are produced. Also worth a manual look: the `DashboardUrl` output from step 2's deploy (Lambda health, queue depth, custom metrics), and confirming a real notification arrives in whichever channel you configured in step 4.
 
+## 12. Complete the production-readiness gate — required for production
+
+Steps 1–11 produce and validate a development deployment. They do not choose the
+customer's production identity boundary, network restriction, retention policy,
+recovery objectives, or approval process.
+
+Before deploying or promoting a production stage, complete
+[Production deployment responsibilities](production-deployment.md). In particular:
+
+- replace API keys as the sole authentication boundary with IAM/SigV4 or OIDC/JWT;
+- restrict API Gateway to approved principals and, where possible, private network paths;
+- decide PITR and CloudFormation retain policies for every table;
+- add archive-bucket versioning/retention appropriate to the customer;
+- approve RPO/RTO and pass an isolated restore exercise; and
+- promote the exact staging-tested artifact through a protected production pipeline.
+
+These controls belong to the AWS account owner/deployer because their correct
+settings depend on the customer's identities, network, legal retention, recovery
+targets, and production account boundary.
+
 ## What this guide doesn't cover
 
 - **Writing your own detection rules** beyond the bundled 24 — see [dbnz-io/opencdr-detection-rules](https://github.com/dbnz-io/opencdr-detection-rules) for the schema.
@@ -146,3 +168,4 @@ Fires sample events at the deployed stack and confirms signals are produced. Als
 - [Architecture](architecture.md) — what actually gets provisioned and why
 - [Deployment](deployment.md) — the automatic-vs-manual breakdown this guide's steps are drawn from
 - [Security](security.md) — the IAM model and known, deliberate limitations
+- [Production deployment responsibilities](production-deployment.md) — mandatory deployer-owned production controls and evidence

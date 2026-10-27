@@ -2,6 +2,7 @@
 Slack/Discord/email payloads for a responder action that succeeded, and the
 lambda_handler dispatch that routes to them instead of the alert builders.
 """
+
 from __future__ import annotations
 
 import json
@@ -75,15 +76,11 @@ class TestBuildRemediationSuccessSlackPayload:
 
     def test_detection_id_in_context_when_present(self):
         payload = build_remediation_success_slack_payload(make_remediation_item())
-        assert any(
-            b.get("type") == "context" for b in payload["attachments"][0]["blocks"]
-        )
+        assert any(b.get("type") == "context" for b in payload["attachments"][0]["blocks"])
 
     def test_no_context_block_when_detection_id_missing(self):
         payload = build_remediation_success_slack_payload(make_remediation_item(detection_id=""))
-        assert not any(
-            b.get("type") == "context" for b in payload["attachments"][0]["blocks"]
-        )
+        assert not any(b.get("type") == "context" for b in payload["attachments"][0]["blocks"])
 
 
 class TestBuildRemediationSuccessDiscordPayload:
@@ -153,7 +150,9 @@ class TestBuildRemediationSuccessEmailMessageDryRun:
         assert "DREDGE_DRY_RUN" in body
 
     def test_real_run_unaffected(self):
-        subject, body = build_remediation_success_email_message(make_remediation_item(dry_run=False))
+        subject, body = build_remediation_success_email_message(
+            make_remediation_item(dry_run=False)
+        )
         assert "Dry run" not in subject
         assert "DRY RUN" not in body
 
@@ -213,7 +212,9 @@ class TestLambdaHandlerRemediationDispatch:
             patch("src.handlers.notifier.AwsHandler"),
             patch("src.handlers.notifier._post_json", side_effect=self._post_ok) as mock_post,
         ):
-            result = lambda_handler(make_sqs_event(make_remediation_item(dry_run=True)), make_context())
+            result = lambda_handler(
+                make_sqs_event(make_remediation_item(dry_run=True)), make_context()
+            )
 
         assert result["sent"] == 2
         sent_payloads = [call.args[1] for call in mock_post.call_args_list]

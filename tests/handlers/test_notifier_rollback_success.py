@@ -3,6 +3,7 @@ Slack/Discord/email payloads for a rollbackHandler undo that succeeded, and
 the lambda_handler dispatch that routes to them instead of the
 remediation-success (green) or alert builders.
 """
+
 from __future__ import annotations
 
 import json
@@ -151,5 +152,7 @@ class TestLambdaHandlerRollbackDispatch:
         remediation_color = build_remediation_success_slack_payload(
             {"type": "remediation_success", "rule_id": "r", "response_module": "x", "target": "t"}
         )["attachments"][0]["color"]
-        rollback_color = build_rollback_success_slack_payload(make_rollback_item())["attachments"][0]["color"]
+        rollback_color = build_rollback_success_slack_payload(make_rollback_item())["attachments"][
+            0
+        ]["color"]
         assert remediation_color != rollback_color

@@ -4,6 +4,11 @@
 
 For reporting a vulnerability, see [`SECURITY.md`](../SECURITY.md) — this page is about how the system is built, not how to disclose a bug in it.
 
+OpenCDR-owned DynamoDB, S3, and SQS resources can use the reversible
+`securityProfile=hardened` deployment profile. Its exact scope—and the account and
+API controls it deliberately does not claim to configure—is documented in
+[Resource security profiles](security-profiles.md).
+
 ## IAM model
 
 Every Lambda has its **own** IAM role (`provider.iam.role.mode: perFunction`, not the Serverless Framework's default single shared role). This is a meaningful distinction when reasoning about blast radius: `processor` can write signals but not touch SQS; `notifier` can read settings but not DynamoDB streams it doesn't own; only `responder` can call `sts:AssumeRole`, and only on roles matching the exact naming convention `${service}-${stage}-ir-role` in any account — not a blanket `sts:AssumeRole` grant. `responder`'s own execution role has zero IAM/EC2/S3 permissions itself; every actual destructive action runs through the temporary credentials of an assumed role instead. Full detail in [Incident Response](incident-response.md).
@@ -19,6 +24,13 @@ The deployed API key itself follows the same principle at the infrastructure lev
 ## API Gateway
 
 API-key auth on every route, backed by a usage plan (10,000 requests/month quota, 100 requests/second rate limit) — a basic backstop against runaway/accidental traffic, not a security control against a determined caller with a valid key.
+
+Accordingly, the default API configuration is suitable for development and
+controlled evaluation, not as the sole production management-plane boundary. The
+production deployer must add IAM/SigV4 or OIDC/JWT authentication, restrict the API
+Gateway resource/network policy, migrate each caller, and retain API keys only for
+metering or temporary compatibility where needed. See
+[Production deployment responsibilities](production-deployment.md#1-establish-the-production-identity-and-network-boundary).
 
 ## Known, deliberate limitations
 
@@ -36,3 +48,4 @@ Stated plainly, because a client evaluating this deployment should know about th
 - [API Reference](api-reference.md) — the authentication model from the caller's side
 - [`SECURITY.md`](../SECURITY.md) — vulnerability reporting
 - [Cross-Region Event Forwarding](region-forwarding.md) — closing the single-region coverage gap
+- [Production deployment responsibilities](production-deployment.md) — deployer-owned identity, network, state protection, and recovery gates

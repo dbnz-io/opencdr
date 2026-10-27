@@ -5,6 +5,7 @@ falling through to the function's final `return False` regardless of the
 actual regex result. Found while adding regex-compile validation for the
 sibling "matches" op; fixed alongside it.
 """
+
 from src.domain.detection_engine import evaluate_condition
 from src.domain.ocsf_min_parser import Actor, ApiCall, Network, NormalizedEvent
 

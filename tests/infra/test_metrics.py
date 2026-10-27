@@ -1,4 +1,5 @@
 """Tests for src/infra/metrics.py (CloudWatch EMF emission)."""
+
 from __future__ import annotations
 
 import json
@@ -31,7 +32,9 @@ class TestEmitMetric:
         emit_metric("X")
         payload = _captured_payload(capsys)
         assert isinstance(payload["_aws"]["Timestamp"], int)
-        assert payload["_aws"]["Timestamp"] > 1_700_000_000_000  # sanity: ms since epoch, not seconds
+        assert (
+            payload["_aws"]["Timestamp"] > 1_700_000_000_000
+        )  # sanity: ms since epoch, not seconds
 
     def test_no_dimensions_produces_one_empty_dimension_set(self, capsys):
         emit_metric("PublishSuccess")

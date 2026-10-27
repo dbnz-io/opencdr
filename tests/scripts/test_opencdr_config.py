@@ -1,4 +1,5 @@
 """Tests for `opencdr.py config set` / `config show` (cmd_config_set, cmd_config_show)."""
+
 from __future__ import annotations
 
 import json
@@ -11,7 +12,6 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent.parent.parent / "scripts"))
 
 import opencdr  # noqa: E402  (after sys.path manipulation)
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -87,7 +87,9 @@ class TestConfigShow:
         assert "no config found" in out.lower()
 
     def test_shows_url_and_key_preview(self, config_file, capsys):
-        config_file.write_text(json.dumps({"url": "https://api.example.com", "key": "abcdefghijklmnop"}))
+        config_file.write_text(
+            json.dumps({"url": "https://api.example.com", "key": "abcdefghijklmnop"})
+        )
         opencdr.cmd_config_show(SimpleNamespace())
         out = capsys.readouterr().out
         # CodeQL flags this as incomplete URL substring sanitization -- that
@@ -145,7 +147,9 @@ class TestRequireApi:
     def test_falls_back_to_config_file_when_no_env_vars(self, monkeypatch):
         monkeypatch.delenv("OPENCDR_API_URL", raising=False)
         monkeypatch.delenv("OPENCDR_API_KEY", raising=False)
-        url, key = opencdr._require_api({"url": "https://from-file.example.com/", "key": "file-key"})
+        url, key = opencdr._require_api(
+            {"url": "https://from-file.example.com/", "key": "file-key"}
+        )
         assert url == "https://from-file.example.com"  # trailing slash stripped
         assert key == "file-key"
 

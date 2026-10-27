@@ -11,11 +11,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ### Changed
 - Reframed the repository as **OpenCDR Core**, an account-local detection and response data plane with stable deployed resource names for upgrade compatibility.
 - Made regional onboarding fail closed by default and verify the live EventBridge target after deployment; partial coverage now requires an explicit `--allow-partial`.
+- Made CI install only hash-locked Python dependencies and block on Ruff formatting/linting, full-source mypy, Bandit, dependency audits, rule validation, and secret scanning.
+- Switched Lambda packaging to an explicit source allowlist; CI now audits every generated ZIP and deploys that exact package instead of rebuilding it.
+- Made ordinary CI deployments safe by default: simulated IR actions, X-Ray off, and Firehose archival data flow off unless explicitly enabled in a manual run.
 
 ### Added
+- Generic REST API access in the Core CLI with safe relative paths, encoded
+  query parameters, JSON file/stdin bodies, and nonzero HTTP error handling;
+  multi-installation orchestration now lives in the separate `opencdr-deploy`
+  project.
+- Reversible `standard`/`hardened` resource security profiles. Hardened mode enables DynamoDB deletion protection, CloudFormation retain/update-replace policies, and source-scoped application DLQ use without changing API exposure, enabling backups, or creating customer-account security services.
+- Optional `archiveEnabled` deployment flag, disabled by default, with CI-aware verification and an explicit warning that DynamoDB TTL remains active while archival is disabled.
+- Optional `xrayEnabled` deployment parameter, disabled by default. Setting it to `true` enables Lambda/API Gateway active tracing and boto3 SDK instrumentation while CloudWatch logs, EMF metrics, alarms, and dashboards remain always on.
 - Versioned management contract covering the release manifest, `/status` identity response, declarative configuration bundles, and a fleet-facing alert envelope.
 - Regional forwarding DLQs, explicit retry settings, delivery-failure alarms, and source-scoped EventBridge role trust.
 - Deployment-contract tests for CloudFormation description limits, event-pattern parity, regional delivery resources, and manifest/version consistency.
+- Direct rollbackHandler error, rollback-domain failure, and rollback-DLQ alarms, including a new `ResponderRollbackFailures` metric.
 
 ## [0.2.0] — 2026-08-12
 

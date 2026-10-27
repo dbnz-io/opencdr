@@ -205,6 +205,7 @@ cython_debug/
 node_modules/
 .serverless/
 .build/
+.requirements.zip
 
 # OpenCDR CLI config (contains API URL and key — never commit)
 .opencdr.json

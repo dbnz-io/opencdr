@@ -5,6 +5,7 @@ import os
 import uuid
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from typing import Any
 
 import boto3
 from boto3.dynamodb.conditions import Key
@@ -62,7 +63,7 @@ class OutboxPublisher:
         self._ddb = boto3.resource("dynamodb")
         self.outbox_table = self._ddb.Table(outbox_table_name)
         self._claim_token = uuid.uuid4().hex
-        self._claimed_item = {}
+        self._claimed_item: dict[str, Any] = {}
 
     def _queue_url_for_destination(self, *, destination: str, cfg) -> str:
         dest = (destination or "").strip().upper()
@@ -105,9 +106,11 @@ class OutboxPublisher:
                 return False
             raise
 
-    def _mark_sent(self, *, outbox_id: str, sqs_message_id: str, sent_destinations: list[str] | None = None) -> None:
+    def _mark_sent(
+        self, *, outbox_id: str, sqs_message_id: str, sent_destinations: list[str] | None = None
+    ) -> None:
         expr = "SET #s = :sent, updated_at = :u, sqs_message_id = :m REMOVE last_error"
-        values = {
+        values: dict[str, Any] = {
             ":sent": "SENT",
             ":u": _utc_now_iso(),
             ":m": sqs_message_id,
@@ -204,12 +207,18 @@ class OutboxPublisher:
                         ConditionExpression="#s = :old AND updated_at <= :cutoff",
                         ExpressionAttributeNames={"#s": "status"},
                         ExpressionAttributeValues={
-                            ":old": status, ":next": "FAILED" if terminal else "PENDING",
-                            ":now": _utc_now_iso(), ":cutoff": cutoff,
-                            ":error": {"code": "RecoveryRequired" if terminal else "ClaimExpired",
-                                       "message": "Legacy delivery requires inspection before replay" if legacy_claim
-                                       else "Publisher retry budget exhausted" if terminal
-                                       else "Abandoned delivery returned to pending"},
+                            ":old": status,
+                            ":next": "FAILED" if terminal else "PENDING",
+                            ":now": _utc_now_iso(),
+                            ":cutoff": cutoff,
+                            ":error": {
+                                "code": "RecoveryRequired" if terminal else "ClaimExpired",
+                                "message": "Legacy delivery requires inspection before replay"
+                                if legacy_claim
+                                else "Publisher retry budget exhausted"
+                                if terminal
+                                else "Abandoned delivery returned to pending",
+                            },
                         },
                     )
                     recovered += 1
@@ -318,8 +327,11 @@ class OutboxPublisher:
         # Use the authoritative claimed row, never the stale stream snapshot.
         item = self._claimed_item
         if int(item.get("attempts", 0)) > PUBLISHER_MAX_ATTEMPTS:
-            self._mark_failed(outbox_id=outbox_id, error_code="AttemptsExhausted",
-                              error_message="Publisher retry budget exhausted")
+            self._mark_failed(
+                outbox_id=outbox_id,
+                error_code="AttemptsExhausted",
+                error_message="Publisher retry budget exhausted",
+            )
             return
 
         # Populated as destinations succeed; referenced in the except block
@@ -358,8 +370,11 @@ class OutboxPublisher:
 
                 message = payload
                 if dest.upper() == "SIGNALS":
-                    message = {**payload, "item_type": "correlation",
-                               "detection_id": str(payload["alert_id"])}
+                    message = {
+                        **payload,
+                        "item_type": "correlation",
+                        "detection_id": str(payload["alert_id"]),
+                    }
                 msg_id = self.aws.sqs_send(
                     queue_url=queue_url,
                     body=message,

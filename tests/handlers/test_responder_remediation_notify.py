@@ -5,19 +5,19 @@ Covers `_notify_remediation_success` directly and its wiring into
 outbox table is configured, and never lets a notify failure look like the
 IR action itself failed.
 """
+
 from __future__ import annotations
 
 import json
-from unittest.mock import MagicMock
-
 import os
+from unittest.mock import MagicMock
 
 os.environ.setdefault("LOGS_TABLE_NAME", "test-logs-table")
 os.environ.setdefault("AWS_DEFAULT_REGION", "us-east-1")
 
 import pytest
-
 from dredge.aws_ir.models import OperationResult
+
 from src.handlers import responder
 
 
@@ -36,7 +36,9 @@ def ok_result(operation="disable_user", target="user=bob") -> OperationResult:
 
 
 def dry_run_result(operation="disable_user", target="user=bob") -> OperationResult:
-    return OperationResult(operation=operation, target=target, success=True, details={"dry_run": True})
+    return OperationResult(
+        operation=operation, target=target, success=True, details={"dry_run": True}
+    )
 
 
 @pytest.fixture()
@@ -135,16 +137,24 @@ class TestNotifyRemediationSuccessDirect:
 
 class TestProcessRecordWiresNotification:
     def test_success_triggers_outbox_write(self, mock_dredge, mock_outbox_table):
-        mock_dredge.aws_ir.response.disable_user.return_value = ok_result("disable_user", "user=bob")
-        record = make_record({"response_module": "disable_user", "user_name": "bob", "detection_id": "d-1"})
+        mock_dredge.aws_ir.response.disable_user.return_value = ok_result(
+            "disable_user", "user=bob"
+        )
+        record = make_record(
+            {"response_module": "disable_user", "user_name": "bob", "detection_id": "d-1"}
+        )
         responder._process_record(record, "req-1", "rh-1", MagicMock())
         mock_outbox_table.put_item.assert_called_once()
 
     def test_dry_run_success_still_triggers_outbox_write(self, mock_dredge, mock_outbox_table):
         # The whole point: a dry-run "success" still notifies, so the user
         # sees proof the pipeline works -- it's just labeled as simulated.
-        mock_dredge.aws_ir.response.disable_user.return_value = dry_run_result("disable_user", "user=bob")
-        record = make_record({"response_module": "disable_user", "user_name": "bob", "detection_id": "d-1"})
+        mock_dredge.aws_ir.response.disable_user.return_value = dry_run_result(
+            "disable_user", "user=bob"
+        )
+        record = make_record(
+            {"response_module": "disable_user", "user_name": "bob", "detection_id": "d-1"}
+        )
         responder._process_record(record, "req-1", "rh-1", MagicMock())
         mock_outbox_table.put_item.assert_called_once()
         payload = json.loads(mock_outbox_table.put_item.call_args.kwargs["Item"]["payload"])
@@ -154,15 +164,21 @@ class TestProcessRecordWiresNotification:
         mock_dredge.aws_ir.response.disable_user.return_value = OperationResult(
             operation="disable_user", target="user=bob", success=False, errors=["boom"]
         )
-        record = make_record({"response_module": "disable_user", "user_name": "bob", "detection_id": "d-1"})
+        record = make_record(
+            {"response_module": "disable_user", "user_name": "bob", "detection_id": "d-1"}
+        )
         responder._process_record(record, "req-1", "rh-1", MagicMock())
         mock_outbox_table.put_item.assert_not_called()
 
     def test_no_outbox_table_configured_is_a_silent_noop(self, mock_dredge, monkeypatch):
         monkeypatch.setattr(responder, "_outbox_table", None)
-        mock_dredge.aws_ir.response.disable_user.return_value = ok_result("disable_user", "user=bob")
+        mock_dredge.aws_ir.response.disable_user.return_value = ok_result(
+            "disable_user", "user=bob"
+        )
         logger = MagicMock()
-        record = make_record({"response_module": "disable_user", "user_name": "bob", "detection_id": "d-1"})
+        record = make_record(
+            {"response_module": "disable_user", "user_name": "bob", "detection_id": "d-1"}
+        )
         responder._process_record(record, "req-1", "rh-1", logger)
         # Only the one IR_ACTION_SUCCESS log -- no notify attempt, no error either.
         logger.info.assert_called_once()

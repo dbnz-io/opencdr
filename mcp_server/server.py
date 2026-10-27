@@ -568,7 +568,9 @@ def opencdr_logs_search(
 
 
 @_tool(CAP_READ, annotations=_READ_ONLY)
-def opencdr_integrations_get(integration_id: str = "", jobs: bool = False, job_id: str = "") -> dict:
+def opencdr_integrations_get(
+    integration_id: str = "", jobs: bool = False, job_id: str = ""
+) -> dict:
     """Get the parser catalog, integration binding, or ingestion job diagnostics."""
     url, key = _resolve_api()
     path = "/integrations"
@@ -587,17 +589,30 @@ def opencdr_integrations_get(integration_id: str = "", jobs: bool = False, job_i
 def opencdr_integrations_put(integration_id: str, configuration: dict) -> dict:
     """Create/update a binding; configuration must include expected_rev (0 for create)."""
     url, key = _resolve_api()
-    status, body = opencdr._request("PUT", "/integrations/" + _seg(integration_id, "integration_id"), url, key, json=configuration)
+    status, body = opencdr._request(
+        "PUT",
+        "/integrations/" + _seg(integration_id, "integration_id"),
+        url,
+        key,
+        json=configuration,
+    )
     _raise_on_error(status, body, "integration put")
     return body
 
 
 @_tool(CAP_SETTINGS, annotations=_MUTATING)
-def opencdr_integrations_preview(integration_id: str, configuration: dict, record: dict | str) -> dict:
+def opencdr_integrations_preview(
+    integration_id: str, configuration: dict, record: dict | str
+) -> dict:
     """Execute the selected parser on one sample; does not activate or emit detections."""
     url, key = _resolve_api()
-    status, body = opencdr._request("POST", "/integrations/" + _seg(integration_id, "integration_id") + "/preview", url, key,
-                                  json={"config": configuration, "record": record})
+    status, body = opencdr._request(
+        "POST",
+        "/integrations/" + _seg(integration_id, "integration_id") + "/preview",
+        url,
+        key,
+        json={"config": configuration, "record": record},
+    )
     _raise_on_error(status, body, "integration preview")
     return body
 

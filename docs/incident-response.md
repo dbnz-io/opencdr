@@ -40,15 +40,15 @@ The "Needs" column is what `responder.py`'s own field extractors pull from the d
 
 Each module runs through [`dredge`](https://github.com/dbnz-io/dredge) (a pinned dependency, `dredge.aws_ir.response`), not against `responder`'s own credentials — see below.
 
-**CI deploys live (`DREDGE_DRY_RUN=false`) by default** — both an ordinary push to `main` and a manual `workflow_dispatch` run resolve to live unless you explicitly opt into dry-run (see `.github/workflows/ci.yml`'s "Resolve DREDGE_DRY_RUN for this deploy" step and the `workflow_dispatch` "Dry run" checkbox, which now defaults unchecked). This means **any merge to `main` executes real, destructive AWS actions** for any rule with a `response_module` set — there's no separate confirmation step. To deploy in simulation mode instead: run the "OpenCDR CI" workflow manually from the Actions tab and check the "Dry run" box.
+**CI deploys in simulation mode (`DREDGE_DRY_RUN=true`) by default.** Ordinary pushes to `main` remain dry-run, and the manual workflow checkbox defaults to dry-run. A live-IR deployment therefore requires an explicit manual run with that checkbox disabled, in addition to loading rules with response modules enabled.
 
-`serverless.yml` itself still falls back to `${env:DREDGE_DRY_RUN, 'true'}` — dry-run — if `DREDGE_DRY_RUN` is completely unset. That fallback only matters for a `serverless deploy` run *outside* CI (a developer's local shell with nothing exported); CI's own resolve step always sets the var explicitly before deploying, so this local-only safety net never applies to the documented deploy path.
+`serverless.yml` also falls back to `${env:DREDGE_DRY_RUN, 'true'}` when `DREDGE_DRY_RUN` is unset, so local and CI deployments share the same safe default.
 
 **Changing it after the fact:**
 
 - **Via CI:** run the "OpenCDR CI" workflow manually from the Actions tab (`workflow_dispatch`) on `main`, with the "Dry run" checkbox checked (simulate) or unchecked (live, the default) as desired. The deploy job logs an explicit `::warning::`/`::notice::` announcing which mode it deployed in.
 - **Locally, full redeploy:** `export DREDGE_DRY_RUN=false && npx serverless deploy --stage <stage>` (or `serverless deploy function --function responder`/`rollbackHandler` for a faster, code+config-only deploy of just those two functions).
-- **Direct Lambda config patch (fast, but drifts from IaC):** `aws lambda update-function-configuration --function-name <fn> --environment "Variables={DREDGE_DRY_RUN=<true|false>,...<all other existing env vars>...}"` for each of `responder` and `rollbackHandler`. This forces a fresh execution environment (no stale warm container holding a stale-config `Dredge` client), but the *next* deploy of any kind — including a plain push to main — will silently reset it back to live (CI's default), since CloudFormation reconciles the Lambda's config back to match `serverless.yml`/CI's resolved value. **This cuts against you now if you patch to `true` for a temporary safety pause** — the next merge to `main` silently un-pauses it back to live. Treat this as a temporary override, not a persistent change, and don't rely on it for anything you need to stay dry-run past the next deploy.
+- **Direct Lambda config patch (fast, but drifts from IaC):** `aws lambda update-function-configuration --function-name <fn> --environment "Variables={DREDGE_DRY_RUN=<true|false>,...<all other existing env vars>...}"` for each of `responder` and `rollbackHandler`. This forces a fresh execution environment, but the next deploy reconciles the setting back to the workflow-selected value. Treat this only as a temporary incident override.
 
 ## Known gaps in automated response coverage
 

@@ -4,7 +4,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from .config.requirements import ALLOWED_EVENT_TYPES
-from .infra.logger import logs_table
+from .infra.logger import _get_logs_table
 
 
 def log_operation(
@@ -50,7 +50,7 @@ def log_operation(
     }
 
     try:
-        logs_table.put_item(Item=log_item)
+        _get_logs_table().put_item(Item=log_item)
     except Exception as e:
         print("Failed to write log entry:", repr(e))
         print("Log item that failed:", json.dumps(log_item, indent=2))

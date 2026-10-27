@@ -1,4 +1,5 @@
 """Tests for `opencdr.py ir-actions list/get/rollback`."""
+
 from __future__ import annotations
 
 import sys
@@ -11,7 +12,6 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent.parent.parent / "scripts"))
 
 import opencdr  # noqa: E402  (after sys.path manipulation)
-
 
 # ---------------------------------------------------------------------------
 # cmd_ir_actions_list
@@ -66,7 +66,12 @@ class TestIrActionsList:
         assert "disable_access_key" in out
 
     def test_has_next_shows_next_token_hint(self, capsys):
-        _run_ir_actions_list(api_response=(200, {"items": [{"detection_id": "d-1"}], "has_next": True, "next_token": "xyz"}))
+        _run_ir_actions_list(
+            api_response=(
+                200,
+                {"items": [{"detection_id": "d-1"}], "has_next": True, "next_token": "xyz"},
+            )
+        )
         out = capsys.readouterr().out
         assert "--next-token" in out
         assert "xyz" in out
@@ -100,7 +105,9 @@ class TestIrActionsGet:
         assert path == "/ir-actions/d-1"
 
     def test_prints_action_json(self, capsys):
-        _run_ir_actions_get(api_response=(200, {"detection_id": "d-1", "response_module": "disable_access_key"}))
+        _run_ir_actions_get(
+            api_response=(200, {"detection_id": "d-1", "response_module": "disable_access_key"})
+        )
         out = capsys.readouterr().out
         assert "d-1" in out
         assert "disable_access_key" in out
@@ -153,13 +160,17 @@ class TestIrActionsRollback:
 
     def test_400_unsupported_exits_1(self, capsys):
         with pytest.raises(SystemExit) as exc_info:
-            _run_ir_actions_rollback(api_response=(400, {"message": "Rollback is not supported for this action"}))
+            _run_ir_actions_rollback(
+                api_response=(400, {"message": "Rollback is not supported for this action"})
+            )
         assert exc_info.value.code == 1
         assert "not supported" in capsys.readouterr().out.lower()
 
     def test_409_already_rolled_back_exits_1(self, capsys):
         with pytest.raises(SystemExit) as exc_info:
-            _run_ir_actions_rollback(api_response=(409, {"message": "This action has already been rolled back"}))
+            _run_ir_actions_rollback(
+                api_response=(409, {"message": "This action has already been rolled back"})
+            )
         assert exc_info.value.code == 1
         assert "already been rolled back" in capsys.readouterr().out.lower()
 

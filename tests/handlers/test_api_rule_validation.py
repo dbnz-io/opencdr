@@ -5,6 +5,7 @@ threshold/time_window_seconds. Neither existed before -- confirmed absent
 from both this function and CI's rule validation
 (.github/workflows/ci.yml only checks JSON syntax + required fields).
 """
+
 from __future__ import annotations
 
 import os
@@ -89,7 +90,9 @@ class TestCorrelationThresholdBounds:
 
     def test_time_window_seconds_above_maximum_rejected(self):
         with pytest.raises(ValueError, match="time_window_seconds must be between"):
-            api._normalize_rule_payload(self._payload(time_window_seconds=999999), force_rule_id=None)
+            api._normalize_rule_payload(
+                self._payload(time_window_seconds=999999), force_rule_id=None
+            )
 
     def test_bounds_not_enforced_for_signal_rules(self):
         # threshold/time_window_seconds are correlation-only concepts;

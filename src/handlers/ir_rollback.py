@@ -45,7 +45,9 @@ OUTBOX_TABLE_NAME = os.getenv("OUTBOX_TABLE_NAME", "")
 _outbox_table = boto3.resource("dynamodb").Table(OUTBOX_TABLE_NAME) if OUTBOX_TABLE_NAME else None
 
 
-def _mark_rollback_status(detection_id: str, *, status: str, logger: Logger, error: str | None = None) -> None:
+def _mark_rollback_status(
+    detection_id: str, *, status: str, logger: Logger, error: str | None = None
+) -> None:
     """
     Writes rollback_status ("pending" is set by api.py at enqueue time,
     not here) so GET /ir-actions reflects something more specific than
@@ -55,6 +57,8 @@ def _mark_rollback_status(detection_id: str, *, status: str, logger: Logger, err
     treated as the rollback itself failing (if status="succeeded") or
     crash processing of an already-identified failure (if status="failed").
     """
+    if status == "failed":
+        emit_metric("ResponderRollbackFailures")
     if _ir_actions_table is None:
         return
     try:
@@ -139,7 +143,12 @@ def _process_record(
             message="This action's rollback is not supported (no captured rollback state), skipping",
             details={"detection_id": detection_id, "response_module": response_module},
         )
-        _mark_rollback_status(detection_id, status="failed", logger=logger, error="Rollback is not supported for this action")
+        _mark_rollback_status(
+            detection_id,
+            status="failed",
+            logger=logger,
+            error="Rollback is not supported for this action",
+        )
         return
 
     if item.get("rolled_back"):
@@ -160,7 +169,12 @@ def _process_record(
             message="No rollback handler registered for this response_module",
             details={"detection_id": detection_id, "response_module": response_module},
         )
-        _mark_rollback_status(detection_id, status="failed", logger=logger, error=f"No rollback handler registered for {response_module}")
+        _mark_rollback_status(
+            detection_id,
+            status="failed",
+            logger=logger,
+            error=f"No rollback handler registered for {response_module}",
+        )
         return
 
     role_arn = item.get("role_arn")
@@ -172,7 +186,9 @@ def _process_record(
             message="Recorded action has no role_arn, cannot assume role for rollback",
             details={"detection_id": detection_id, "response_module": response_module},
         )
-        _mark_rollback_status(detection_id, status="failed", logger=logger, error="Recorded action has no role_arn")
+        _mark_rollback_status(
+            detection_id, status="failed", logger=logger, error="Recorded action has no role_arn"
+        )
         return
 
     try:
@@ -182,9 +198,18 @@ def _process_record(
             event_name="IR_ROLLBACK_INVALID_STATE",
             event_type="ERROR",
             message="Stored rollback_kwargs is not valid JSON",
-            details={"detection_id": detection_id, "response_module": response_module, "error": repr(e)},
+            details={
+                "detection_id": detection_id,
+                "response_module": response_module,
+                "error": repr(e),
+            },
         )
-        _mark_rollback_status(detection_id, status="failed", logger=logger, error="Stored rollback state is corrupt (invalid JSON)")
+        _mark_rollback_status(
+            detection_id,
+            status="failed",
+            logger=logger,
+            error="Stored rollback state is corrupt (invalid JSON)",
+        )
         return
 
     # Circuit breaker: fail closed both when the limit is tripped and when
@@ -197,9 +222,18 @@ def _process_record(
             event_name="IR_ROLLBACK_RATE_LIMIT_CHECK_FAILED",
             event_type="ERROR",
             message="Failed to check rollback rate limit; skipping",
-            details={"detection_id": detection_id, "response_module": response_module, "error": repr(e)},
+            details={
+                "detection_id": detection_id,
+                "response_module": response_module,
+                "error": repr(e),
+            },
         )
-        _mark_rollback_status(detection_id, status="failed", logger=logger, error="Failed to check the rollback rate limit")
+        _mark_rollback_status(
+            detection_id,
+            status="failed",
+            logger=logger,
+            error="Failed to check the rollback rate limit",
+        )
         return
 
     if recent_count >= RATE_LIMIT_MAX_ACTIONS:
@@ -241,7 +275,9 @@ def _process_record(
                 "error": repr(e),
             },
         )
-        _mark_rollback_status(detection_id, status="failed", logger=logger, error=f"Failed to assume {role_arn}: {e}")
+        _mark_rollback_status(
+            detection_id, status="failed", logger=logger, error=f"Failed to assume {role_arn}: {e}"
+        )
         return
 
     try:
@@ -251,7 +287,11 @@ def _process_record(
             event_name="IR_ROLLBACK_EXCEPTION",
             event_type="ERROR",
             message="Exception while executing rollback action",
-            details={"detection_id": detection_id, "response_module": response_module, "error": repr(e)},
+            details={
+                "detection_id": detection_id,
+                "response_module": response_module,
+                "error": repr(e),
+            },
         )
         _mark_rollback_status(detection_id, status="failed", logger=logger, error=str(e))
         return
@@ -289,14 +329,22 @@ def _process_record(
                     "rollback_status = :status, rollback_updated_at = :ts "
                     "REMOVE rollback_error"
                 ),
-                ExpressionAttributeValues={":true": True, ":ts": datetime.now(UTC).isoformat(), ":status": "succeeded"},
+                ExpressionAttributeValues={
+                    ":true": True,
+                    ":ts": datetime.now(UTC).isoformat(),
+                    ":status": "succeeded",
+                },
             )
         except Exception as e:
             logger.error(
                 event_name="IR_ROLLBACK_STATE_UPDATE_FAILED",
                 event_type="ERROR",
                 message="Rollback executed successfully but failed to mark it as rolled back",
-                details={"detection_id": detection_id, "response_module": response_module, "error": repr(e)},
+                details={
+                    "detection_id": detection_id,
+                    "response_module": response_module,
+                    "error": repr(e),
+                },
             )
 
         if _outbox_table is not None:
@@ -318,7 +366,9 @@ def _process_record(
             detection_id,
             status="failed",
             logger=logger,
-            error="; ".join(result.errors) if result.errors else "Rollback action failed (no error detail returned)",
+            error="; ".join(result.errors)
+            if result.errors
+            else "Rollback action failed (no error detail returned)",
         )
 
 
@@ -369,7 +419,11 @@ def _notify_rollback_success(
             event_name="IR_ROLLBACK_NOTIFY_FAILED",
             event_type="ERROR",
             message="Rollback executed successfully but failed to queue the success notification",
-            details={"detection_id": detection_id, "response_module": response_module, "error": repr(e)},
+            details={
+                "detection_id": detection_id,
+                "response_module": response_module,
+                "error": repr(e),
+            },
         )
 
 
@@ -419,7 +473,9 @@ def _handle_restore_s3_account_public_access_block(dredge: Dredge, kwargs: dict)
     return dredge.aws_ir.response.restore_s3_account_public_access_block(**kwargs)
 
 
-def _handle_restore_s3_bucket_public_access_block_and_acl(dredge: Dredge, kwargs: dict) -> OperationResult:
+def _handle_restore_s3_bucket_public_access_block_and_acl(
+    dredge: Dredge, kwargs: dict
+) -> OperationResult:
     return dredge.aws_ir.response.restore_s3_bucket_public_access_block_and_acl(**kwargs)
 
 

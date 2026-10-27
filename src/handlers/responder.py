@@ -82,7 +82,8 @@ def _recent_action_count() -> int:
     while day <= now.date():
         bucket = day_bucket_key(_SERVICE, day.isoformat())
         query_kwargs: dict = {
-            "KeyConditionExpression": Key("service_bucket").eq(bucket) & Key("timestamp").gte(cutoff),
+            "KeyConditionExpression": Key("service_bucket").eq(bucket)
+            & Key("timestamp").gte(cutoff),
         }
         while True:
             resp = _logs_table.query(**query_kwargs)
@@ -124,7 +125,9 @@ def _recent_action_count() -> int:
 
 IR_ACCOUNT_ROLES_TABLE_NAME = os.getenv("IR_ACCOUNT_ROLES_TABLE_NAME", "")
 _ir_account_roles_table = (
-    boto3.resource("dynamodb").Table(IR_ACCOUNT_ROLES_TABLE_NAME) if IR_ACCOUNT_ROLES_TABLE_NAME else None
+    boto3.resource("dynamodb").Table(IR_ACCOUNT_ROLES_TABLE_NAME)
+    if IR_ACCOUNT_ROLES_TABLE_NAME
+    else None
 )
 
 IR_ACTIONS_TABLE_NAME = os.getenv("IR_ACTIONS_TABLE_NAME", "")
@@ -285,9 +288,15 @@ def _process_record(
     # Only AWS-native sources may reach the AWS response executor. Correlation
     # alerts inherit the same restriction from their contributing primary signal.
     primary = detection_event.get("primary_signal") or {}
-    if (detection_event.get("source") in {"falco", "custom"}
-            or detection_event.get("integration_id") or primary.get("source") in {"falco", "custom"}):
-        logger.warning(event_name="IR_UNSUPPORTED_SOURCE", message="Runtime/custom source is not eligible for AWS response")
+    if (
+        detection_event.get("source") in {"falco", "custom"}
+        or detection_event.get("integration_id")
+        or primary.get("source") in {"falco", "custom"}
+    ):
+        logger.warning(
+            event_name="IR_UNSUPPORTED_SOURCE",
+            message="Runtime/custom source is not eligible for AWS response",
+        )
         return
 
     response_module = detection_event.get("response_module")
@@ -446,8 +455,9 @@ def _process_record(
     try:
         # Reserve before the external action. An uncertain outcome is never
         # replayed automatically, even when the publisher sends a duplicate.
-        with DeliveryState().delivery(delivery_id(record, detection_event),
-                                      "response:" + response_module, replay=False):
+        with DeliveryState().delivery(
+            delivery_id(record, detection_event), "response:" + response_module, replay=False
+        ):
             result = handler(dredge, detection_event)
     except AlreadyDelivered:
         return
@@ -456,8 +466,11 @@ def _process_record(
             event_name="IR_ACTION_REPLAY_BLOCKED",
             event_type="ERROR",
             message="Action is already claimed; inspect its outcome before any manual replay",
-            details={"delivery_id": delivery_id(record, detection_event),
-                     "detection_id": detection_id, "response_module": response_module},
+            details={
+                "delivery_id": delivery_id(record, detection_event),
+                "detection_id": detection_id,
+                "response_module": response_module,
+            },
         )
         return
     except Exception as e:
@@ -636,7 +649,9 @@ ROLLBACK_UNDO_MODULE: dict[str, str] = {
 }
 
 
-def _build_rollback_kwargs(response_module: str, detection_event: dict, result: OperationResult) -> dict | None:
+def _build_rollback_kwargs(
+    response_module: str, detection_event: dict, result: OperationResult
+) -> dict | None:
     """
     Build the exact kwargs the undo function named in ROLLBACK_UNDO_MODULE
     needs, re-deriving identifiers from detection_event the same way the
@@ -698,7 +713,9 @@ def _build_rollback_kwargs(response_module: str, detection_event: dict, result: 
     if response_module == "quarantine_s3_bucket":
         return {
             "bucket_name": _extract_bucket_name(detection_event),
-            "public_access_block_configuration": rollback_state.get("public_access_block_configuration"),
+            "public_access_block_configuration": rollback_state.get(
+                "public_access_block_configuration"
+            ),
             "bucket_policy": rollback_state.get("bucket_policy"),
         }
 
@@ -711,13 +728,17 @@ def _build_rollback_kwargs(response_module: str, detection_event: dict, result: 
     if response_module == "block_s3_public_access":
         return {
             "account_id": _extract_account_id(detection_event),
-            "public_access_block_configuration": rollback_state.get("public_access_block_configuration"),
+            "public_access_block_configuration": rollback_state.get(
+                "public_access_block_configuration"
+            ),
         }
 
     if response_module == "block_s3_bucket_public_access":
         return {
             "bucket_name": _extract_bucket_name(detection_event),
-            "public_access_block_configuration": rollback_state.get("public_access_block_configuration"),
+            "public_access_block_configuration": rollback_state.get(
+                "public_access_block_configuration"
+            ),
             "access_control_policy": rollback_state.get("access_control_policy"),
         }
 
@@ -726,7 +747,11 @@ def _build_rollback_kwargs(response_module: str, detection_event: dict, result: 
         if access_control_policy is None:
             return None
         bucket_name, key = _extract_bucket_and_key(detection_event)
-        return {"bucket_name": bucket_name, "key": key, "access_control_policy": access_control_policy}
+        return {
+            "bucket_name": bucket_name,
+            "key": key,
+            "access_control_policy": access_control_policy,
+        }
 
     if response_module == "disable_lambda_function":
         return {
@@ -1142,7 +1167,10 @@ def _extract_security_group_rule_change(event: dict) -> tuple[str | None, list[d
             ]
             if not ip_ranges:
                 continue
-            translated_perm: dict = {"IpProtocol": perm.get("ipProtocol", "-1"), "IpRanges": ip_ranges}
+            translated_perm: dict = {
+                "IpProtocol": perm.get("ipProtocol", "-1"),
+                "IpRanges": ip_ranges,
+            }
             if perm.get("fromPort") is not None:
                 translated_perm["FromPort"] = perm["fromPort"]
             if perm.get("toPort") is not None:
@@ -1387,7 +1415,11 @@ def _handle_deauthorize_security_group_rules(dredge: Dredge, event: dict) -> Ope
             success=False,
             details={
                 "reason": "Missing group_id or a translatable ingress/egress rule in detection_event",
-                "event_excerpt": {"group_id": group_id, "ingress_rules": ingress_rules, "egress_rules": egress_rules},
+                "event_excerpt": {
+                    "group_id": group_id,
+                    "ingress_rules": ingress_rules,
+                    "egress_rules": egress_rules,
+                },
             },
             errors=["Missing group_id or rule"],
         )
@@ -1528,7 +1560,9 @@ def _handle_revoke_rds_snapshot_public_access(dredge: Dredge, event: dict) -> Op
             operation="revoke_rds_snapshot_public_access",
             target="snapshot=None",
             success=False,
-            details={"reason": "Missing dBSnapshotIdentifier/dBClusterSnapshotIdentifier in detection_event"},
+            details={
+                "reason": "Missing dBSnapshotIdentifier/dBClusterSnapshotIdentifier in detection_event"
+            },
             errors=["Missing snapshot_id"],
         )
 

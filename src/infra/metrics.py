@@ -12,6 +12,7 @@ Logs at all, which is already guaranteed.
 
 https://docs.aws.amazon.com/AmazonCloudWatch/latest/monitoring/CloudWatch_Embedded_Metric_Format_Specification.html
 """
+
 from __future__ import annotations
 
 import json

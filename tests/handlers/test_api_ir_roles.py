@@ -5,6 +5,7 @@ that account (src/handlers/responder.py _resolve_role_arn) -- how
 additional (non-home) accounts get onboarded for multi-account incident
 response.
 """
+
 from __future__ import annotations
 
 import json
@@ -37,7 +38,10 @@ def body_of(resp: dict) -> dict:
     return json.loads(resp["body"])
 
 
-VALID_BODY = {"aws_account_id": "222222222222", "role_arn": "arn:aws:iam::222222222222:role/opencdr-ir-role"}
+VALID_BODY = {
+    "aws_account_id": "222222222222",
+    "role_arn": "arn:aws:iam::222222222222:role/opencdr-ir-role",
+}
 
 
 class TestListIrRoles:
@@ -68,7 +72,9 @@ class TestGetIrRole:
         with patch.object(api, "ir_account_roles_table") as mock_table:
             mock_table.get_item.return_value = {"Item": VALID_BODY}
             resp = api.lambda_handler(
-                make_event("GET", "/ir-roles/222222222222", path_params={"aws_account_id": "222222222222"}),
+                make_event(
+                    "GET", "/ir-roles/222222222222", path_params={"aws_account_id": "222222222222"}
+                ),
                 make_context(),
             )
         assert resp["statusCode"] == 200
@@ -78,7 +84,9 @@ class TestGetIrRole:
         with patch.object(api, "ir_account_roles_table") as mock_table:
             mock_table.get_item.return_value = {}
             resp = api.lambda_handler(
-                make_event("GET", "/ir-roles/999999999999", path_params={"aws_account_id": "999999999999"}),
+                make_event(
+                    "GET", "/ir-roles/999999999999", path_params={"aws_account_id": "999999999999"}
+                ),
                 make_context(),
             )
         assert resp["statusCode"] == 404
@@ -102,7 +110,12 @@ class TestCreateIrRole:
             from botocore.exceptions import ClientError
 
             mock_table.put_item.side_effect = ClientError(
-                {"Error": {"Code": "ConditionalCheckFailedException", "Message": "condition failed"}},
+                {
+                    "Error": {
+                        "Code": "ConditionalCheckFailedException",
+                        "Message": "condition failed",
+                    }
+                },
                 "PutItem",
             )
             resp = api.lambda_handler(
@@ -122,7 +135,9 @@ class TestCreateIrRole:
             make_event(
                 "POST",
                 "/ir-roles",
-                body=json.dumps({"aws_account_id": "not-an-account-id", "role_arn": VALID_BODY["role_arn"]}),
+                body=json.dumps(
+                    {"aws_account_id": "not-an-account-id", "role_arn": VALID_BODY["role_arn"]}
+                ),
             ),
             make_context(),
         )
@@ -190,7 +205,9 @@ class TestUpsertIrRole:
                     "PUT",
                     "/ir-roles/222222222222",
                     path_params={"aws_account_id": "222222222222"},
-                    body=json.dumps({"aws_account_id": "999999999999", "role_arn": VALID_BODY["role_arn"]}),
+                    body=json.dumps(
+                        {"aws_account_id": "999999999999", "role_arn": VALID_BODY["role_arn"]}
+                    ),
                 ),
                 make_context(),
             )
@@ -202,7 +219,11 @@ class TestDeleteIrRole:
         with patch.object(api, "ir_account_roles_table") as mock_table:
             mock_table.get_item.return_value = {"Item": VALID_BODY}
             resp = api.lambda_handler(
-                make_event("DELETE", "/ir-roles/222222222222", path_params={"aws_account_id": "222222222222"}),
+                make_event(
+                    "DELETE",
+                    "/ir-roles/222222222222",
+                    path_params={"aws_account_id": "222222222222"},
+                ),
                 make_context(),
             )
         assert resp["statusCode"] == 200
@@ -212,7 +233,11 @@ class TestDeleteIrRole:
         with patch.object(api, "ir_account_roles_table") as mock_table:
             mock_table.get_item.return_value = {}
             resp = api.lambda_handler(
-                make_event("DELETE", "/ir-roles/999999999999", path_params={"aws_account_id": "999999999999"}),
+                make_event(
+                    "DELETE",
+                    "/ir-roles/999999999999",
+                    path_params={"aws_account_id": "999999999999"},
+                ),
                 make_context(),
             )
         assert resp["statusCode"] == 404

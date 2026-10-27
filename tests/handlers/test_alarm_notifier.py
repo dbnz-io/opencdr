@@ -1,4 +1,5 @@
 """Tests for the alarm_notifier Lambda handler (AlarmsSnsTopic -> Slack)."""
+
 from __future__ import annotations
 
 import json
@@ -104,8 +105,10 @@ class TestLambdaHandler:
             }
         )
 
-        with patch("boto3.client", return_value=mock_ssm), \
-             patch("urllib.request.urlopen", return_value=mock_resp):
+        with (
+            patch("boto3.client", return_value=mock_ssm),
+            patch("urllib.request.urlopen", return_value=mock_resp),
+        ):
             result = lambda_handler(event, context=MagicMock(aws_request_id="req-1"))
 
         assert result == {"status": "ok"}
@@ -118,8 +121,10 @@ class TestLambdaHandler:
 
         event = {"Records": [{"Sns": {"Message": "not json"}}]}
 
-        with patch("boto3.client", return_value=mock_ssm), \
-             patch("urllib.request.urlopen", return_value=mock_resp):
+        with (
+            patch("boto3.client", return_value=mock_ssm),
+            patch("urllib.request.urlopen", return_value=mock_resp),
+        ):
             result = lambda_handler(event, context=MagicMock(aws_request_id="req-1"))
 
         assert result == {"status": "ok"}
@@ -130,7 +135,9 @@ class TestLambdaHandler:
 
         event = make_sns_event({"AlarmName": "x", "NewStateValue": "ALARM"})
 
-        with patch("boto3.client", return_value=mock_ssm), \
-             patch("urllib.request.urlopen", side_effect=RuntimeError("network down")):
+        with (
+            patch("boto3.client", return_value=mock_ssm),
+            patch("urllib.request.urlopen", side_effect=RuntimeError("network down")),
+        ):
             with pytest.raises(RuntimeError, match="network down"):
                 lambda_handler(event, context=MagicMock(aws_request_id="req-1"))

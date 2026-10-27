@@ -1,4 +1,5 @@
 """Tests for `opencdr.py lists create/list/show/add/remove/delete`."""
+
 from __future__ import annotations
 
 import sys
@@ -11,7 +12,6 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent.parent.parent / "scripts"))
 
 import opencdr  # noqa: E402  (after sys.path manipulation)
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -45,9 +45,17 @@ def _run(func, args, *, api_response=None, request_side_effect=None):
 
 class TestListsCreate:
     def test_builds_correct_payload(self):
-        args = SimpleNamespace(list_id="automation-identities", description="CI identities", values=["ci-deploy-role", "cdk-toolkit"])
+        args = SimpleNamespace(
+            list_id="automation-identities",
+            description="CI identities",
+            values=["ci-deploy-role", "cdk-toolkit"],
+        )
         mock_request = _run(opencdr.cmd_lists_create, args, api_response=(200, {"ok": True}))
-        method, path, kwargs = mock_request.call_args.args[0], mock_request.call_args.args[1], mock_request.call_args.kwargs
+        method, path, kwargs = (
+            mock_request.call_args.args[0],
+            mock_request.call_args.args[1],
+            mock_request.call_args.kwargs,
+        )
         assert method == "PUT"
         assert path == "/rules/automation-identities?rule_kind=list"
         assert kwargs["json"] == {
@@ -94,7 +102,9 @@ class TestListsCreate:
 
 class TestListsList:
     def test_calls_correct_path(self):
-        mock_request = _run(opencdr.cmd_lists_list, SimpleNamespace(), api_response=(200, {"items": []}))
+        mock_request = _run(
+            opencdr.cmd_lists_list, SimpleNamespace(), api_response=(200, {"items": []})
+        )
         method, path = mock_request.call_args.args[:2]
         assert method == "GET"
         assert path == "/rules?rule_kind=list&page_size=100"
@@ -107,7 +117,18 @@ class TestListsList:
         _run(
             opencdr.cmd_lists_list,
             SimpleNamespace(),
-            api_response=(200, {"items": [{"rule_id": "automation-identities", "values": ["a", "b", "c"], "description": "CI"}]}),
+            api_response=(
+                200,
+                {
+                    "items": [
+                        {
+                            "rule_id": "automation-identities",
+                            "values": ["a", "b", "c"],
+                            "description": "CI",
+                        }
+                    ]
+                },
+            ),
         )
         out = capsys.readouterr().out
         assert "automation-identities" in out
@@ -133,7 +154,11 @@ class TestListsShow:
 
     def test_values_printed_sorted(self, capsys):
         args = SimpleNamespace(list_id="x")
-        _run(opencdr.cmd_lists_show, args, api_response=(200, {"values": ["zebra", "apple", "mango"]}))
+        _run(
+            opencdr.cmd_lists_show,
+            args,
+            api_response=(200, {"values": ["zebra", "apple", "mango"]}),
+        )
         out = capsys.readouterr().out
         assert out.index("apple") < out.index("mango") < out.index("zebra")
 

@@ -11,6 +11,7 @@ would mutate that shared object out from under tests in other files
 depending on execution order -- a real cross-test isolation risk, not
 worth it for testing three lines of cold-start logic.
 """
+
 import json
 import os
 import subprocess

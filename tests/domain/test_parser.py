@@ -648,7 +648,7 @@ class TestNormalizeSeverity:
             ("LOW", "LOW"),
             ("INFORMATIONAL", "INFO"),
             (None, "UNKNOWN"),
-            ("8.0", "HIGH"),   # numeric-as-string path
+            ("8.0", "HIGH"),  # numeric-as-string path
             ("5.0", "MEDIUM"),
             ("invalid", "UNKNOWN"),
         ],

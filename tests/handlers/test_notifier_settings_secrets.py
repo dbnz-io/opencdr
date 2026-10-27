@@ -3,6 +3,7 @@ are stored as `ssm:` references (src/domain/settings_secrets.py), not
 plaintext, and load_global_settings must resolve them back to real values
 in place so every existing per-channel read site needs no changes.
 """
+
 from __future__ import annotations
 
 import os
@@ -24,6 +25,7 @@ from src.handlers.notifier import _resolve_secret_refs, load_global_settings
 def _ddb_item(d: dict) -> dict:
     """Marshals a plain dict into the low-level DynamoDB AttributeValue
     shape load_global_settings expects back from aws._ddb.get_item."""
+
     def marshal(v):
         if isinstance(v, bool):
             return {"BOOL": v}
@@ -49,12 +51,18 @@ class TestResolveSecretRefsHelper:
     def test_resolves_ssm_ref_to_real_value(self):
         aws = MagicMock()
         aws.ssm_get_secure_param.return_value = "https://hooks.slack.com/real"
-        settings = {"channels": {"slack": {"webhook_url": "ssm:/opencdr-dev/settings/global/slack/webhook_url"}}}
+        settings = {
+            "channels": {
+                "slack": {"webhook_url": "ssm:/opencdr-dev/settings/global/slack/webhook_url"}
+            }
+        }
 
         _resolve_secret_refs(settings, aws=aws)
 
         assert settings["channels"]["slack"]["webhook_url"] == "https://hooks.slack.com/real"
-        aws.ssm_get_secure_param.assert_called_once_with(name="/opencdr-dev/settings/global/slack/webhook_url")
+        aws.ssm_get_secure_param.assert_called_once_with(
+            name="/opencdr-dev/settings/global/slack/webhook_url"
+        )
 
     def test_leaves_non_ref_values_untouched(self):
         aws = MagicMock()
@@ -68,7 +76,9 @@ class TestResolveSecretRefsHelper:
     def test_missing_param_resolves_to_empty_string(self):
         aws = MagicMock()
         aws.ssm_get_secure_param.return_value = None
-        settings = {"channels": {"jira": {"api_token": "ssm:/opencdr-dev/settings/global/jira/api_token"}}}
+        settings = {
+            "channels": {"jira": {"api_token": "ssm:/opencdr-dev/settings/global/jira/api_token"}}
+        }
 
         _resolve_secret_refs(settings, aws=aws)
 
@@ -81,7 +91,11 @@ class TestResolveSecretRefsHelper:
             "channels": {
                 "webhook": {
                     "targets": [
-                        {"headers": {"Authorization": "ssm:/opencdr-dev/settings/global/webhook/targets/0/headers/Authorization"}}
+                        {
+                            "headers": {
+                                "Authorization": "ssm:/opencdr-dev/settings/global/webhook/targets/0/headers/Authorization"
+                            }
+                        }
                     ]
                 }
             }
@@ -89,7 +103,10 @@ class TestResolveSecretRefsHelper:
 
         _resolve_secret_refs(settings, aws=aws)
 
-        assert settings["channels"]["webhook"]["targets"][0]["headers"]["Authorization"] == "Bearer real-token"
+        assert (
+            settings["channels"]["webhook"]["targets"][0]["headers"]["Authorization"]
+            == "Bearer real-token"
+        )
 
 
 class TestLoadGlobalSettingsResolvesSecrets:
@@ -100,7 +117,10 @@ class TestLoadGlobalSettingsResolvesSecrets:
                 {
                     "setting_id": "global",
                     "channels": {
-                        "slack": {"enabled": True, "webhook_url": "ssm:/opencdr-dev/settings/global/slack/webhook_url"}
+                        "slack": {
+                            "enabled": True,
+                            "webhook_url": "ssm:/opencdr-dev/settings/global/slack/webhook_url",
+                        }
                     },
                 }
             )
@@ -119,7 +139,10 @@ class TestLoadGlobalSettingsResolvesSecrets:
                 {
                     "setting_id": "global",
                     "channels": {
-                        "slack": {"enabled": True, "webhook_url": "ssm:/opencdr-dev/settings/global/slack/webhook_url"}
+                        "slack": {
+                            "enabled": True,
+                            "webhook_url": "ssm:/opencdr-dev/settings/global/slack/webhook_url",
+                        }
                     },
                 }
             )

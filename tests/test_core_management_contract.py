@@ -49,6 +49,9 @@ def test_release_manifest_matches_deployment_contract_versions():
     assert outputs["CoreProduct"]["Value"] == "OpenCDR Core"
     assert "CoreVersion" in outputs
     assert "ManagementContractVersion" in outputs
+    assert "CoreSecurityProfile" in outputs
+    assert outputs["ArchiveEnabled"]["Value"] == "${param:archiveEnabled}"
+    assert outputs["XRayEnabled"]["Value"] == "${param:xrayEnabled}"
     assert "CoreAccountId" in outputs
     assert "CoreHomeRegion" in outputs
 
@@ -71,7 +74,9 @@ def test_management_contract_examples_validate():
     for schema_name, example_name in pairs:
         schema = json.loads((ROOT / "management/schemas" / schema_name).read_text())
         example = json.loads((ROOT / "management/examples" / example_name).read_text())
-        Draft202012Validator(schema, format_checker=Draft202012Validator.FORMAT_CHECKER).validate(example)
+        Draft202012Validator(schema, format_checker=Draft202012Validator.FORMAT_CHECKER).validate(
+            example
+        )
 
 
 def test_standalone_cloudformation_descriptions_fit_aws_limit():
@@ -87,7 +92,9 @@ def test_regional_collector_has_retry_dlq_and_scoped_queue_policy():
     resources = _yaml("region-forwarding/cross-region-forwarder.yaml")["Resources"]
     queue = resources["ForwardingDeadLetterQueue"]["Properties"]
     target = resources["ForwardingRule"]["Properties"]["Targets"][0]
-    policy = resources["ForwardingDeadLetterQueuePolicy"]["Properties"]["PolicyDocument"]["Statement"][0]
+    policy = resources["ForwardingDeadLetterQueuePolicy"]["Properties"]["PolicyDocument"][
+        "Statement"
+    ][0]
 
     assert queue["MessageRetentionPeriod"] == 1209600
     assert queue["SqsManagedSseEnabled"] is True
@@ -98,13 +105,21 @@ def test_regional_collector_has_retry_dlq_and_scoped_queue_policy():
     assert "DeadLetterConfig" in target
     assert policy["Principal"] == {"Service": "events.amazonaws.com"}
     assert "aws:SourceArn" in policy["Condition"]["ArnEquals"]
-    assert resources["ForwardingFailedInvocationsAlarm"]["Properties"]["MetricName"] == "FailedInvocations"
-    assert resources["ForwardingDeadLetterQueueAlarm"]["Properties"]["MetricName"] == "ApproximateNumberOfMessagesVisible"
+    assert (
+        resources["ForwardingFailedInvocationsAlarm"]["Properties"]["MetricName"]
+        == "FailedInvocations"
+    )
+    assert (
+        resources["ForwardingDeadLetterQueueAlarm"]["Properties"]["MetricName"]
+        == "ApproximateNumberOfMessagesVisible"
+    )
 
 
 def test_regional_forwarder_role_trust_is_source_scoped():
     resources = _yaml("serverless.yml")["resources"]["Resources"]
-    trust = resources["RegionForwarderRole"]["Properties"]["AssumeRolePolicyDocument"]["Statement"][0]
+    trust = resources["RegionForwarderRole"]["Properties"]["AssumeRolePolicyDocument"]["Statement"][
+        0
+    ]
     condition = trust["Condition"]
     assert "aws:SourceAccount" in condition["StringEquals"]
     assert "aws:SourceArn" in condition["ArnLike"]
@@ -119,9 +134,7 @@ def test_forwarder_patterns_cover_the_home_processor_patterns():
     ]
     expected_sources = {source for pattern in processor_patterns for source in pattern["source"]}
     expected_types = {
-        detail_type
-        for pattern in processor_patterns
-        for detail_type in pattern["detail-type"]
+        detail_type for pattern in processor_patterns for detail_type in pattern["detail-type"]
     }
 
     for path in (

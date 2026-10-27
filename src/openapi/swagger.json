@@ -37,13 +37,14 @@
               "application/json": {
                 "schema": {
                   "type": "object",
-                  "required": ["status", "product", "core_version", "management_contract_version", "deployment"],
+                  "required": ["status", "product", "core_version", "management_contract_version", "security_profile", "deployment"],
                   "properties": {
                     "status": { "type": "string", "enum": ["ok"] },
                     "product": { "type": "string", "enum": ["OpenCDR Core"] },
                     "service": { "type": "string" },
                     "core_version": { "type": "string" },
                     "management_contract_version": { "type": "string" },
+                    "security_profile": { "type": "string", "enum": ["standard", "hardened"] },
                     "deployment": { "type": "object" },
                     "capabilities": { "type": "object" },
                     "time": { "type": "string" }

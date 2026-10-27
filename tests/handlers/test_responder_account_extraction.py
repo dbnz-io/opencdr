@@ -19,6 +19,7 @@ responder._process_record uses it directly (there's no "detection_event"
 wrapper key in either real shape) -- so these are exactly the dicts
 _extract_account_id receives in production.
 """
+
 from __future__ import annotations
 
 import os

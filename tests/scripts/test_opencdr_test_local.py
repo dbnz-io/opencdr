@@ -3,6 +3,7 @@
 No AWS calls at all; runs the real src.domain.detection_engine/ocsf_min_parser
 against isolated rule/event fixture directories.
 """
+
 from __future__ import annotations
 
 import json
@@ -15,7 +16,6 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent.parent.parent / "scripts"))
 
 import opencdr  # noqa: E402  (after sys.path manipulation)
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -51,7 +51,11 @@ def _console_login_rule(rule_id="001_console_login_no_mfa"):
         "response_module": "",
         "conditions": [
             {"field": "activity_name", "op": "equals", "value": "ConsoleLogin"},
-            {"field": "raw_event.detail.additionalEventData.MFAUsed", "op": "equals", "value": "No"},
+            {
+                "field": "raw_event.detail.additionalEventData.MFAUsed",
+                "op": "equals",
+                "value": "No",
+            },
         ],
     }
 
@@ -159,9 +163,16 @@ class TestMatchOutcomes:
     def test_unfired_rules_listed_in_summary(self, isolated_dirs, capsys):
         rules_dir, events_dir = isolated_dirs
         _write_json(rules_dir, "001.json", _console_login_rule("001_console_login_no_mfa"))
-        _write_json(rules_dir, "999.json", _console_login_rule("999_never_matches") | {
-            "conditions": [{"field": "activity_name", "op": "equals", "value": "SomethingElseEntirely"}]
-        })
+        _write_json(
+            rules_dir,
+            "999.json",
+            _console_login_rule("999_never_matches")
+            | {
+                "conditions": [
+                    {"field": "activity_name", "op": "equals", "value": "SomethingElseEntirely"}
+                ]
+            },
+        )
         _write_json(events_dir, "001.json", CLOUDTRAIL_EVENT)
 
         opencdr.cmd_test_local(_make_args())
@@ -206,11 +217,15 @@ class TestListRuleSupport:
     def test_list_kind_rule_is_loaded_as_a_list_not_a_signal_rule(self, isolated_dirs, capsys):
         rules_dir, events_dir = isolated_dirs
         _write_json(rules_dir, "001.json", _console_login_rule())
-        _write_json(rules_dir, "automation.json", {
-            "rule_id": "automation-identities",
-            "rule_kind": "list",
-            "values": ["ci-deploy-role"],
-        })
+        _write_json(
+            rules_dir,
+            "automation.json",
+            {
+                "rule_id": "automation-identities",
+                "rule_kind": "list",
+                "values": ["ci-deploy-role"],
+            },
+        )
         _write_json(events_dir, "001.json", CLOUDTRAIL_EVENT)
 
         opencdr.cmd_test_local(_make_args())

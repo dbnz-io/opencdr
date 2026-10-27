@@ -9,7 +9,7 @@ This is the deep-reference documentation set. For a fast-start overview and copy
 - [OpenCDR Core](core.md) — product boundary, account-local topology, and fleet-management separation
 - [Management contract](management-contract.md) — release manifest, health identity, configuration bundle, and alert schemas
 - [Complete Setup Guide](setup.md) — every step, in order, from a clean AWS account to a fully working deployment
-- [Architecture](architecture.md) — the ten Lambdas, the data stores, and how an event flows from raw CloudTrail record to delivered alert
+- [Architecture](architecture.md) — the eleven Lambdas, the data stores, and how an event flows from raw CloudTrail record to delivered alert
 - [Detection Rules](detection-rules.md) — the rule schema, how to author/test/load rules
 - [API Reference](api-reference.md) — every REST endpoint, auth model, and where the OpenAPI spec is out of date
 - [Incident Response](incident-response.md) — automated response modules, how `responder` authorizes itself, rate limiting, remediation notifications
@@ -18,10 +18,14 @@ This is the deep-reference documentation set. For a fast-start overview and copy
 - [Observability](observability.md) — dashboard, custom metrics, tracing, alarm delivery, and the cost budget
 - [Data Archival](data-archival.md) — why signals/alerts/logs TTL out of DynamoDB, where they go first (S3, Parquet), and how to query the archive
 - [Deployment](deployment.md) — standing up a new deployment, CI/CD, what's automatic vs. manual
+- [`opencdr-deploy`](https://github.com/dbnz-io/opencdr-deploy) — separately released manager for named installations, immutable artifacts, feature updates, and operational scripts
+- [Production deployment responsibilities](production-deployment.md) — the account owner's authentication, network, state-recovery, promotion, and go-live gates
+- [Resource security profiles](security-profiles.md) — reversible `standard` and `hardened` protection for resources OpenCDR owns
 - [Security](security.md) — IAM model, secrets handling, known limitations stated plainly
 - [Glossary](glossary.md) — terms used throughout these pages, defined the way this codebase actually uses them
 - [`ir-role.md`](ir-role.md) — full IAM walkthrough for onboarding additional AWS accounts for cross-account incident response
 - [`stack-protection.md`](stack-protection.md) — CloudFormation termination protection and drift detection
+- [`production-readiness-roadmap.md`](production-readiness-roadmap.md) — security, recovery, promotion, and live-validation gates
 - [Falco and executable S3 ingestion](s3-ingestion.md) — setup, parser contract, operations and release gates.
 
 - [`region-forwarding.md`](region-forwarding.md) — why OpenCDR is blind outside its deployment region by default, and how to fix it
@@ -36,6 +40,9 @@ This is the deep-reference documentation set. For a fast-start overview and copy
 | What does OpenCDR actually do, end to end? | [Architecture](architecture.md) |
 | I'm setting this up for the first time — what's the full checklist? | [Complete Setup Guide](setup.md) |
 | How do I deploy this into a new AWS account? | [Deployment](deployment.md) |
+| How do I manage several installations from one computer? | [`opencdr-deploy`](https://github.com/dbnz-io/opencdr-deploy) |
+| What must the AWS account owner do before calling it production-ready? | [Production deployment responsibilities](production-deployment.md) |
+| What does `securityProfile=hardened` protect, and how do I change it? | [Resource security profiles](security-profiles.md) |
 | What do I get automatically vs. what needs manual setup? | [Deployment](deployment.md#whats-automatic-vs-what-needs-a-one-time-step) |
 | How do I write / test / load a detection rule? | [Detection Rules](detection-rules.md) |
 | What's the difference between a signal, a correlation, and an alert? | [Glossary](glossary.md#signal-vs-alert-vs-correlation) |

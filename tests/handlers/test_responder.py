@@ -7,21 +7,21 @@ below): `user_name`/`access_key_id` are only assigned inside a deeply nested
 event shapes raise UnboundLocalError. That is characterized here as-is, not
 fixed — a future fix should turn these into "returns (None, None)" tests.
 """
+
 from __future__ import annotations
 
 import json
+import os
 from unittest.mock import MagicMock
 
 import pytest
-
-import os
 
 os.environ.setdefault("LOGS_TABLE_NAME", "test-logs-table")
 os.environ.setdefault("AWS_DEFAULT_REGION", "us-east-1")
 
 from dredge.aws_ir.models import OperationResult
-from src.handlers import responder
 
+from src.handlers import responder
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -70,7 +70,9 @@ class TestResourceByType:
 
     def test_accepts_multiple_candidate_types(self):
         event = {"resources": [{"type": "AWS::IAM::AccessKey", "id": "AKIA1", "name": "AKIA1"}]}
-        assert responder._resource_by_type(event, "AWS::IAM::User", "AWS::IAM::AccessKey") is not None
+        assert (
+            responder._resource_by_type(event, "AWS::IAM::User", "AWS::IAM::AccessKey") is not None
+        )
 
     def test_no_match_returns_none(self):
         event = {"resources": [{"type": "AWS::EC2::Instance", "id": "i-1", "name": "i-1"}]}
@@ -80,7 +82,9 @@ class TestResourceByType:
         assert responder._resource_by_type({}, "AWS::IAM::User") is None
 
     def test_non_dict_entries_are_skipped_not_error(self):
-        event = {"resources": ["not-a-dict", {"type": "AWS::IAM::User", "id": "bob", "name": "bob"}]}
+        event = {
+            "resources": ["not-a-dict", {"type": "AWS::IAM::User", "id": "bob", "name": "bob"}]
+        }
         assert responder._resource_by_type(event, "AWS::IAM::User") == {
             "type": "AWS::IAM::User",
             "id": "bob",
@@ -143,7 +147,11 @@ class TestExtractUserAndAccessKey:
         event = {
             "resources": [
                 {"type": "AWS::IAM::User", "id": "suspicious-user", "name": "suspicious-user"},
-                {"type": "AWS::IAM::AccessKey", "id": "AKIAIOSFODNN7EXAMPLE", "name": "AKIAIOSFODNN7EXAMPLE"},
+                {
+                    "type": "AWS::IAM::AccessKey",
+                    "id": "AKIAIOSFODNN7EXAMPLE",
+                    "name": "AKIAIOSFODNN7EXAMPLE",
+                },
             ]
         }
         assert responder._extract_user_and_access_key(event) == (
@@ -275,7 +283,15 @@ class TestExtractBucketName:
         assert responder._extract_bucket_name({}) is None
 
     def test_falls_back_to_resources_list_when_no_raw_event(self):
-        event = {"resources": [{"type": "AWS::S3::Bucket", "id": "demo-public-bucket", "name": "demo-public-bucket"}]}
+        event = {
+            "resources": [
+                {
+                    "type": "AWS::S3::Bucket",
+                    "id": "demo-public-bucket",
+                    "name": "demo-public-bucket",
+                }
+            ]
+        }
         assert responder._extract_bucket_name(event) == "demo-public-bucket"
 
 
@@ -305,7 +321,11 @@ class TestExtractInstanceIds:
     def test_instances_set_of_dicts(self):
         event = {
             "raw_event": {
-                "detail": {"requestParameters": {"instancesSet": [{"instanceId": "i-a"}, {"instanceId": "i-b"}]}}
+                "detail": {
+                    "requestParameters": {
+                        "instancesSet": [{"instanceId": "i-a"}, {"instanceId": "i-b"}]
+                    }
+                }
             }
         }
         assert responder._extract_instance_ids(event) == ["i-a", "i-b"]
@@ -352,7 +372,11 @@ class TestExtractRdsSnapshot:
         assert responder._extract_rds_snapshot(event) == ("snap-1", "instance")
 
     def test_cluster_snapshot(self):
-        event = {"raw_event": {"detail": {"requestParameters": {"dBClusterSnapshotIdentifier": "csnap-1"}}}}
+        event = {
+            "raw_event": {
+                "detail": {"requestParameters": {"dBClusterSnapshotIdentifier": "csnap-1"}}
+            }
+        }
         assert responder._extract_rds_snapshot(event) == ("csnap-1", "cluster")
 
     def test_instance_takes_priority_when_both_present(self):
@@ -374,15 +398,33 @@ class TestExtractRdsSnapshot:
 
 class TestExtractInlinePolicyPrincipal:
     def test_user_policy(self):
-        event = {"raw_event": {"detail": {"requestParameters": {"userName": "alice", "policyName": "WildcardPolicy"}}}}
-        assert responder._extract_inline_policy_principal(event) == ("alice", None, "WildcardPolicy")
+        event = {
+            "raw_event": {
+                "detail": {
+                    "requestParameters": {"userName": "alice", "policyName": "WildcardPolicy"}
+                }
+            }
+        }
+        assert responder._extract_inline_policy_principal(event) == (
+            "alice",
+            None,
+            "WildcardPolicy",
+        )
 
     def test_role_policy(self):
-        event = {"raw_event": {"detail": {"requestParameters": {"roleName": "my-role", "policyName": "p"}}}}
+        event = {
+            "raw_event": {
+                "detail": {"requestParameters": {"roleName": "my-role", "policyName": "p"}}
+            }
+        }
         assert responder._extract_inline_policy_principal(event) == (None, "my-role", "p")
 
     def test_group_policy_has_no_user_or_role(self):
-        event = {"raw_event": {"detail": {"requestParameters": {"groupName": "my-group", "policyName": "p"}}}}
+        event = {
+            "raw_event": {
+                "detail": {"requestParameters": {"groupName": "my-group", "policyName": "p"}}
+            }
+        }
         assert responder._extract_inline_policy_principal(event) == (None, None, "p")
 
     def test_missing_returns_all_none(self):
@@ -427,7 +469,9 @@ class TestHandlerMissingFieldBranches:
         mock_dredge.aws_ir.response.block_s3_bucket_public_access.assert_not_called()
 
     def test_block_s3_object_public_access_missing_bucket_or_key(self, mock_dredge):
-        result = responder._handle_block_s3_object_public_access(mock_dredge, {"target_value": "bucket-a"})
+        result = responder._handle_block_s3_object_public_access(
+            mock_dredge, {"target_value": "bucket-a"}
+        )
         assert result.success is False
         mock_dredge.aws_ir.response.block_s3_object_public_access.assert_not_called()
 
@@ -509,7 +553,11 @@ class TestHandlerMissingFieldBranches:
         mock_dredge.aws_ir.response.delete_inline_policy.assert_not_called()
 
     def test_delete_inline_policy_group_policy_is_unsupported(self, mock_dredge):
-        event = {"raw_event": {"detail": {"requestParameters": {"groupName": "my-group", "policyName": "p"}}}}
+        event = {
+            "raw_event": {
+                "detail": {"requestParameters": {"groupName": "my-group", "policyName": "p"}}
+            }
+        }
         result = responder._handle_delete_inline_policy(mock_dredge, event)
         assert result.success is False
         assert "group" in result.details["reason"].lower()
@@ -526,7 +574,9 @@ class TestHandlerHappyPaths:
         mock_dredge.aws_ir.response.disable_access_key.return_value = ok_result()
         event = {
             "raw_event": {
-                "detail": {"responseElements": {"accessKey": {"userName": "alice", "accessKeyId": "AKIA1"}}}
+                "detail": {
+                    "responseElements": {"accessKey": {"userName": "alice", "accessKeyId": "AKIA1"}}
+                }
             }
         }
         result = responder._handle_disable_access_key(mock_dredge, event)
@@ -554,7 +604,9 @@ class TestHandlerHappyPaths:
     def test_block_s3_public_access_calls_dredge(self, mock_dredge):
         mock_dredge.aws_ir.response.block_s3_public_access.return_value = ok_result()
         responder._handle_block_s3_public_access(mock_dredge, {"aws_account_id": "123456789012"})
-        mock_dredge.aws_ir.response.block_s3_public_access.assert_called_once_with(account_id="123456789012")
+        mock_dredge.aws_ir.response.block_s3_public_access.assert_called_once_with(
+            account_id="123456789012"
+        )
 
     def test_block_s3_bucket_public_access_calls_dredge(self, mock_dredge):
         mock_dredge.aws_ir.response.block_s3_bucket_public_access.return_value = ok_result()
@@ -577,20 +629,34 @@ class TestHandlerHappyPaths:
     def test_isolate_ec2_instances_calls_dredge(self, mock_dredge):
         mock_dredge.aws_ir.response.isolate_ec2_instances.return_value = ok_result()
         responder._handle_isolate_ec2_instances(mock_dredge, {"target_value": "i-0123"})
-        mock_dredge.aws_ir.response.isolate_ec2_instances.assert_called_once_with(instance_ids=["i-0123"])
+        mock_dredge.aws_ir.response.isolate_ec2_instances.assert_called_once_with(
+            instance_ids=["i-0123"]
+        )
 
     def test_revoke_active_sessions_calls_dredge(self, mock_dredge):
         mock_dredge.aws_ir.response.revoke_active_sessions.return_value = ok_result()
-        event = {"resources": [{"type": "AWS::IAM::User", "id": "suspicious-user", "name": "suspicious-user"}]}
+        event = {
+            "resources": [
+                {"type": "AWS::IAM::User", "id": "suspicious-user", "name": "suspicious-user"}
+            ]
+        }
         result = responder._handle_revoke_active_sessions(mock_dredge, event)
-        mock_dredge.aws_ir.response.revoke_active_sessions.assert_called_once_with(user_name="suspicious-user")
+        mock_dredge.aws_ir.response.revoke_active_sessions.assert_called_once_with(
+            user_name="suspicious-user"
+        )
         assert result.success is True
 
     def test_quarantine_s3_bucket_calls_dredge(self, mock_dredge):
         mock_dredge.aws_ir.response.quarantine_s3_bucket.return_value = ok_result()
         event = {
             "cloud_account_id": "123456789012",
-            "resources": [{"type": "AWS::S3::Bucket", "id": "demo-public-bucket", "name": "demo-public-bucket"}],
+            "resources": [
+                {
+                    "type": "AWS::S3::Bucket",
+                    "id": "demo-public-bucket",
+                    "name": "demo-public-bucket",
+                }
+            ],
         }
         result = responder._handle_quarantine_s3_bucket(mock_dredge, event)
         mock_dredge.aws_ir.response.quarantine_s3_bucket.assert_called_once_with(
@@ -623,14 +689,23 @@ class TestHandlerHappyPaths:
         result = responder._handle_deauthorize_security_group_rules(mock_dredge, event)
         mock_dredge.aws_ir.response.deauthorize_security_group_rules.assert_called_once_with(
             group_id="sg-0abc123",
-            ingress_rules=[{"IpProtocol": "tcp", "IpRanges": [{"CidrIp": "0.0.0.0/0"}], "FromPort": 22, "ToPort": 22}],
+            ingress_rules=[
+                {
+                    "IpProtocol": "tcp",
+                    "IpRanges": [{"CidrIp": "0.0.0.0/0"}],
+                    "FromPort": 22,
+                    "ToPort": 22,
+                }
+            ],
             egress_rules=None,
         )
         assert result.success is True
 
     def test_disable_lambda_function_calls_dredge(self, mock_dredge):
         mock_dredge.aws_ir.response.disable_lambda_function.return_value = ok_result()
-        event = {"raw_event": {"detail": {"requestParameters": {"functionName": "backdoor-function"}}}}
+        event = {
+            "raw_event": {"detail": {"requestParameters": {"functionName": "backdoor-function"}}}
+        }
         result = responder._handle_disable_lambda_function(mock_dredge, event)
         mock_dredge.aws_ir.response.disable_lambda_function.assert_called_once_with(
             function_name="backdoor-function"
@@ -639,7 +714,9 @@ class TestHandlerHappyPaths:
 
     def test_disable_secrets_manager_secret_calls_dredge(self, mock_dredge):
         mock_dredge.aws_ir.response.disable_secrets_manager_secret.return_value = ok_result()
-        event = {"raw_event": {"detail": {"requestParameters": {"secretId": "prod/database/password"}}}}
+        event = {
+            "raw_event": {"detail": {"requestParameters": {"secretId": "prod/database/password"}}}
+        }
         result = responder._handle_disable_secrets_manager_secret(mock_dredge, event)
         mock_dredge.aws_ir.response.disable_secrets_manager_secret.assert_called_once_with(
             secret_id="prod/database/password"
@@ -650,21 +727,29 @@ class TestHandlerHappyPaths:
         mock_dredge.aws_ir.response.enable_cloudtrail_logging.return_value = ok_result()
         event = {"raw_event": {"detail": {"requestParameters": {"name": "org-trail"}}}}
         result = responder._handle_enable_cloudtrail_logging(mock_dredge, event)
-        mock_dredge.aws_ir.response.enable_cloudtrail_logging.assert_called_once_with(trail_name="org-trail")
+        mock_dredge.aws_ir.response.enable_cloudtrail_logging.assert_called_once_with(
+            trail_name="org-trail"
+        )
         assert result.success is True
 
     def test_enable_guardduty_detector_calls_dredge(self, mock_dredge):
         mock_dredge.aws_ir.response.enable_guardduty_detector.return_value = ok_result()
         event = {"raw_event": {"detail": {"requestParameters": {"detectorId": "det-1"}}}}
         result = responder._handle_enable_guardduty_detector(mock_dredge, event)
-        mock_dredge.aws_ir.response.enable_guardduty_detector.assert_called_once_with(detector_id="det-1")
+        mock_dredge.aws_ir.response.enable_guardduty_detector.assert_called_once_with(
+            detector_id="det-1"
+        )
         assert result.success is True
 
     def test_start_config_recorder_calls_dredge(self, mock_dredge):
         mock_dredge.aws_ir.response.start_config_recorder.return_value = ok_result()
-        event = {"raw_event": {"detail": {"requestParameters": {"configurationRecorderName": "default"}}}}
+        event = {
+            "raw_event": {"detail": {"requestParameters": {"configurationRecorderName": "default"}}}
+        }
         result = responder._handle_start_config_recorder(mock_dredge, event)
-        mock_dredge.aws_ir.response.start_config_recorder.assert_called_once_with(recorder_name="default")
+        mock_dredge.aws_ir.response.start_config_recorder.assert_called_once_with(
+            recorder_name="default"
+        )
         assert result.success is True
 
     def test_enable_security_hub_calls_dredge_with_no_args(self, mock_dredge):
@@ -684,7 +769,11 @@ class TestHandlerHappyPaths:
 
     def test_revoke_rds_snapshot_public_access_cluster_calls_dredge(self, mock_dredge):
         mock_dredge.aws_ir.response.revoke_rds_snapshot_public_access.return_value = ok_result()
-        event = {"raw_event": {"detail": {"requestParameters": {"dBClusterSnapshotIdentifier": "csnap-1"}}}}
+        event = {
+            "raw_event": {
+                "detail": {"requestParameters": {"dBClusterSnapshotIdentifier": "csnap-1"}}
+            }
+        }
         result = responder._handle_revoke_rds_snapshot_public_access(mock_dredge, event)
         mock_dredge.aws_ir.response.revoke_rds_snapshot_public_access.assert_called_once_with(
             snapshot_id="csnap-1", snapshot_type="cluster"
@@ -693,7 +782,13 @@ class TestHandlerHappyPaths:
 
     def test_delete_inline_policy_user_calls_dredge(self, mock_dredge):
         mock_dredge.aws_ir.response.delete_inline_policy.return_value = ok_result()
-        event = {"raw_event": {"detail": {"requestParameters": {"userName": "alice", "policyName": "WildcardPolicy"}}}}
+        event = {
+            "raw_event": {
+                "detail": {
+                    "requestParameters": {"userName": "alice", "policyName": "WildcardPolicy"}
+                }
+            }
+        }
         result = responder._handle_delete_inline_policy(mock_dredge, event)
         mock_dredge.aws_ir.response.delete_inline_policy.assert_called_once_with(
             user_name="alice", role_name=None, policy_name="WildcardPolicy"
@@ -702,7 +797,11 @@ class TestHandlerHappyPaths:
 
     def test_delete_inline_policy_role_calls_dredge(self, mock_dredge):
         mock_dredge.aws_ir.response.delete_inline_policy.return_value = ok_result()
-        event = {"raw_event": {"detail": {"requestParameters": {"roleName": "my-role", "policyName": "p"}}}}
+        event = {
+            "raw_event": {
+                "detail": {"requestParameters": {"roleName": "my-role", "policyName": "p"}}
+            }
+        }
         result = responder._handle_delete_inline_policy(mock_dredge, event)
         mock_dredge.aws_ir.response.delete_inline_policy.assert_called_once_with(
             user_name=None, role_name="my-role", policy_name="p"
@@ -739,7 +838,14 @@ class TestExtractSecurityGroupRuleChange:
         }
         group_id, ingress, egress = responder._extract_security_group_rule_change(event)
         assert group_id == "sg-0abc123"
-        assert ingress == [{"IpProtocol": "tcp", "IpRanges": [{"CidrIp": "0.0.0.0/0"}], "FromPort": 22, "ToPort": 22}]
+        assert ingress == [
+            {
+                "IpProtocol": "tcp",
+                "IpRanges": [{"CidrIp": "0.0.0.0/0"}],
+                "FromPort": 22,
+                "ToPort": 22,
+            }
+        ]
         assert egress == []
 
     def test_translates_egress_cidr_rule(self):
@@ -780,7 +886,12 @@ class TestExtractSecurityGroupRuleChange:
                                     "ipProtocol": "tcp",
                                     "fromPort": 443,
                                     "toPort": 443,
-                                    "ipRanges": {"items": [{"cidrIp": "1.1.1.1/32"}, {"cidrIp": "2.2.2.2/32"}]},
+                                    "ipRanges": {
+                                        "items": [
+                                            {"cidrIp": "1.1.1.1/32"},
+                                            {"cidrIp": "2.2.2.2/32"},
+                                        ]
+                                    },
                                 },
                                 {
                                     "ipProtocol": "tcp",
@@ -809,7 +920,14 @@ class TestExtractSecurityGroupRuleChange:
                     "requestParameters": {
                         "groupId": "sg-0abc123",
                         "ipPermissions": {
-                            "items": [{"ipProtocol": "tcp", "fromPort": 22, "toPort": 22, "groups": {"items": []}}]
+                            "items": [
+                                {
+                                    "ipProtocol": "tcp",
+                                    "fromPort": 22,
+                                    "toPort": 22,
+                                    "groups": {"items": []},
+                                }
+                            ]
                         },
                     }
                 }
@@ -821,7 +939,10 @@ class TestExtractSecurityGroupRuleChange:
         assert egress == []
 
     def test_missing_group_id_returns_none(self):
-        event = {"activity_name": "AuthorizeSecurityGroupIngress", "raw_event": {"detail": {"requestParameters": {}}}}
+        event = {
+            "activity_name": "AuthorizeSecurityGroupIngress",
+            "raw_event": {"detail": {"requestParameters": {}}},
+        }
         group_id, ingress, egress = responder._extract_security_group_rule_change(event)
         assert group_id is None
         assert ingress == []
@@ -838,7 +959,14 @@ class TestExtractSecurityGroupRuleChange:
                 "detail": {
                     "requestParameters": {
                         "groupId": "sg-0abc123",
-                        "ipPermissions": {"items": [{"ipProtocol": "tcp", "ipRanges": {"items": [{"cidrIp": "0.0.0.0/0"}]}}]},
+                        "ipPermissions": {
+                            "items": [
+                                {
+                                    "ipProtocol": "tcp",
+                                    "ipRanges": {"items": [{"cidrIp": "0.0.0.0/0"}]},
+                                }
+                            ]
+                        },
                     }
                 }
             },
@@ -858,15 +986,24 @@ class TestResponseModuleHandlersRegistry:
         assert len(responder.RESPONSE_MODULE_HANDLERS) == 19
 
     def test_guardduty_handlers_registered(self):
-        assert responder.RESPONSE_MODULE_HANDLERS["revoke_active_sessions"] is responder._handle_revoke_active_sessions
-        assert responder.RESPONSE_MODULE_HANDLERS["quarantine_s3_bucket"] is responder._handle_quarantine_s3_bucket
+        assert (
+            responder.RESPONSE_MODULE_HANDLERS["revoke_active_sessions"]
+            is responder._handle_revoke_active_sessions
+        )
+        assert (
+            responder.RESPONSE_MODULE_HANDLERS["quarantine_s3_bucket"]
+            is responder._handle_quarantine_s3_bucket
+        )
 
     def test_response_module_coverage_handlers_registered(self):
         assert (
             responder.RESPONSE_MODULE_HANDLERS["deauthorize_security_group_rules"]
             is responder._handle_deauthorize_security_group_rules
         )
-        assert responder.RESPONSE_MODULE_HANDLERS["disable_lambda_function"] is responder._handle_disable_lambda_function
+        assert (
+            responder.RESPONSE_MODULE_HANDLERS["disable_lambda_function"]
+            is responder._handle_disable_lambda_function
+        )
         assert (
             responder.RESPONSE_MODULE_HANDLERS["disable_secrets_manager_secret"]
             is responder._handle_disable_secrets_manager_secret
@@ -881,13 +1018,22 @@ class TestResponseModuleHandlersRegistry:
             responder.RESPONSE_MODULE_HANDLERS["enable_guardduty_detector"]
             is responder._handle_enable_guardduty_detector
         )
-        assert responder.RESPONSE_MODULE_HANDLERS["start_config_recorder"] is responder._handle_start_config_recorder
-        assert responder.RESPONSE_MODULE_HANDLERS["enable_security_hub"] is responder._handle_enable_security_hub
+        assert (
+            responder.RESPONSE_MODULE_HANDLERS["start_config_recorder"]
+            is responder._handle_start_config_recorder
+        )
+        assert (
+            responder.RESPONSE_MODULE_HANDLERS["enable_security_hub"]
+            is responder._handle_enable_security_hub
+        )
         assert (
             responder.RESPONSE_MODULE_HANDLERS["revoke_rds_snapshot_public_access"]
             is responder._handle_revoke_rds_snapshot_public_access
         )
-        assert responder.RESPONSE_MODULE_HANDLERS["delete_inline_policy"] is responder._handle_delete_inline_policy
+        assert (
+            responder.RESPONSE_MODULE_HANDLERS["delete_inline_policy"]
+            is responder._handle_delete_inline_policy
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -901,19 +1047,39 @@ class TestRollbackUndoModuleRegistry:
 
     def test_maps_to_dredge_undo_function_names(self):
         assert responder.ROLLBACK_UNDO_MODULE["disable_access_key"] == "enable_access_key"
-        assert responder.ROLLBACK_UNDO_MODULE["revoke_active_sessions"] == "revoke_deny_all_session_policy"
-        assert responder.ROLLBACK_UNDO_MODULE["deauthorize_security_group_rules"] == "authorize_security_group_rules"
-        assert responder.ROLLBACK_UNDO_MODULE["block_s3_public_access"] == "restore_s3_account_public_access_block"
+        assert (
+            responder.ROLLBACK_UNDO_MODULE["revoke_active_sessions"]
+            == "revoke_deny_all_session_policy"
+        )
+        assert (
+            responder.ROLLBACK_UNDO_MODULE["deauthorize_security_group_rules"]
+            == "authorize_security_group_rules"
+        )
+        assert (
+            responder.ROLLBACK_UNDO_MODULE["block_s3_public_access"]
+            == "restore_s3_account_public_access_block"
+        )
         assert (
             responder.ROLLBACK_UNDO_MODULE["block_s3_bucket_public_access"]
             == "restore_s3_bucket_public_access_block_and_acl"
         )
-        assert responder.ROLLBACK_UNDO_MODULE["block_s3_object_public_access"] == "restore_s3_object_acl"
-        assert responder.ROLLBACK_UNDO_MODULE["disable_lambda_function"] == "restore_lambda_concurrency"
-        assert responder.ROLLBACK_UNDO_MODULE["disable_secrets_manager_secret"] == "restore_secrets_manager_secret"
+        assert (
+            responder.ROLLBACK_UNDO_MODULE["block_s3_object_public_access"]
+            == "restore_s3_object_acl"
+        )
+        assert (
+            responder.ROLLBACK_UNDO_MODULE["disable_lambda_function"]
+            == "restore_lambda_concurrency"
+        )
+        assert (
+            responder.ROLLBACK_UNDO_MODULE["disable_secrets_manager_secret"]
+            == "restore_secrets_manager_secret"
+        )
         assert responder.ROLLBACK_UNDO_MODULE["disable_user"] == "restore_user"
         assert responder.ROLLBACK_UNDO_MODULE["disable_role"] == "restore_role"
-        assert responder.ROLLBACK_UNDO_MODULE["quarantine_s3_bucket"] == "restore_s3_bucket_quarantine"
+        assert (
+            responder.ROLLBACK_UNDO_MODULE["quarantine_s3_bucket"] == "restore_s3_bucket_quarantine"
+        )
         assert (
             responder.ROLLBACK_UNDO_MODULE["isolate_ec2_instances"]
             == "restore_ec2_instance_security_groups"
@@ -928,13 +1094,21 @@ class TestRollbackUndoModuleRegistry:
 class TestBuildRollbackKwargs:
     def test_disable_access_key(self):
         event = {
-            "raw_event": {"detail": {"responseElements": {"accessKey": {"userName": "alice", "accessKeyId": "AKIA1"}}}}
+            "raw_event": {
+                "detail": {
+                    "responseElements": {"accessKey": {"userName": "alice", "accessKeyId": "AKIA1"}}
+                }
+            }
         }
         kwargs = responder._build_rollback_kwargs("disable_access_key", event, ok_result())
         assert kwargs == {"user_name": "alice", "access_key_id": "AKIA1"}
 
     def test_revoke_active_sessions(self):
-        event = {"resources": [{"type": "AWS::IAM::User", "id": "suspicious-user", "name": "suspicious-user"}]}
+        event = {
+            "resources": [
+                {"type": "AWS::IAM::User", "id": "suspicious-user", "name": "suspicious-user"}
+            ]
+        }
         kwargs = responder._build_rollback_kwargs("revoke_active_sessions", event, ok_result())
         assert kwargs == {"user_name": "suspicious-user"}
 
@@ -959,18 +1133,29 @@ class TestBuildRollbackKwargs:
                 }
             },
         }
-        kwargs = responder._build_rollback_kwargs("deauthorize_security_group_rules", event, ok_result())
+        kwargs = responder._build_rollback_kwargs(
+            "deauthorize_security_group_rules", event, ok_result()
+        )
         assert kwargs == {
             "group_id": "sg-0abc123",
             "ingress_rules": [
-                {"IpProtocol": "tcp", "IpRanges": [{"CidrIp": "0.0.0.0/0"}], "FromPort": 22, "ToPort": 22}
+                {
+                    "IpProtocol": "tcp",
+                    "IpRanges": [{"CidrIp": "0.0.0.0/0"}],
+                    "FromPort": 22,
+                    "ToPort": 22,
+                }
             ],
             "egress_rules": None,
         }
 
     def test_disable_secrets_manager_secret(self):
-        event = {"raw_event": {"detail": {"requestParameters": {"secretId": "prod/database/password"}}}}
-        kwargs = responder._build_rollback_kwargs("disable_secrets_manager_secret", event, ok_result())
+        event = {
+            "raw_event": {"detail": {"requestParameters": {"secretId": "prod/database/password"}}}
+        }
+        kwargs = responder._build_rollback_kwargs(
+            "disable_secrets_manager_secret", event, ok_result()
+        )
         assert kwargs == {"secret_id": "prod/database/password"}
 
     def test_block_s3_public_access_uses_rollback_state(self):
@@ -979,7 +1164,9 @@ class TestBuildRollbackKwargs:
             operation="block_s3_public_access",
             target="account=123456789012",
             success=True,
-            details={"rollback_state": {"public_access_block_configuration": {"BlockPublicAcls": False}}},
+            details={
+                "rollback_state": {"public_access_block_configuration": {"BlockPublicAcls": False}}
+            },
         )
         kwargs = responder._build_rollback_kwargs("block_s3_public_access", event, result)
         assert kwargs == {
@@ -989,7 +1176,9 @@ class TestBuildRollbackKwargs:
 
     def test_block_s3_public_access_none_when_capture_failed(self):
         event = {"aws_account_id": "123456789012"}
-        result = OperationResult(operation="block_s3_public_access", target="t", success=True, details={})
+        result = OperationResult(
+            operation="block_s3_public_access", target="t", success=True, details={}
+        )
         assert responder._build_rollback_kwargs("block_s3_public_access", event, result) is None
 
     def test_block_s3_bucket_public_access_uses_rollback_state(self):
@@ -1013,12 +1202,17 @@ class TestBuildRollbackKwargs:
         }
 
     def test_block_s3_object_public_access_uses_rollback_state(self):
-        event = {"target_value": "my-bucket", "raw_event": {"detail": {"requestParameters": {"key": "obj.txt"}}}}
+        event = {
+            "target_value": "my-bucket",
+            "raw_event": {"detail": {"requestParameters": {"key": "obj.txt"}}},
+        }
         result = OperationResult(
             operation="block_s3_object_public_access",
             target="t",
             success=True,
-            details={"rollback_state": {"access_control_policy": {"Owner": {"ID": "o"}, "Grants": []}}},
+            details={
+                "rollback_state": {"access_control_policy": {"Owner": {"ID": "o"}, "Grants": []}}
+            },
         )
         kwargs = responder._build_rollback_kwargs("block_s3_object_public_access", event, result)
         assert kwargs == {
@@ -1028,14 +1222,24 @@ class TestBuildRollbackKwargs:
         }
 
     def test_block_s3_object_public_access_none_when_acl_capture_failed(self):
-        event = {"target_value": "my-bucket", "raw_event": {"detail": {"requestParameters": {"key": "obj.txt"}}}}
+        event = {
+            "target_value": "my-bucket",
+            "raw_event": {"detail": {"requestParameters": {"key": "obj.txt"}}},
+        }
         result = OperationResult(
-            operation="block_s3_object_public_access", target="t", success=True, details={"rollback_state": {}}
+            operation="block_s3_object_public_access",
+            target="t",
+            success=True,
+            details={"rollback_state": {}},
         )
-        assert responder._build_rollback_kwargs("block_s3_object_public_access", event, result) is None
+        assert (
+            responder._build_rollback_kwargs("block_s3_object_public_access", event, result) is None
+        )
 
     def test_disable_lambda_function_uses_rollback_state(self):
-        event = {"raw_event": {"detail": {"requestParameters": {"functionName": "backdoor-function"}}}}
+        event = {
+            "raw_event": {"detail": {"requestParameters": {"functionName": "backdoor-function"}}}
+        }
         result = OperationResult(
             operation="disable_lambda_function",
             target="t",
@@ -1046,8 +1250,12 @@ class TestBuildRollbackKwargs:
         assert kwargs == {"function_name": "backdoor-function", "reserved_concurrent_executions": 5}
 
     def test_disable_lambda_function_none_when_capture_failed(self):
-        event = {"raw_event": {"detail": {"requestParameters": {"functionName": "backdoor-function"}}}}
-        result = OperationResult(operation="disable_lambda_function", target="t", success=True, details={})
+        event = {
+            "raw_event": {"detail": {"requestParameters": {"functionName": "backdoor-function"}}}
+        }
+        result = OperationResult(
+            operation="disable_lambda_function", target="t", success=True, details={}
+        )
         assert responder._build_rollback_kwargs("disable_lambda_function", event, result) is None
 
     def test_non_rollback_module_returns_none(self):
@@ -1081,7 +1289,11 @@ class TestBuildRollbackKwargs:
             operation="disable_user",
             target="user=alice",
             success=True,
-            details={"access_keys_disabled": ["K1"], "groups_removed": [], "managed_policies_detached": []},
+            details={
+                "access_keys_disabled": ["K1"],
+                "groups_removed": [],
+                "managed_policies_detached": [],
+            },
         )
         kwargs = responder._build_rollback_kwargs("disable_user", event, result)
         assert kwargs["inline_policies"] is None
@@ -1127,7 +1339,9 @@ class TestBuildRollbackKwargs:
 
     def test_quarantine_s3_bucket_none_when_capture_failed(self):
         event = {"target_value": "my-bucket"}
-        result = OperationResult(operation="quarantine_s3_bucket", target="t", success=True, details={})
+        result = OperationResult(
+            operation="quarantine_s3_bucket", target="t", success=True, details={}
+        )
         assert responder._build_rollback_kwargs("quarantine_s3_bucket", event, result) is None
 
     def test_isolate_ec2_instances_uses_rollback_state(self):
@@ -1135,14 +1349,21 @@ class TestBuildRollbackKwargs:
             operation="isolate_ec2_instances",
             target="i-001",
             success=True,
-            details={"rollback_state": {"instance_security_groups": {"i-001": ["sg-orig-1", "sg-orig-2"]}}},
+            details={
+                "rollback_state": {
+                    "instance_security_groups": {"i-001": ["sg-orig-1", "sg-orig-2"]}
+                }
+            },
         )
         kwargs = responder._build_rollback_kwargs("isolate_ec2_instances", {}, result)
         assert kwargs == {"instance_security_groups": {"i-001": ["sg-orig-1", "sg-orig-2"]}}
 
     def test_isolate_ec2_instances_none_when_capture_failed(self):
         result = OperationResult(
-            operation="isolate_ec2_instances", target="t", success=True, details={"rollback_state": {}}
+            operation="isolate_ec2_instances",
+            target="t",
+            success=True,
+            details={"rollback_state": {}},
         )
         assert responder._build_rollback_kwargs("isolate_ec2_instances", {}, result) is None
 
@@ -1154,7 +1375,9 @@ class TestBuildRollbackKwargs:
             success=True,
             details={"rollback_state": {"restore_values": ["all", "999999999999"]}},
         )
-        kwargs = responder._build_rollback_kwargs("revoke_rds_snapshot_public_access", event, result)
+        kwargs = responder._build_rollback_kwargs(
+            "revoke_rds_snapshot_public_access", event, result
+        )
         assert kwargs == {
             "snapshot_id": "snap-1",
             "snapshot_type": "instance",
@@ -1173,21 +1396,40 @@ class TestBuildRollbackKwargs:
             success=True,
             details={"rollback_state": {"restore_values": []}},
         )
-        kwargs = responder._build_rollback_kwargs("revoke_rds_snapshot_public_access", event, result)
-        assert kwargs == {"snapshot_id": "snap-1", "snapshot_type": "instance", "restore_values": []}
+        kwargs = responder._build_rollback_kwargs(
+            "revoke_rds_snapshot_public_access", event, result
+        )
+        assert kwargs == {
+            "snapshot_id": "snap-1",
+            "snapshot_type": "instance",
+            "restore_values": [],
+        }
 
     def test_revoke_rds_snapshot_public_access_none_when_capture_failed(self):
         event = {"raw_event": {"detail": {"requestParameters": {"dBSnapshotIdentifier": "snap-1"}}}}
-        result = OperationResult(operation="revoke_rds_snapshot_public_access", target="t", success=True, details={})
-        assert responder._build_rollback_kwargs("revoke_rds_snapshot_public_access", event, result) is None
+        result = OperationResult(
+            operation="revoke_rds_snapshot_public_access", target="t", success=True, details={}
+        )
+        assert (
+            responder._build_rollback_kwargs("revoke_rds_snapshot_public_access", event, result)
+            is None
+        )
 
     def test_delete_inline_policy_uses_rollback_state(self):
-        event = {"raw_event": {"detail": {"requestParameters": {"userName": "alice", "policyName": "WildcardPolicy"}}}}
+        event = {
+            "raw_event": {
+                "detail": {
+                    "requestParameters": {"userName": "alice", "policyName": "WildcardPolicy"}
+                }
+            }
+        }
         result = OperationResult(
             operation="delete_inline_policy",
             target="t",
             success=True,
-            details={"rollback_state": {"policy_document": {"Version": "2012-10-17", "Statement": []}}},
+            details={
+                "rollback_state": {"policy_document": {"Version": "2012-10-17", "Statement": []}}
+            },
         )
         kwargs = responder._build_rollback_kwargs("delete_inline_policy", event, result)
         assert kwargs == {
@@ -1198,8 +1440,12 @@ class TestBuildRollbackKwargs:
         }
 
     def test_delete_inline_policy_none_when_capture_failed(self):
-        event = {"raw_event": {"detail": {"requestParameters": {"userName": "alice", "policyName": "p"}}}}
-        result = OperationResult(operation="delete_inline_policy", target="t", success=True, details={})
+        event = {
+            "raw_event": {"detail": {"requestParameters": {"userName": "alice", "policyName": "p"}}}
+        }
+        result = OperationResult(
+            operation="delete_inline_policy", target="t", success=True, details={}
+        )
         assert responder._build_rollback_kwargs("delete_inline_policy", event, result) is None
 
 
@@ -1238,10 +1484,17 @@ class TestWriteIrActionRecord:
         table = MagicMock()
         monkeypatch.setattr(responder, "_ir_actions_table", table)
         event = {
-            "raw_event": {"detail": {"responseElements": {"accessKey": {"userName": "alice", "accessKeyId": "AKIA1"}}}}
+            "raw_event": {
+                "detail": {
+                    "responseElements": {"accessKey": {"userName": "alice", "accessKeyId": "AKIA1"}}
+                }
+            }
         }
         result = OperationResult(
-            operation="disable_access_key", target="user=alice,access_key_id=AKIA1", success=True, details={}
+            operation="disable_access_key",
+            target="user=alice,access_key_id=AKIA1",
+            success=True,
+            details={},
         )
         responder._write_ir_action_record(
             detection_event=event,
@@ -1259,12 +1512,20 @@ class TestWriteIrActionRecord:
         assert item["undo_module"] == "enable_access_key"
         assert item["rollback_supported"] is True
         assert item["rolled_back"] is False
-        assert json.loads(item["rollback_kwargs"]) == {"user_name": "alice", "access_key_id": "AKIA1"}
+        assert json.loads(item["rollback_kwargs"]) == {
+            "user_name": "alice",
+            "access_key_id": "AKIA1",
+        }
 
     def test_writes_row_with_rollback_unsupported_when_capture_failed(self, monkeypatch):
         table = MagicMock()
         monkeypatch.setattr(responder, "_ir_actions_table", table)
-        result = OperationResult(operation="block_s3_public_access", target="account=123456789012", success=True, details={})
+        result = OperationResult(
+            operation="block_s3_public_access",
+            target="account=123456789012",
+            success=True,
+            details={},
+        )
         responder._write_ir_action_record(
             detection_event={"aws_account_id": "123456789012"},
             detection_id="d-1",
@@ -1356,7 +1617,9 @@ class TestProcessRecordDispatch:
     def test_wrapped_detection_event_unwraps(self, mock_dredge):
         mock_dredge.aws_ir.response.disable_user.return_value = ok_result()
         logger = MagicMock()
-        record = make_record({"detection_event": {"response_module": "disable_user", "user_name": "wrapped-bob"}})
+        record = make_record(
+            {"detection_event": {"response_module": "disable_user", "user_name": "wrapped-bob"}}
+        )
         responder._process_record(record, "req-1", "rh-1", logger)
         mock_dredge.aws_ir.response.disable_user.assert_called_once_with(user_name="wrapped-bob")
 
@@ -1368,9 +1631,13 @@ class TestProcessRecordDispatch:
         mock_dredge.aws_ir.response.disable_user.assert_called_once_with(user_name="flat-bob")
 
     def test_successful_action_logs_success(self, mock_dredge):
-        mock_dredge.aws_ir.response.disable_user.return_value = ok_result("disable_user", "user=bob")
+        mock_dredge.aws_ir.response.disable_user.return_value = ok_result(
+            "disable_user", "user=bob"
+        )
         logger = MagicMock()
-        record = make_record({"response_module": "disable_user", "user_name": "bob", "detection_id": "d-1"})
+        record = make_record(
+            {"response_module": "disable_user", "user_name": "bob", "detection_id": "d-1"}
+        )
         responder._process_record(record, "req-1", "rh-1", logger)
         logger.info.assert_called_once()
         assert logger.info.call_args.kwargs["event_name"] == "IR_ACTION_SUCCESS"
@@ -1380,7 +1647,9 @@ class TestProcessRecordDispatch:
             operation="disable_user", target="user=bob", success=False, errors=["boom"]
         )
         logger = MagicMock()
-        record = make_record({"response_module": "disable_user", "user_name": "bob", "detection_id": "d-1"})
+        record = make_record(
+            {"response_module": "disable_user", "user_name": "bob", "detection_id": "d-1"}
+        )
         responder._process_record(record, "req-1", "rh-1", logger)
         logger.error.assert_called_once()
         assert logger.error.call_args.kwargs["event_name"] == "IR_ACTION_FAILED"
@@ -1388,7 +1657,9 @@ class TestProcessRecordDispatch:
     def test_dredge_call_raising_is_caught_and_logged(self, mock_dredge):
         mock_dredge.aws_ir.response.disable_user.side_effect = RuntimeError("AccessDenied")
         logger = MagicMock()
-        record = make_record({"response_module": "disable_user", "user_name": "bob", "detection_id": "d-1"})
+        record = make_record(
+            {"response_module": "disable_user", "user_name": "bob", "detection_id": "d-1"}
+        )
         responder._process_record(record, "req-1", "rh-1", logger)
         logger.error.assert_called_once()
         assert logger.error.call_args.kwargs["event_name"] == "IR_ACTION_EXCEPTION"
@@ -1409,15 +1680,21 @@ class TestProcessRecordDispatch:
         assert item["undo_module"] == "revoke_deny_all_session_policy"
         assert item["rollback_supported"] is True
 
-    def test_non_rollback_eligible_success_does_not_write_ir_action_record(self, mock_dredge, monkeypatch):
+    def test_non_rollback_eligible_success_does_not_write_ir_action_record(
+        self, mock_dredge, monkeypatch
+    ):
         table = MagicMock()
         monkeypatch.setattr(responder, "_ir_actions_table", table)
         mock_dredge.aws_ir.response.delete_user.return_value = ok_result("delete_user", "user=bob")
-        record = make_record({"response_module": "delete_user", "user_name": "bob", "detection_id": "d-1"})
+        record = make_record(
+            {"response_module": "delete_user", "user_name": "bob", "detection_id": "d-1"}
+        )
         responder._process_record(record, "req-1", "rh-1", MagicMock())
         table.put_item.assert_not_called()
 
-    def test_failed_rollback_eligible_action_does_not_write_ir_action_record(self, mock_dredge, monkeypatch):
+    def test_failed_rollback_eligible_action_does_not_write_ir_action_record(
+        self, mock_dredge, monkeypatch
+    ):
         table = MagicMock()
         monkeypatch.setattr(responder, "_ir_actions_table", table)
         mock_dredge.aws_ir.response.revoke_active_sessions.return_value = OperationResult(
@@ -1429,7 +1706,9 @@ class TestProcessRecordDispatch:
         responder._process_record(record, "req-1", "rh-1", MagicMock())
         table.put_item.assert_not_called()
 
-    def test_dry_run_rollback_eligible_success_still_writes_ir_action_record(self, mock_dredge, monkeypatch):
+    def test_dry_run_rollback_eligible_success_still_writes_ir_action_record(
+        self, mock_dredge, monkeypatch
+    ):
         # Dry-run stays simulated end-to-end, including the ability to
         # click through IR Actions / Roll back in the UI -- not just
         # skipped silently. rollback_supported still comes out correctly
@@ -1440,7 +1719,10 @@ class TestProcessRecordDispatch:
         table = MagicMock()
         monkeypatch.setattr(responder, "_ir_actions_table", table)
         mock_dredge.aws_ir.response.revoke_active_sessions.return_value = OperationResult(
-            operation="revoke_active_sessions", target="user=bob", success=True, details={"dry_run": True}
+            operation="revoke_active_sessions",
+            target="user=bob",
+            success=True,
+            details={"dry_run": True},
         )
         record = make_record(
             {"response_module": "revoke_active_sessions", "user_name": "bob", "detection_id": "d-1"}

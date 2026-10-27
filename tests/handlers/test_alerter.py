@@ -9,6 +9,7 @@ CorrelationEngine itself is unit-tested separately (tests/domain/); here it is
 stubbed so these tests stay focused on whether alerter.py wires it, the
 rules cache, and AwsHandler correctly.
 """
+
 from __future__ import annotations
 
 import os
@@ -111,7 +112,9 @@ def with_correlation_rules(monkeypatch):
     monkeypatch.setattr(
         alerter,
         "load_detection_rules",
-        MagicMock(return_value=[{"rule_id": "020_correlation_console_login_bruteforce", "enabled": True}]),
+        MagicMock(
+            return_value=[{"rule_id": "020_correlation_console_login_bruteforce", "enabled": True}]
+        ),
     )
 
 
@@ -121,14 +124,18 @@ def with_correlation_rules(monkeypatch):
 
 
 class TestRecordFiltering:
-    def test_non_insert_modify_event_is_skipped(self, fake_aws, fake_engine, with_correlation_rules):
+    def test_non_insert_modify_event_is_skipped(
+        self, fake_aws, fake_engine, with_correlation_rules
+    ):
         record = make_stream_record(make_signal(), event_name="REMOVE")
         result = alerter.lambda_handler(make_event([record]), make_context())
 
         fake_engine.correlate.assert_not_called()
         assert result == {"status": "ok", "alerts_created": 0, "alerts_stored": 0, "outboxed": 0}
 
-    def test_record_missing_new_image_is_skipped(self, fake_aws, fake_engine, with_correlation_rules):
+    def test_record_missing_new_image_is_skipped(
+        self, fake_aws, fake_engine, with_correlation_rules
+    ):
         record = {"eventName": "INSERT", "dynamodb": {}}
         result = alerter.lambda_handler(make_event([record]), make_context())
 
@@ -278,8 +285,10 @@ class TestAlertStorageAndOutbox:
 
         assert result == {"status": "ok", "alerts_created": 2, "alerts_stored": 2, "outboxed": 2}
         assert fake_aws.put_alert_with_outbox.call_count == 2
-        assert [c.kwargs["alert_item"]["alert_key"] for c in
-                fake_aws.put_alert_with_outbox.call_args_list] == ["k1", "k2"]
+        assert [
+            c.kwargs["alert_item"]["alert_key"]
+            for c in fake_aws.put_alert_with_outbox.call_args_list
+        ] == ["k1", "k2"]
 
 
 # ---------------------------------------------------------------------------
@@ -293,7 +302,9 @@ class TestBatchHandling:
     ):
         skip_event_name = make_stream_record(make_signal(event_id="skip-1"), event_name="REMOVE")
         skip_missing_image = {"eventName": "INSERT", "dynamodb": {}}
-        skip_correlation = make_stream_record(make_signal(event_id="skip-2", item_type="correlation"))
+        skip_correlation = make_stream_record(
+            make_signal(event_id="skip-2", item_type="correlation")
+        )
         valid_one = make_stream_record(make_signal(event_id="valid-1"))
         valid_two = make_stream_record(make_signal(event_id="valid-2"))
 
@@ -303,7 +314,9 @@ class TestBatchHandling:
         ]
 
         result = alerter.lambda_handler(
-            make_event([skip_event_name, skip_missing_image, skip_correlation, valid_one, valid_two]),
+            make_event(
+                [skip_event_name, skip_missing_image, skip_correlation, valid_one, valid_two]
+            ),
             make_context(),
         )
 
@@ -316,7 +329,9 @@ class TestBatchHandling:
         result = alerter.lambda_handler(make_event([]), make_context())
         assert result == {"status": "ok", "alerts_created": 0, "alerts_stored": 0, "outboxed": 0}
 
-    def test_missing_records_key_defaults_to_empty(self, fake_aws, fake_engine, with_correlation_rules):
+    def test_missing_records_key_defaults_to_empty(
+        self, fake_aws, fake_engine, with_correlation_rules
+    ):
         result = alerter.lambda_handler({}, make_context())
         assert result == {"status": "ok", "alerts_created": 0, "alerts_stored": 0, "outboxed": 0}
 
@@ -480,7 +495,10 @@ class TestDynamoSignalsRepositoryGsiPath:
         mock_table.query.side_effect = [
             {
                 "Items": [{"detection_id": "page1", "actor_user_name": "alice"}],
-                "LastEvaluatedKey": {"actor_user_name": "alice", "timestamp": "2026-01-01T00:10:00+00:00"},
+                "LastEvaluatedKey": {
+                    "actor_user_name": "alice",
+                    "timestamp": "2026-01-01T00:10:00+00:00",
+                },
             },
             {"Items": [{"detection_id": "page2", "actor_user_name": "alice"}]},
         ]
@@ -524,7 +542,9 @@ class TestDynamoSignalsRepositoryGsiPath:
         aws = MagicMock()
         aws._ddb_resource.Table.return_value.query.return_value = {"Items": []}
         logger = MagicMock()
-        repo = alerter.DynamoSignalsRepository(aws=aws, logger=logger, table_name="test-signals-table")
+        repo = alerter.DynamoSignalsRepository(
+            aws=aws, logger=logger, table_name="test-signals-table"
+        )
 
         repo.query_signals(
             since=alerter.datetime(2020, 1, 1, tzinfo=alerter.UTC),
@@ -569,7 +589,9 @@ class TestDynamoSignalsRepositoryScanFallback:
         aws = MagicMock()
         aws._ddb.scan.return_value = {
             "Items": [
-                make_ddb_item(detection_id="corr", item_type="correlation", network={"source_ip": "1.1.1.1"}),
+                make_ddb_item(
+                    detection_id="corr", item_type="correlation", network={"source_ip": "1.1.1.1"}
+                ),
                 make_ddb_item(detection_id="real", network={"source_ip": "1.1.1.1"}),
             ]
         }
@@ -588,10 +610,14 @@ class TestDynamoSignalsRepositoryScanFallback:
         aws._ddb.scan.return_value = {
             "Items": [
                 make_ddb_item(
-                    detection_id="old", timestamp="2020-01-01T00:00:00+00:00", network={"source_ip": "1.1.1.1"}
+                    detection_id="old",
+                    timestamp="2020-01-01T00:00:00+00:00",
+                    network={"source_ip": "1.1.1.1"},
                 ),
                 make_ddb_item(
-                    detection_id="new", timestamp="2030-01-01T00:00:00+00:00", network={"source_ip": "1.1.1.1"}
+                    detection_id="new",
+                    timestamp="2030-01-01T00:00:00+00:00",
+                    network={"source_ip": "1.1.1.1"},
                 ),
             ]
         }
@@ -645,7 +671,8 @@ class TestDynamoSignalsRepositoryScanFallback:
         aws = MagicMock()
         aws._ddb.scan.return_value = {
             "Items": [
-                make_ddb_item(detection_id=f"item-{i}", network={"source_ip": "1.1.1.1"}) for i in range(5)
+                make_ddb_item(detection_id=f"item-{i}", network={"source_ip": "1.1.1.1"})
+                for i in range(5)
             ]
         }
         repo, _ = self._repo(aws=aws)
@@ -665,7 +692,9 @@ class TestDynamoSignalsRepositoryScanFallback:
         aws = MagicMock()
         aws._ddb.scan.return_value = {"Items": []}
         logger = MagicMock()
-        repo = alerter.DynamoSignalsRepository(aws=aws, logger=logger, table_name="test-signals-table")
+        repo = alerter.DynamoSignalsRepository(
+            aws=aws, logger=logger, table_name="test-signals-table"
+        )
 
         repo.query_signals(
             since=alerter.datetime(2020, 1, 1, tzinfo=alerter.UTC),
@@ -680,7 +709,9 @@ class TestDynamoSignalsRepositoryScanFallback:
         aws = MagicMock()
         aws._ddb.scan.return_value = {"Items": []}
         logger = MagicMock()
-        repo = alerter.DynamoSignalsRepository(aws=aws, logger=logger, table_name="test-signals-table")
+        repo = alerter.DynamoSignalsRepository(
+            aws=aws, logger=logger, table_name="test-signals-table"
+        )
 
         repo.query_signals(
             since=alerter.datetime(2020, 1, 1, tzinfo=alerter.UTC),

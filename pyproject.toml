@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ocdr"
-version = "1.2.1"
+version = "1.2.2"
 description = "OpenCDR Core — account-local Cloud Detection & Response for AWS"
 readme = "README.md"
 license = "MPL-2.0"

@@ -5,6 +5,7 @@ DynamoDB's native TTL can expire it (default 90 days, DYNAMODB_TTL_DAYS).
 Signals/alerts are archived to S3 first (src/handlers/archiver.py) before
 they'd ever actually expire -- see docs/data-archival.md.
 """
+
 from __future__ import annotations
 
 import os
@@ -79,7 +80,11 @@ class TestPutSignalIfNotExistsSetsSeverityBucket:
 
         aws.put_signal_if_not_exists(
             table_name="signals-table-v2",
-            signal_item={"detection_id": "d-1", "severity": "HIGH", "timestamp": "2026-08-12T14:00:00Z"},
+            signal_item={
+                "detection_id": "d-1",
+                "severity": "HIGH",
+                "timestamp": "2026-08-12T14:00:00Z",
+            },
         )
 
         written_item = table.put_item.call_args.kwargs["Item"]

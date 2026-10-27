@@ -23,6 +23,8 @@ Rollback uses the same release endpoint with an earlier complete manifest. It is
 - `status`, always `ok` for a successful response;
 - `product`, always `OpenCDR Core`;
 - `core_version` and `management_contract_version`;
+- `security_profile`, either `standard` or `hardened`, describing only the
+  protection applied to resources owned by the OpenCDR stack;
 - `deployment.stage`, `deployment.account_id`, and `deployment.home_region`;
 - `capabilities`, used for feature negotiation;
 - `time` and `request_id` for freshness and tracing.

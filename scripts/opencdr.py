@@ -8,6 +8,8 @@ Usage:
 
   opencdr.py status
 
+  opencdr.py request <GET|POST|PUT|DELETE> </path> [--query key=value] [--file <json>|--data <json>]
+
   opencdr.py rules load    [--dry-run]
   opencdr.py rules list    [--kind signal|correlation|list] [--page-size N]
   opencdr.py rules get     <rule_id> --kind signal|correlation
@@ -83,12 +85,28 @@ def _c(text: str, code: str) -> str:
     return text if _NO_COLOR else f"{code}{text}{_RESET}"
 
 
-def ok(t: str) -> str:    return _c(t, _GREEN)
-def err(t: str) -> str:   return _c(t, _RED)
-def warn(t: str) -> str:  return _c(t, _YELLOW)
-def info(t: str) -> str:  return _c(t, _CYAN)
-def bold(t: str) -> str:  return _c(t, _BOLD)
-def dim(t: str) -> str:   return _c(t, _DIM)
+def ok(t: str) -> str:
+    return _c(t, _GREEN)
+
+
+def err(t: str) -> str:
+    return _c(t, _RED)
+
+
+def warn(t: str) -> str:
+    return _c(t, _YELLOW)
+
+
+def info(t: str) -> str:
+    return _c(t, _CYAN)
+
+
+def bold(t: str) -> str:
+    return _c(t, _BOLD)
+
+
+def dim(t: str) -> str:
+    return _c(t, _DIM)
 
 
 def color_sev(sev: str) -> str:
@@ -103,6 +121,7 @@ def _banner(title: str) -> None:
 # ---------------------------------------------------------------------------
 # Config helpers
 # ---------------------------------------------------------------------------
+
 
 def _load_config() -> dict:
     if CONFIG_FILE.exists():
@@ -145,6 +164,7 @@ def _require_api(cfg: dict) -> tuple[str, str]:
 # HTTP client
 # ---------------------------------------------------------------------------
 
+
 def _request(method: str, path: str, url: str, key: str, **kwargs: Any) -> tuple[int, Any]:
     try:
         import requests as _r
@@ -180,6 +200,7 @@ def _die_on_error(status: int, body: Any, context: str = "") -> None:
 # config set / show
 # ---------------------------------------------------------------------------
 
+
 def cmd_config_set(args: argparse.Namespace) -> None:
     if not args.url and not args.key:
         print(err("  Provide at least --url or --key"))
@@ -211,6 +232,7 @@ def cmd_config_show(args: argparse.Namespace) -> None:
 # status
 # ---------------------------------------------------------------------------
 
+
 def cmd_status(args: argparse.Namespace) -> None:
     cfg = _load_config()
     url, key = _require_api(cfg)
@@ -230,6 +252,75 @@ def cmd_status(args: argparse.Namespace) -> None:
     )
     print(f"  Time       : {body.get('time', '')}")
     print(f"  Request ID : {body.get('request_id', '')}")
+
+
+def _parse_query_assignments(values: list[str]) -> list[tuple[str, str]]:
+    assignments = []
+    for value in values:
+        if "=" not in value:
+            print(err(f"  Invalid query parameter {value!r}; expected key=value"))
+            sys.exit(2)
+        key, item = value.split("=", 1)
+        if not key:
+            print(err("  Query parameter names cannot be empty"))
+            sys.exit(2)
+        assignments.append((key, item))
+    return assignments
+
+
+def _load_request_body(args: argparse.Namespace) -> Any | None:
+    source = args.data
+    if args.file:
+        try:
+            source = sys.stdin.read() if args.file == "-" else Path(args.file).read_text()
+        except OSError as exc:
+            print(err(f"  Cannot read request body: {exc}"))
+            sys.exit(2)
+    if source is None:
+        return None
+    try:
+        return json.loads(source)
+    except json.JSONDecodeError as exc:
+        print(err(f"  Request body is not valid JSON: {exc}"))
+        sys.exit(2)
+
+
+def cmd_request(args: argparse.Namespace) -> None:
+    """Call any current or future OpenCDR route without exposing credentials."""
+    from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+
+    parsed = urlsplit(args.path)
+    if (
+        parsed.scheme
+        or parsed.netloc
+        or not parsed.path.startswith("/")
+        or parsed.path.startswith("//")
+    ):
+        print(
+            err("  API path must be relative to the configured deployment and start with one '/'")
+        )
+        sys.exit(2)
+    if parsed.fragment:
+        print(err("  API paths cannot contain a fragment"))
+        sys.exit(2)
+    query = [
+        *parse_qsl(parsed.query, keep_blank_values=True),
+        *_parse_query_assignments(args.query),
+    ]
+    path = urlunsplit(("", "", parsed.path, urlencode(query), ""))
+    body = _load_request_body(args)
+    if body is not None and args.method in {"GET", "DELETE"}:
+        print(err(f"  {args.method} requests cannot include a JSON body"))
+        sys.exit(2)
+
+    url, key = _require_api(_load_config())
+    kwargs = {"json": body} if body is not None else {}
+    status, response = _request(args.method, path, url, key, **kwargs)
+    _die_on_error(status, response, f"{args.method} {parsed.path}")
+    if isinstance(response, (dict, list)):
+        print(json.dumps(response, indent=2, default=str))
+    elif response is not None:
+        print(response)
 
 
 # ---------------------------------------------------------------------------
@@ -348,9 +439,7 @@ def cmd_rules_list(args: argparse.Namespace) -> None:
 def cmd_rules_get(args: argparse.Namespace) -> None:
     cfg = _load_config()
     url, key = _require_api(cfg)
-    status, body = _request(
-        "GET", f"/rules/{args.rule_id}?rule_kind={args.kind}", url, key
-    )
+    status, body = _request("GET", f"/rules/{args.rule_id}?rule_kind={args.kind}", url, key)
     if status == 404:
         print(warn(f"  Rule not found: {args.rule_id}"))
         sys.exit(1)
@@ -361,9 +450,7 @@ def cmd_rules_get(args: argparse.Namespace) -> None:
 def cmd_rules_delete(args: argparse.Namespace) -> None:
     cfg = _load_config()
     url, key = _require_api(cfg)
-    status, body = _request(
-        "DELETE", f"/rules/{args.rule_id}?rule_kind={args.kind}", url, key
-    )
+    status, body = _request("DELETE", f"/rules/{args.rule_id}?rule_kind={args.kind}", url, key)
     if status == 404:
         print(warn(f"  Rule not found: {args.rule_id}"))
         sys.exit(1)
@@ -374,6 +461,7 @@ def cmd_rules_delete(args: argparse.Namespace) -> None:
 # ---------------------------------------------------------------------------
 # settings get / set / delete
 # ---------------------------------------------------------------------------
+
 
 def cmd_settings_get(args: argparse.Namespace) -> None:
     cfg = _load_config()
@@ -426,7 +514,11 @@ def _build_channels_from_args(args: argparse.Namespace) -> dict:
     jira_fields = [args.jira_url, args.jira_project, args.jira_email, args.jira_token]
     if any(jira_fields):
         if not all(jira_fields):
-            print(err("  Jira requires all four flags: --jira-url, --jira-project, --jira-email, --jira-token"))
+            print(
+                err(
+                    "  Jira requires all four flags: --jira-url, --jira-project, --jira-email, --jira-token"
+                )
+            )
             sys.exit(1)
         channels["jira"] = {
             "enabled": True,
@@ -492,8 +584,12 @@ def _build_guardduty_notify_from_args(args: argparse.Namespace) -> dict:
     """
     gd: dict = {}
     if args.guardduty_notify_default is not None:
-        gd["default"] = _parse_bool_flag(args.guardduty_notify_default, "--guardduty-notify-default")
-    by_severity = _parse_key_bool_pairs(args.guardduty_notify_severity, "--guardduty-notify-severity")
+        gd["default"] = _parse_bool_flag(
+            args.guardduty_notify_default, "--guardduty-notify-default"
+        )
+    by_severity = _parse_key_bool_pairs(
+        args.guardduty_notify_severity, "--guardduty-notify-severity"
+    )
     if by_severity:
         gd["by_severity"] = by_severity
     by_service = _parse_key_bool_pairs(args.guardduty_notify_service, "--guardduty-notify-service")
@@ -557,12 +653,14 @@ def cmd_settings_set(args: argparse.Namespace) -> None:
     new_channels = _build_channels_from_args(args)
     new_guardduty_notify = _build_guardduty_notify_from_args(args)
     if not new_channels and not new_guardduty_notify:
-        print(err(
-            "  Provide --file, --slack-webhook, --discord-webhook, --email-topic-arn, --enable-securityhub, "
-            "--jira-url/--jira-project/--jira-email/--jira-token, --webhook-url, or one of "
-            "--guardduty-notify-default/--guardduty-notify-severity/--guardduty-notify-service/"
-            "--guardduty-notify-severity-service"
-        ))
+        print(
+            err(
+                "  Provide --file, --slack-webhook, --discord-webhook, --email-topic-arn, --enable-securityhub, "
+                "--jira-url/--jira-project/--jira-email/--jira-token, --webhook-url, or one of "
+                "--guardduty-notify-default/--guardduty-notify-severity/--guardduty-notify-service/"
+                "--guardduty-notify-severity-service"
+            )
+        )
         sys.exit(1)
 
     base_payload, existing_channels = _fetch_existing_settings(url, key, args.setting_id)
@@ -594,6 +692,7 @@ def cmd_settings_delete(args: argparse.Namespace) -> None:
 # signals list
 # ---------------------------------------------------------------------------
 
+
 def cmd_signals_list(args: argparse.Namespace) -> None:
     cfg = _load_config()
     url, key = _require_api(cfg)
@@ -601,7 +700,9 @@ def cmd_signals_list(args: argparse.Namespace) -> None:
     integration_id = getattr(args, "integration_id", None)
     provided = [x for x in (args.severity, args.event_id, args.category, integration_id) if x]
     if len(provided) != 1:
-        print(err("  Provide exactly one of --severity, --event-id, --category, or --integration-id"))
+        print(
+            err("  Provide exactly one of --severity, --event-id, --category, or --integration-id")
+        )
         sys.exit(1)
 
     qs: dict[str, Any] = {"page_size": args.page_size, "order": args.order}
@@ -629,11 +730,7 @@ def cmd_signals_list(args: argparse.Namespace) -> None:
     print("  " + "─" * 82)
     for s in items:
         sev = s.get("severity") or ""
-        print(
-            f"  {s.get('timestamp', ''):<30} "
-            f"{s.get('rule_id', ''):<42} "
-            f"{color_sev(sev)}"
-        )
+        print(f"  {s.get('timestamp', ''):<30} {s.get('rule_id', ''):<42} {color_sev(sev)}")
 
     if body.get("has_next"):
         print(f"\n  {dim('More pages — use --next-token ' + str(body.get('next_token')))}")
@@ -643,6 +740,7 @@ def cmd_signals_list(args: argparse.Namespace) -> None:
 # ---------------------------------------------------------------------------
 # logs list
 # ---------------------------------------------------------------------------
+
 
 def cmd_logs_list(args: argparse.Namespace) -> None:
     cfg = _load_config()
@@ -676,11 +774,7 @@ def cmd_logs_list(args: argparse.Namespace) -> None:
     print("  " + "─" * 76)
     for lg in items:
         level = (lg.get("details") or {}).get("level") or ""
-        print(
-            f"  {lg.get('timestamp', ''):<30} "
-            f"{lg.get('event_name', ''):<36} "
-            f"{level}"
-        )
+        print(f"  {lg.get('timestamp', ''):<30} {lg.get('event_name', ''):<36} {level}")
 
     if body.get("has_next"):
         print(f"\n  {dim('More pages — use --next-token ' + str(body.get('next_token')))}")
@@ -690,6 +784,7 @@ def cmd_logs_list(args: argparse.Namespace) -> None:
 # ---------------------------------------------------------------------------
 # lists create / list / show / add / remove / delete
 # ---------------------------------------------------------------------------
+
 
 def _get_list(url: str, key: str, list_id: str) -> dict:
     status, body = _request("GET", f"/rules/{list_id}?rule_kind=list", url, key)
@@ -733,11 +828,7 @@ def cmd_lists_list(args: argparse.Namespace) -> None:
     for item in items:
         values = item.get("values") or []
         desc = item.get("description") or ""
-        print(
-            f"  {item.get('rule_id', ''):<45} "
-            f"{str(len(values)):>6}  "
-            f"{dim(desc)}"
-        )
+        print(f"  {item.get('rule_id', ''):<45} {str(len(values)):>6}  {dim(desc)}")
     print()
 
 
@@ -771,7 +862,10 @@ def cmd_lists_add(args: argparse.Namespace) -> None:
     item["values"] = values
     status, body = _request("PUT", f"/rules/{args.list_id}?rule_kind=list", url, key, json=item)
     _die_on_error(status, body)
-    print(ok(f"  updated  {args.list_id}") + f"  ({len(values)} value{'s' if len(values) != 1 else ''})")
+    print(
+        ok(f"  updated  {args.list_id}")
+        + f"  ({len(values)} value{'s' if len(values) != 1 else ''})"
+    )
 
 
 def cmd_lists_remove(args: argparse.Namespace) -> None:
@@ -788,7 +882,10 @@ def cmd_lists_remove(args: argparse.Namespace) -> None:
     item["values"] = values
     status, body = _request("PUT", f"/rules/{args.list_id}?rule_kind=list", url, key, json=item)
     _die_on_error(status, body)
-    print(ok(f"  updated  {args.list_id}") + f"  ({len(values)} value{'s' if len(values) != 1 else ''})")
+    print(
+        ok(f"  updated  {args.list_id}")
+        + f"  ({len(values)} value{'s' if len(values) != 1 else ''})"
+    )
 
 
 def cmd_lists_delete(args: argparse.Namespace) -> None:
@@ -805,6 +902,7 @@ def cmd_lists_delete(args: argparse.Namespace) -> None:
 # ---------------------------------------------------------------------------
 # ir-actions list / get / rollback
 # ---------------------------------------------------------------------------
+
 
 def cmd_ir_actions_list(args: argparse.Namespace) -> None:
     cfg = _load_config()
@@ -888,6 +986,7 @@ def cmd_ir_actions_rollback(args: argparse.Namespace) -> None:
 # ---------------------------------------------------------------------------
 # test local
 # ---------------------------------------------------------------------------
+
 
 def cmd_test_local(args: argparse.Namespace) -> None:
     sys.path.insert(0, str(ROOT))
@@ -980,6 +1079,7 @@ def cmd_test_local(args: argparse.Namespace) -> None:
 # ---------------------------------------------------------------------------
 # test deployed
 # ---------------------------------------------------------------------------
+
 
 def cmd_test_deployed(args: argparse.Namespace) -> None:
     try:
@@ -1125,6 +1225,7 @@ def cmd_test_deployed(args: argparse.Namespace) -> None:
 # Interactive setup wizard
 # ---------------------------------------------------------------------------
 
+
 def _prompt(message: str, default: str = "", secret: bool = False) -> str:
     """Prompt the user for input, returning default on empty enter."""
     import getpass
@@ -1161,14 +1262,14 @@ def _step(n: int, title: str) -> None:
 
 def cmd_setup(args: argparse.Namespace) -> None:  # noqa: C901
     print(f"""
-{bold('╔══════════════════════════════════════════════════╗')}
-{bold('║')}        {bold('OpenCDR')} — Interactive Setup Wizard        {bold('║')}
-{bold('╚══════════════════════════════════════════════════╝')}
+{bold("╔══════════════════════════════════════════════════╗")}
+{bold("║")}        {bold("OpenCDR")} — Interactive Setup Wizard        {bold("║")}
+{bold("╚══════════════════════════════════════════════════╝")}
 
   This wizard will help you connect to your deployed
   OpenCDR API and get everything configured.
 
-  Press {dim('Ctrl+C')} at any time to quit.
+  Press {dim("Ctrl+C")} at any time to quit.
 """)
 
     try:
@@ -1226,10 +1327,7 @@ def _run_setup_wizard() -> None:  # noqa: C901
     # ── Step 3: Load rules ────────────────────────────────────────────────
     _step(3, "Detection Rules")
 
-    rule_files = [
-        p for p in sorted(RULES_DIR.rglob("*.json"))
-        if p.name not in _SKIP_RULE_FILES
-    ]
+    rule_files = [p for p in sorted(RULES_DIR.rglob("*.json")) if p.name not in _SKIP_RULE_FILES]
     print(f"  Found {len(rule_files)} rule file(s) in {dim(str(RULES_DIR.relative_to(ROOT)))}")
     print()
 
@@ -1304,18 +1402,26 @@ def _run_setup_wizard() -> None:  # noqa: C901
     if _confirm("\n  Configure email notifications via SNS?", default=False):
         print()
         print(f"  {dim('The SNS topic was created by the stack as: opencdr-<stage>-alerts')}")
-        print(f"  {dim('Look it up with:')}  aws sns list-topics --query \"Topics[?contains(TopicArn, `opencdr`) && contains(TopicArn, `alerts`)]\" --output text")
+        print(
+            f'  {dim("Look it up with:")}  aws sns list-topics --query "Topics[?contains(TopicArn, `opencdr`) && contains(TopicArn, `alerts`)]" --output text'
+        )
         print(f"  {warn('Remember to subscribe to the topic to receive emails!')}")
         topic_arn = _prompt("SNS topic ARN")
         if topic_arn:
             if not topic_arn.startswith("arn:aws:sns:"):
-                print(warn("  Warning: value does not look like an SNS topic ARN (expected arn:aws:sns:...)"))
+                print(
+                    warn(
+                        "  Warning: value does not look like an SNS topic ARN (expected arn:aws:sns:...)"
+                    )
+                )
             channels["email"] = {"enabled": True, "topic_arn": topic_arn}
             print(ok("  Email notifications configured."))
 
     if _confirm("\n  Create Jira tickets for alerts?", default=False):
         print()
-        print(f"  {dim('You need a Jira API token — generate one at: id.atlassian.com/manage-profile/security/api-tokens')}")
+        print(
+            f"  {dim('You need a Jira API token — generate one at: id.atlassian.com/manage-profile/security/api-tokens')}"
+        )
         jira_url = _prompt("Jira base URL (e.g. https://yourco.atlassian.net)")
         jira_project = _prompt("Jira project key (e.g. SEC)")
         jira_email = _prompt("Jira user email")
@@ -1343,8 +1449,12 @@ def _run_setup_wizard() -> None:  # noqa: C901
 
     if _confirm("\n  Configure a custom webhook?", default=False):
         print()
-        print(f"  {dim('POST the raw alert JSON to any HTTPS endpoint — PagerDuty, OpsGenie, Teams, etc.')}")
-        print(f"  {dim('For custom payload shapes, point this at a Lambda or proxy that transforms it.')}")
+        print(
+            f"  {dim('POST the raw alert JSON to any HTTPS endpoint — PagerDuty, OpsGenie, Teams, etc.')}"
+        )
+        print(
+            f"  {dim('For custom payload shapes, point this at a Lambda or proxy that transforms it.')}"
+        )
         webhook_url = _prompt("Webhook URL")
         if webhook_url:
             if not webhook_url.startswith("https://"):
@@ -1376,29 +1486,31 @@ def _run_setup_wizard() -> None:  # noqa: C901
             msg = b.get("message", b) if isinstance(b, dict) else b
             print(warn(f"\n  Could not save notification settings: {msg}"))
     else:
-        print(f"  {dim('Skipped. Configure later with:')}  opencdr.py settings set --slack-webhook <url> / --enable-securityhub")
+        print(
+            f"  {dim('Skipped. Configure later with:')}  opencdr.py settings set --slack-webhook <url> / --enable-securityhub"
+        )
 
     # ── Done ──────────────────────────────────────────────────────────────
     print(f"""
-{bold('╔══════════════════════════════════════════════════╗')}
-{bold('║')}                  {ok('Setup complete!')}                  {bold('║')}
-{bold('╚══════════════════════════════════════════════════╝')}
+{bold("╔══════════════════════════════════════════════════╗")}
+{bold("║")}                  {ok("Setup complete!")}                  {bold("║")}
+{bold("╚══════════════════════════════════════════════════╝")}
 
-  {bold('Quick reference:')}
+  {bold("Quick reference:")}
 
-    {dim('Check API health')}
+    {dim("Check API health")}
     opencdr.py status
 
-    {dim('List loaded rules')}
+    {dim("List loaded rules")}
     opencdr.py rules list --kind signal
 
-    {dim('View recent signals')}
+    {dim("View recent signals")}
     opencdr.py signals list --severity HIGH
 
-    {dim('Test rules locally')}
+    {dim("Test rules locally")}
     opencdr.py test local
 
-    {dim('Run integration test against deployed stack')}
+    {dim("Run integration test against deployed stack")}
     opencdr.py test deployed --stage dev
 """)
 
@@ -1421,14 +1533,15 @@ def _prompt_api_credentials(cfg: dict) -> tuple[str, str]:
     return url.rstrip("/"), key
 
 
-
 # ---------------------------------------------------------------------------
 # Argument parser
 # ---------------------------------------------------------------------------
 
+
 def cmd_integrations(args: argparse.Namespace) -> None:
     """Manage S3 integration bindings and executable parser previews."""
     from urllib.parse import quote
+
     url, key = _require_api(_load_config())
     path = "/integrations"
     if getattr(args, "integration_id", None):
@@ -1460,7 +1573,9 @@ def _build_parser() -> argparse.ArgumentParser:
     sub = p.add_subparsers(dest="command", metavar="<command>")
     sub.required = False  # no-arg invocation launches the wizard
 
-    integrations = sub.add_parser("integrations", help="S3/Falco integrations and executable parsers")
+    integrations = sub.add_parser(
+        "integrations", help="S3/Falco integrations and executable parsers"
+    )
     actions = integrations.add_subparsers(dest="integration_action", required=True)
     for action in ("catalog", "get", "put", "preview", "jobs"):
         command = actions.add_parser(action)
@@ -1492,6 +1607,21 @@ def _build_parser() -> argparse.ArgumentParser:
     # ── status ────────────────────────────────────────────────────────────
     st = sub.add_parser("status", help="Check API health")
     st.set_defaults(func=cmd_status)
+
+    raw = sub.add_parser("request", help="Call any REST API route")
+    raw.add_argument("method", type=str.upper, choices=["GET", "POST", "PUT", "DELETE"])
+    raw.add_argument("path", help="Relative API path, for example /rules/schema")
+    raw.add_argument(
+        "--query",
+        action="append",
+        default=[],
+        metavar="KEY=VALUE",
+        help="Query parameter; repeat for multiple values",
+    )
+    body = raw.add_mutually_exclusive_group()
+    body.add_argument("--file", help="JSON body file, or - for stdin")
+    body.add_argument("--data", help="Inline JSON body")
+    raw.set_defaults(func=cmd_request)
 
     # ── rules ─────────────────────────────────────────────────────────────
     rl_p = sub.add_parser("rules", help="Manage detection rules")
@@ -1532,20 +1662,83 @@ def _build_parser() -> argparse.ArgumentParser:
     sgs.add_argument("--file", metavar="<json_file>", help="JSON file with full payload")
     sgs.add_argument("--slack-webhook", dest="slack_webhook", metavar="<url>")
     sgs.add_argument("--discord-webhook", dest="discord_webhook", metavar="<url>")
-    sgs.add_argument("--email-topic-arn", dest="email_topic_arn", metavar="<arn>", help="SNS topic ARN for email notifications")
-    sgs.add_argument("--enable-securityhub", dest="enable_securityhub", action="store_true", default=False, help="Enable Security Hub findings")
-    sgs.add_argument("--jira-url", dest="jira_url", metavar="<url>", help="Jira base URL (e.g. https://yourco.atlassian.net)")
-    sgs.add_argument("--jira-project", dest="jira_project", metavar="<key>", help="Jira project key (e.g. SEC)")
-    sgs.add_argument("--jira-email", dest="jira_email", metavar="<email>", help="Jira user email for Basic Auth")
+    sgs.add_argument(
+        "--email-topic-arn",
+        dest="email_topic_arn",
+        metavar="<arn>",
+        help="SNS topic ARN for email notifications",
+    )
+    sgs.add_argument(
+        "--enable-securityhub",
+        dest="enable_securityhub",
+        action="store_true",
+        default=False,
+        help="Enable Security Hub findings",
+    )
+    sgs.add_argument(
+        "--jira-url",
+        dest="jira_url",
+        metavar="<url>",
+        help="Jira base URL (e.g. https://yourco.atlassian.net)",
+    )
+    sgs.add_argument(
+        "--jira-project", dest="jira_project", metavar="<key>", help="Jira project key (e.g. SEC)"
+    )
+    sgs.add_argument(
+        "--jira-email", dest="jira_email", metavar="<email>", help="Jira user email for Basic Auth"
+    )
     sgs.add_argument("--jira-token", dest="jira_token", metavar="<token>", help="Jira API token")
-    sgs.add_argument("--jira-issue-type", dest="jira_issue_type", metavar="<type>", default="", help="Jira issue type (default: Bug)")
-    sgs.add_argument("--webhook-url", dest="webhook_url", metavar="<url>", help="Custom webhook URL (HTTPS)")
-    sgs.add_argument("--webhook-name", dest="webhook_name", metavar="<name>", default="", help="Name for the webhook target (default: default)")
-    sgs.add_argument("--webhook-header", dest="webhook_headers", metavar="<key=value>", action="append", help="Extra request header (repeatable, e.g. Authorization=Bearer token)")
-    sgs.add_argument("--guardduty-notify-default", dest="guardduty_notify_default", metavar="<true|false>", help="Default GuardDuty notify eligibility when nothing more specific matches (default: false / off)")
-    sgs.add_argument("--guardduty-notify-severity", dest="guardduty_notify_severity", metavar="<SEVERITY=true|false>", action="append", help="Notify eligibility for a GuardDuty severity (repeatable, e.g. CRITICAL=true)")
-    sgs.add_argument("--guardduty-notify-service", dest="guardduty_notify_service", metavar="<SERVICE=true|false>", action="append", help="Notify eligibility for a GuardDuty gd_resource_type (repeatable, e.g. IAMUser=true)")
-    sgs.add_argument("--guardduty-notify-severity-service", dest="guardduty_notify_severity_service", metavar="<SEVERITY:SERVICE=true|false>", action="append", help="Notify eligibility for a specific severity+service combo (repeatable, e.g. HIGH:EC2=true) -- takes precedence over the other --guardduty-notify-* flags")
+    sgs.add_argument(
+        "--jira-issue-type",
+        dest="jira_issue_type",
+        metavar="<type>",
+        default="",
+        help="Jira issue type (default: Bug)",
+    )
+    sgs.add_argument(
+        "--webhook-url", dest="webhook_url", metavar="<url>", help="Custom webhook URL (HTTPS)"
+    )
+    sgs.add_argument(
+        "--webhook-name",
+        dest="webhook_name",
+        metavar="<name>",
+        default="",
+        help="Name for the webhook target (default: default)",
+    )
+    sgs.add_argument(
+        "--webhook-header",
+        dest="webhook_headers",
+        metavar="<key=value>",
+        action="append",
+        help="Extra request header (repeatable, e.g. Authorization=Bearer token)",
+    )
+    sgs.add_argument(
+        "--guardduty-notify-default",
+        dest="guardduty_notify_default",
+        metavar="<true|false>",
+        help="Default GuardDuty notify eligibility when nothing more specific matches (default: false / off)",
+    )
+    sgs.add_argument(
+        "--guardduty-notify-severity",
+        dest="guardduty_notify_severity",
+        metavar="<SEVERITY=true|false>",
+        action="append",
+        help="Notify eligibility for a GuardDuty severity (repeatable, e.g. CRITICAL=true)",
+    )
+    sgs.add_argument(
+        "--guardduty-notify-service",
+        dest="guardduty_notify_service",
+        metavar="<SERVICE=true|false>",
+        action="append",
+        help="Notify eligibility for a GuardDuty gd_resource_type (repeatable, e.g. IAMUser=true)",
+    )
+    sgs.add_argument(
+        "--guardduty-notify-severity-service",
+        dest="guardduty_notify_severity_service",
+        metavar="<SEVERITY:SERVICE=true|false>",
+        action="append",
+        help="Notify eligibility for a specific severity+service combo (repeatable, e.g. HIGH:EC2=true) -- takes precedence over the other --guardduty-notify-* flags",
+    )
     sgs.set_defaults(func=cmd_settings_set)
 
     sgd = sg_sub.add_parser("delete", help="Delete settings")
@@ -1559,7 +1752,10 @@ def _build_parser() -> argparse.ArgumentParser:
 
     sil = si_sub.add_parser("list", help="List signals")
     sil.add_argument("--integration-id")
-    sil.add_argument("--severity", choices=["CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO", "INFORMATIONAL", "UNKNOWN"])
+    sil.add_argument(
+        "--severity",
+        choices=["CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO", "INFORMATIONAL", "UNKNOWN"],
+    )
     sil.add_argument("--event-id", dest="event_id", metavar="<id>")
     sil.add_argument("--category", metavar="<cat>")
     sil.add_argument("--order", choices=["asc", "desc"], default="desc")
@@ -1641,7 +1837,9 @@ def _build_parser() -> argparse.ArgumentParser:
     tsl.add_argument("--rule", metavar="<filter>", help="Filter by rule_id substring")
     tsl.set_defaults(func=cmd_test_local)
 
-    tsd = ts_sub.add_parser("deployed", help="Invoke deployed Lambda and verify signals in DynamoDB")
+    tsd = ts_sub.add_parser(
+        "deployed", help="Invoke deployed Lambda and verify signals in DynamoDB"
+    )
     tsd.add_argument("--stage", default="dev", metavar="<stage>")
     tsd.add_argument("--region", default="us-east-1", metavar="<region>")
     tsd.add_argument("--event", metavar="<filter>", help="Filter by event filename substring")

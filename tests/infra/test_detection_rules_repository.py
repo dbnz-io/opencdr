@@ -4,6 +4,7 @@ Previously exercised only incidentally, via handler tests that patch this
 module out entirely -- this is the module that actually queries DynamoDB
 for signal/correlation/list rules, and had no dedicated suite (24% coverage).
 """
+
 from __future__ import annotations
 
 import os

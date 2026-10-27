@@ -37,7 +37,7 @@ flowchart LR
     class EB,NOT,ACT bound;
 ```
 
-> **This is the 30-second view** — `signalWriter`, `responder`, `rollbackHandler`, and the archival/alarm paths are collapsed out. See the [full event-flow diagram](docs/architecture.md#data-flow) for all 10 Lambdas, every data store, and how they connect.
+> **This is the 30-second view** — `signalWriter`, `responder`, `rollbackHandler`, and the archival/alarm paths are collapsed out. See the [full event-flow diagram](docs/architecture.md#data-flow) for all 11 Lambdas, every data store, and how they connect.
 
 A REST API lets you query signals, logs, and rules, and manage configuration at runtime.
 
@@ -88,6 +88,11 @@ npm install
 serverless deploy --stage dev
 ```
 
+If this computer manages more than one OpenCDR installation, use the named
+[`opencdr-deploy`](https://github.com/dbnz-io/opencdr-deploy) package to isolate
+the checkout, stage, region, AWS profile, and feature configuration for each
+deployment.
+
 Rule content lives in its own repo, [dbnz-io/opencdr-detection-rules](https://github.com/dbnz-io/opencdr-detection-rules) (MIT-licensed), pulled in here as a git submodule at `support_files/detection_rules`. If you cloned this repo without `--recurse-submodules`, run `git submodule update --init` first — otherwise step 3 below silently loads zero rules.
 
 ```bash
@@ -95,7 +100,7 @@ Rule content lives in its own repo, [dbnz-io/opencdr-detection-rules](https://gi
 ./scripts/load_rules.sh --stage dev
 ```
 
-> **⚠️ Automated response can take real, destructive action.** Rules load with every `response_module` stripped by default, regardless of `DREDGE_DRY_RUN` — a majority of the bundled rules ship with a `response_module` set. `DREDGE_DRY_RUN` itself now defaults to **live** in CI. Pass `--with-response-modules` only once you've reviewed [Response modules](docs/incident-response.md#response-modules) and actually want them armed.
+> **⚠️ Automated response can take real, destructive action.** Rules load with every `response_module` stripped by default, and CI deploys with `DREDGE_DRY_RUN=true` unless a manual run explicitly selects live execution. Pass `--with-response-modules` and disable dry-run only once you've reviewed [Response modules](docs/incident-response.md#response-modules) and actually want them armed.
 
 ```bash
 # 4. Configure a notification channel (interactive wizard — also re-runs step 3)
@@ -104,6 +109,14 @@ python3 scripts/opencdr.py setup
 # 5. Verify end to end
 ./scripts/test_deployed.sh --stage dev
 ```
+
+Pushes to `main` also deploy the development stage automatically with
+short-lived GitHub OIDC credentials and re-enable CloudFormation termination
+protection. The one-time account setup is documented in
+[`ci-bootstrap/`](ci-bootstrap/README.md); see
+[`docs/stack-protection.md`](docs/stack-protection.md) for deployment and drift
+controls. Production promotion is intentionally owned by the separate production
+pipeline.
 
 Your API URL and key are printed by `serverless deploy`. That's a working deployment — detecting, correlating, and notifying.
 

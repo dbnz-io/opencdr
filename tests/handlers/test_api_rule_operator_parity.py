@@ -5,6 +5,7 @@ rejected here; not_prefix/not_suffix accepted here but not implemented,
 silently never matching with no error either side). rule_kind="list" was
 also storage-layer-only, unreachable through the API at all.
 """
+
 from __future__ import annotations
 
 import os

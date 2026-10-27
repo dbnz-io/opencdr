@@ -1,4 +1,5 @@
 """Tests for the custom webhook notification channel in notifier handler."""
+
 from __future__ import annotations
 
 import json
@@ -15,7 +16,6 @@ from src.handlers.notifier import (
     _route_channels,
     lambda_handler,
 )
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -49,8 +49,14 @@ def make_settings_webhook(targets=None, enabled=True) -> dict:
             "email": {"enabled": False, "topic_arn": ""},
             "webhook": {
                 "enabled": enabled,
-                "targets": targets if targets is not None else [
-                    {"name": "pagerduty", "url": "https://events.pagerduty.com/v2/enqueue", "headers": {}},
+                "targets": targets
+                if targets is not None
+                else [
+                    {
+                        "name": "pagerduty",
+                        "url": "https://events.pagerduty.com/v2/enqueue",
+                        "headers": {},
+                    },
                 ],
             },
         },
@@ -166,7 +172,10 @@ class TestRouteChannelsWebhook:
     def test_webhook_honoured_in_list_routing(self):
         settings = make_settings_webhook()
         settings["routing"] = {"HIGH": ["slack", "webhook"]}
-        settings["channels"]["slack"] = {"enabled": True, "webhook_url": "https://hooks.slack.com/x"}
+        settings["channels"]["slack"] = {
+            "enabled": True,
+            "webhook_url": "https://hooks.slack.com/x",
+        }
         channels = _route_channels(make_alert(severity="HIGH"), settings)
         assert "webhook" in channels
 
@@ -185,7 +194,9 @@ class TestLambdaHandlerWebhook:
 
     def test_single_target_success_counted(self):
         with (
-            patch("src.handlers.notifier.load_global_settings", return_value=make_settings_webhook()),
+            patch(
+                "src.handlers.notifier.load_global_settings", return_value=make_settings_webhook()
+            ),
             patch("src.handlers.notifier.AwsHandler"),
             self._mock_post(),
         ):
@@ -202,7 +213,9 @@ class TestLambdaHandlerWebhook:
             return 200, "ok"
 
         with (
-            patch("src.handlers.notifier.load_global_settings", return_value=make_settings_webhook()),
+            patch(
+                "src.handlers.notifier.load_global_settings", return_value=make_settings_webhook()
+            ),
             patch("src.handlers.notifier.AwsHandler"),
             patch("src.handlers.notifier._post_json", side_effect=capture),
         ):
@@ -217,10 +230,18 @@ class TestLambdaHandlerWebhook:
             calls.append(extra_headers)
             return 200, "ok"
 
-        targets = [{"name": "opsgenie", "url": "https://api.opsgenie.com/v2/alerts",
-                    "headers": {"Authorization": "GenieKey abc123"}}]
+        targets = [
+            {
+                "name": "opsgenie",
+                "url": "https://api.opsgenie.com/v2/alerts",
+                "headers": {"Authorization": "GenieKey abc123"},
+            }
+        ]
         with (
-            patch("src.handlers.notifier.load_global_settings", return_value=make_settings_webhook(targets=targets)),
+            patch(
+                "src.handlers.notifier.load_global_settings",
+                return_value=make_settings_webhook(targets=targets),
+            ),
             patch("src.handlers.notifier.AwsHandler"),
             patch("src.handlers.notifier._post_json", side_effect=capture),
         ):
@@ -238,7 +259,10 @@ class TestLambdaHandlerWebhook:
 
         targets = [{"name": "hook", "url": "https://example.com/hook", "headers": {}}]
         with (
-            patch("src.handlers.notifier.load_global_settings", return_value=make_settings_webhook(targets=targets)),
+            patch(
+                "src.handlers.notifier.load_global_settings",
+                return_value=make_settings_webhook(targets=targets),
+            ),
             patch("src.handlers.notifier.AwsHandler"),
             patch("src.handlers.notifier._post_json", side_effect=capture),
         ):
@@ -254,7 +278,9 @@ class TestLambdaHandlerWebhook:
             return 200, "ok"
 
         with (
-            patch("src.handlers.notifier.load_global_settings", return_value=make_settings_webhook()),
+            patch(
+                "src.handlers.notifier.load_global_settings", return_value=make_settings_webhook()
+            ),
             patch("src.handlers.notifier.AwsHandler"),
             patch("src.handlers.notifier._post_json", side_effect=capture),
         ):
@@ -265,10 +291,17 @@ class TestLambdaHandlerWebhook:
     def test_multiple_targets_all_succeed(self):
         targets = [
             {"name": "pd", "url": "https://events.pagerduty.com/v2/enqueue", "headers": {}},
-            {"name": "og", "url": "https://api.opsgenie.com/v2/alerts", "headers": {"Authorization": "GenieKey x"}},
+            {
+                "name": "og",
+                "url": "https://api.opsgenie.com/v2/alerts",
+                "headers": {"Authorization": "GenieKey x"},
+            },
         ]
         with (
-            patch("src.handlers.notifier.load_global_settings", return_value=make_settings_webhook(targets=targets)),
+            patch(
+                "src.handlers.notifier.load_global_settings",
+                return_value=make_settings_webhook(targets=targets),
+            ),
             patch("src.handlers.notifier.AwsHandler"),
             self._mock_post(200),
         ):
@@ -291,7 +324,10 @@ class TestLambdaHandlerWebhook:
             {"name": "bad-target", "url": "https://bad.example.com/hook", "headers": {}},
         ]
         with (
-            patch("src.handlers.notifier.load_global_settings", return_value=make_settings_webhook(targets=targets)),
+            patch(
+                "src.handlers.notifier.load_global_settings",
+                return_value=make_settings_webhook(targets=targets),
+            ),
             patch("src.handlers.notifier.AwsHandler"),
             patch("src.handlers.notifier._post_json", side_effect=capture),
         ):
@@ -306,7 +342,10 @@ class TestLambdaHandlerWebhook:
             {"name": "ok", "url": "https://example.com/hook", "headers": {}},
         ]
         with (
-            patch("src.handlers.notifier.load_global_settings", return_value=make_settings_webhook(targets=targets)),
+            patch(
+                "src.handlers.notifier.load_global_settings",
+                return_value=make_settings_webhook(targets=targets),
+            ),
             patch("src.handlers.notifier.AwsHandler"),
             self._mock_post(200),
         ):
@@ -316,7 +355,9 @@ class TestLambdaHandlerWebhook:
 
     def test_http_error_from_target_counted_as_failed(self):
         with (
-            patch("src.handlers.notifier.load_global_settings", return_value=make_settings_webhook()),
+            patch(
+                "src.handlers.notifier.load_global_settings", return_value=make_settings_webhook()
+            ),
             patch("src.handlers.notifier.AwsHandler"),
             self._mock_post(400),
         ):
@@ -327,7 +368,9 @@ class TestLambdaHandlerWebhook:
 
     def test_exception_from_target_counted_as_failed(self):
         with (
-            patch("src.handlers.notifier.load_global_settings", return_value=make_settings_webhook()),
+            patch(
+                "src.handlers.notifier.load_global_settings", return_value=make_settings_webhook()
+            ),
             patch("src.handlers.notifier.AwsHandler"),
             patch("src.handlers.notifier._post_json", side_effect=Exception("timeout")),
         ):
@@ -337,7 +380,10 @@ class TestLambdaHandlerWebhook:
 
     def test_webhook_disabled_does_not_post(self):
         with (
-            patch("src.handlers.notifier.load_global_settings", return_value=make_settings_webhook(enabled=False)),
+            patch(
+                "src.handlers.notifier.load_global_settings",
+                return_value=make_settings_webhook(enabled=False),
+            ),
             patch("src.handlers.notifier.AwsHandler"),
             patch("src.handlers.notifier._post_json") as mock_post,
         ):

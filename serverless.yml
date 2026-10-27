@@ -8,30 +8,20 @@ params:
     alertEmail: ""  # email for security detection alerts; can match alarmEmail
     monthlyBudgetUsd: "50"  # threshold for the AWS Budgets cost alert -- override with --param="monthlyBudgetUsd=<amount>"
     orgId: ""  # legacy central-ingestion compatibility only; new installs deploy one Core per account
-    coreVersion: "1.2.1"  # release-manifest.json; overridden for immutable releases
+    coreVersion: "1.2.2"  # release-manifest.json; overridden for immutable releases
     managementContractVersion: "1.0.0"
+    xrayEnabled: "false"  # opt in to X-Ray traces; CloudWatch observability remains enabled
+    archiveEnabled: "false"  # opt in to DynamoDB Streams -> Firehose -> S3 delivery; TTL remains enabled
+    securityProfile: "standard"  # standard|hardened; protects only resources owned by this stack
 
 package:
   patterns:
-    # Never package a developer workstation's virtualenv or repository-only
-    # files. In particular, a macOS .venv can contain Mach-O native modules
-    # that import as "invalid ELF" in Lambda. Runtime dependencies are built
-    # for Linux by serverless-python-requirements below.
-    - '!.venv/**'
-    - '!venv/**'
-    - '!.ruff_cache/**'
-    - '!**/__pycache__/**'
-    - '!**/*.pyc'
-    - '!tests/**'
-    - '!docs/**'
-    - '!artifacts/**'
-    - '!.github/**'
-    - '!management/**'
-    - '!scripts/**'
-    - '!ci-bootstrap/**'
-    - '!org-forwarding/**'
-    - '!region-forwarding/**'
-    - src/openapi/swagger.json
+    # Start empty and add only runtime source. Serverless's Python dependency
+    # packager injects the locked requirements separately. This is a security
+    # boundary: workstation credentials and future repository files cannot
+    # enter a Lambda merely because somebody forgot to extend a denylist.
+    - '!**'
+    - 'src/**'
 
 provider:
   name: aws
@@ -61,16 +51,17 @@ provider:
   # AwsLambdaInstrumentor's attribute-extraction ran outside any exception
   # handling and threw on this repo's actual event shape, causing api.py to
   # 502 on every request). No app code, no third-party instrumentation
-  # library, no bug surface to inherit -- this sets TracingConfig: Active
-  # on every function and turns on X-Ray tracing on the API Gateway stage.
+  # library, no bug surface to inherit. When xrayEnabled is true (opt-in),
+  # this sets TracingConfig: Active on every function and turns on
+  # X-Ray tracing on the API Gateway stage; false leaves both disabled.
   # The IAM permission this needs is added explicitly per function below
   # rather than relied on to merge automatically, since this repo builds a
   # separate role per function (provider.iam.role.mode: perFunction,
   # below) instead of using the framework's single default role that this
   # setting normally grants the permission to.
   tracing:
-    lambda: true
-    apiGateway: true
+    lambda: ${strToBool(${param:xrayEnabled})}
+    apiGateway: ${strToBool(${param:xrayEnabled})}
 
   # Native per-function IAM roles (v4+) -- replaces the third-party
   # serverless-iam-roles-per-function plugin, which was last published in
@@ -111,6 +102,10 @@ provider:
 
   environment:
     STAGE: "${self:provider.stage}"
+    # The X-Ray SDK also observes this standard switch. Keeping it on the
+    # provider environment makes the deployment parameter apply uniformly to
+    # every handler, including application-level boto3 instrumentation.
+    AWS_XRAY_SDK_ENABLED: "${param:xrayEnabled}"
     OPENCDR_PRODUCT: "OpenCDR Core"
     OPENCDR_CORE_VERSION: "${param:coreVersion}"
     OPENCDR_MANAGEMENT_CONTRACT_VERSION: "${param:managementContractVersion}"
@@ -707,6 +702,7 @@ functions:
       INGESTION_QUEUE_URL: !Ref IngestionQueue
       SERVICE_NAME: "OPENCDR-API"
       LAMBDA_NAME: "${self:service}-${self:provider.stage}-api"
+      OPENCDR_SECURITY_PROFILE: "${param:securityProfile}"
       IR_ACTIONS_TABLE_NAME: "${self:service}-${self:provider.stage}-ir-actions-table"
       IR_ROLLBACK_QUEUE_URL:
         Ref: IrRollbackQueue
@@ -1045,6 +1041,7 @@ functions:
     events:
       - stream:
           type: dynamodb
+          enabled: ${strToBool(${param:archiveEnabled})}
           arn:
             Fn::GetAtt: [alerts, StreamArn]
           batchSize: 100
@@ -1063,6 +1060,7 @@ functions:
       # the same Firehose delivery streams the original tables used.
       - stream:
           type: dynamodb
+          enabled: ${strToBool(${param:archiveEnabled})}
           arn:
             Fn::GetAtt: [SignalsTableV2, StreamArn]
           batchSize: 100
@@ -1076,6 +1074,7 @@ functions:
               type: sqs
       - stream:
           type: dynamodb
+          enabled: ${strToBool(${param:archiveEnabled})}
           arn:
             Fn::GetAtt: [LogsTableV2, StreamArn]
           batchSize: 100
@@ -1091,6 +1090,7 @@ functions:
 
 resources:
   Conditions:
+    HardenedProfile: !Equals ["${param:securityProfile}", "hardened"]
     HasCustomParsers: !Not [!Equals ["${param:customParserArns}", ""]]
     HasAlarmEmail: !Not
       - !Equals
@@ -1116,6 +1116,7 @@ resources:
       DeletionPolicy: Retain
       UpdateReplacePolicy: Retain
       Properties:
+        DeletionProtectionEnabled: ${self:custom.securityProfile.dynamodbDeletionProtection}
         TableName: ${self:service}-${self:provider.stage}-ingestion
         BillingMode: PAY_PER_REQUEST
         AttributeDefinitions:
@@ -1284,7 +1285,10 @@ resources:
     # -------------------------
     alerts:
       Type: AWS::DynamoDB::Table
+      DeletionPolicy: ${self:custom.securityProfile.deletionPolicy}
+      UpdateReplacePolicy: ${self:custom.securityProfile.updateReplacePolicy}
       Properties:
+        DeletionProtectionEnabled: ${self:custom.securityProfile.dynamodbDeletionProtection}
         TableName: ${self:service}-${self:provider.stage}-alerts-table
         BillingMode: PAY_PER_REQUEST
         Tags:
@@ -1313,7 +1317,10 @@ resources:
     # -------------------------
     DeliveryStateTable:
       Type: AWS::DynamoDB::Table
+      DeletionPolicy: ${self:custom.securityProfile.deletionPolicy}
+      UpdateReplacePolicy: ${self:custom.securityProfile.updateReplacePolicy}
       Properties:
+        DeletionProtectionEnabled: ${self:custom.securityProfile.dynamodbDeletionProtection}
         TableName: ${self:service}-${self:provider.stage}-delivery-state-table
         BillingMode: PAY_PER_REQUEST
         AttributeDefinitions:
@@ -1333,7 +1340,10 @@ resources:
 
     OutboxTable:
       Type: AWS::DynamoDB::Table
+      DeletionPolicy: ${self:custom.securityProfile.deletionPolicy}
+      UpdateReplacePolicy: ${self:custom.securityProfile.updateReplacePolicy}
       Properties:
+        DeletionProtectionEnabled: ${self:custom.securityProfile.dynamodbDeletionProtection}
         TableName: ${self:service}-${self:provider.stage}-outbox-table
         BillingMode: PAY_PER_REQUEST
         Tags:
@@ -1394,7 +1404,10 @@ resources:
     # this whole design was built to avoid.
     SignalsTableV2:
       Type: AWS::DynamoDB::Table
+      DeletionPolicy: ${self:custom.securityProfile.deletionPolicy}
+      UpdateReplacePolicy: ${self:custom.securityProfile.updateReplacePolicy}
       Properties:
+        DeletionProtectionEnabled: ${self:custom.securityProfile.dynamodbDeletionProtection}
         TableName: ${self:service}-${self:provider.stage}-signals-table-v2
         BillingMode: PAY_PER_REQUEST
         Tags:
@@ -1458,7 +1471,10 @@ resources:
 
     LogsTableV2:
       Type: AWS::DynamoDB::Table
+      DeletionPolicy: ${self:custom.securityProfile.deletionPolicy}
+      UpdateReplacePolicy: ${self:custom.securityProfile.updateReplacePolicy}
       Properties:
+        DeletionProtectionEnabled: ${self:custom.securityProfile.dynamodbDeletionProtection}
         TableName: ${self:service}-${self:provider.stage}-logs-table-v2
         BillingMode: PAY_PER_REQUEST
         Tags:
@@ -1506,8 +1522,8 @@ resources:
     # -------------------------
     # ARCHIVAL: signals/alerts/logs -> S3 (Parquet), Hive-partitioned
     # -------------------------
-    # Why: the tables above now TTL at 90 days -- safe specifically
-    # because every signal/alert/log is streamed here first via
+    # Why: the tables above now TTL at 90 days. With archiveEnabled=true,
+    # every signal/alert/log is streamed here first via
     # DynamoDB Streams -> the archiver Lambda (functions.archiver) ->
     # Kinesis Data Firehose, converted to Parquet, and written under
     # account=<id>/year=<Y>/month=<M>/day=<D>/hour=<H>/ prefixes -- the
@@ -1518,8 +1534,16 @@ resources:
     # schemas below are intentionally flat (a handful of useful scalar
     # columns + one raw_item JSON-string column) rather than modeling
     # the nested actor/network/api/resources shape as Parquet structs.
+    # The infrastructure deliberately remains managed when archival is
+    # disabled; archiveEnabled controls the three event-source mappings.
+    # This makes true -> false -> true transitions safe and preserves existing
+    # objects without CloudFormation conditional-resource dependency traps.
+    # The idle path receives no records. TTL is independent; disabling archival
+    # means expired records are not recoverable here. See docs/data-archival.md.
     ArchiveBucket:
       Type: AWS::S3::Bucket
+      DeletionPolicy: ${self:custom.securityProfile.deletionPolicy}
+      UpdateReplacePolicy: ${self:custom.securityProfile.updateReplacePolicy}
       Properties:
         # !Sub, not a bare string: Serverless Framework resolves
         # ${self:...} at synth time (text pre-processing across the
@@ -1543,10 +1567,31 @@ resources:
           BlockPublicPolicy: true
           IgnorePublicAcls: true
           RestrictPublicBuckets: true
+        OwnershipControls:
+          Rules:
+            - ObjectOwnership: BucketOwnerEnforced
         BucketEncryption:
           ServerSideEncryptionConfiguration:
             - ServerSideEncryptionByDefault:
                 SSEAlgorithm: AES256
+
+    ArchiveBucketPolicy:
+      Type: AWS::S3::BucketPolicy
+      Properties:
+        Bucket: !Ref ArchiveBucket
+        PolicyDocument:
+          Version: "2012-10-17"
+          Statement:
+            - Sid: DenyInsecureTransport
+              Effect: Deny
+              Principal: "*"
+              Action: "s3:*"
+              Resource:
+                - !GetAtt ArchiveBucket.Arn
+                - !Sub "${ArchiveBucket.Arn}/*"
+              Condition:
+                Bool:
+                  aws:SecureTransport: false
 
     ArchiveGlueDatabase:
       Type: AWS::Glue::Database
@@ -1861,7 +1906,10 @@ resources:
     # -------------------------
     detectionRules:
       Type: AWS::DynamoDB::Table
+      DeletionPolicy: ${self:custom.securityProfile.deletionPolicy}
+      UpdateReplacePolicy: ${self:custom.securityProfile.updateReplacePolicy}
       Properties:
+        DeletionProtectionEnabled: ${self:custom.securityProfile.dynamodbDeletionProtection}
         TableName: ${self:service}-${self:provider.stage}-detection-rules-table
         BillingMode: PAY_PER_REQUEST
         Tags:
@@ -1885,7 +1933,10 @@ resources:
     # -------------------------
     globalSettingsTable:
       Type: AWS::DynamoDB::Table
+      DeletionPolicy: ${self:custom.securityProfile.deletionPolicy}
+      UpdateReplacePolicy: ${self:custom.securityProfile.updateReplacePolicy}
       Properties:
+        DeletionProtectionEnabled: ${self:custom.securityProfile.dynamodbDeletionProtection}
         TableName: ${self:service}-${self:provider.stage}-settings-table
         BillingMode: PAY_PER_REQUEST
         Tags:
@@ -1905,7 +1956,10 @@ resources:
     # -------------------------
     irAccountRolesTable:
       Type: AWS::DynamoDB::Table
+      DeletionPolicy: ${self:custom.securityProfile.deletionPolicy}
+      UpdateReplacePolicy: ${self:custom.securityProfile.updateReplacePolicy}
       Properties:
+        DeletionProtectionEnabled: ${self:custom.securityProfile.dynamodbDeletionProtection}
         TableName: ${self:service}-${self:provider.stage}-ir-account-roles-table
         BillingMode: PAY_PER_REQUEST
         Tags:
@@ -1929,7 +1983,10 @@ resources:
     # needed a prior-state capture that itself failed.
     irActionsTable:
       Type: AWS::DynamoDB::Table
+      DeletionPolicy: ${self:custom.securityProfile.deletionPolicy}
+      UpdateReplacePolicy: ${self:custom.securityProfile.updateReplacePolicy}
       Properties:
+        DeletionProtectionEnabled: ${self:custom.securityProfile.dynamodbDeletionProtection}
         TableName: ${self:service}-${self:provider.stage}-ir-actions-table
         BillingMode: PAY_PER_REQUEST
         Tags:
@@ -2142,6 +2199,13 @@ resources:
       Properties:
         QueueName: ${self:service}-${self:provider.stage}-notifications-dlq
         MessageRetentionPeriod: 1209600  # 14 days
+        SqsManagedSseEnabled: true
+        RedriveAllowPolicy: !If
+          - HardenedProfile
+          - redrivePermission: byQueue
+            sourceQueueArns:
+              - !Sub "arn:${AWS::Partition}:sqs:${AWS::Region}:${AWS::AccountId}:${self:service}-${self:provider.stage}-notifications-queue"
+          - !Ref AWS::NoValue
         Tags:
           - Key: Project
             Value: opencdr
@@ -2152,6 +2216,7 @@ resources:
       Type: AWS::SQS::Queue
       Properties:
         QueueName: ${self:service}-${self:provider.stage}-notifications-queue
+        SqsManagedSseEnabled: true
         # Six times the function timeout; also exceeds the 120s receipt lease.
         VisibilityTimeout: 180
         RedrivePolicy:
@@ -2172,6 +2237,13 @@ resources:
       Properties:
         QueueName: ${self:service}-${self:provider.stage}-responses-dlq
         MessageRetentionPeriod: 1209600  # 14 days
+        SqsManagedSseEnabled: true
+        RedriveAllowPolicy: !If
+          - HardenedProfile
+          - redrivePermission: byQueue
+            sourceQueueArns:
+              - !Sub "arn:${AWS::Partition}:sqs:${AWS::Region}:${AWS::AccountId}:${self:service}-${self:provider.stage}-responses-queue"
+          - !Ref AWS::NoValue
         Tags:
           - Key: Project
             Value: opencdr
@@ -2182,6 +2254,7 @@ resources:
       Type: AWS::SQS::Queue
       Properties:
         QueueName: ${self:service}-${self:provider.stage}-responses-queue
+        SqsManagedSseEnabled: true
         RedrivePolicy:
           deadLetterTargetArn:
             Fn::GetAtt: [ResponsesQueueDLQ, Arn]
@@ -2203,6 +2276,13 @@ resources:
       Properties:
         QueueName: ${self:service}-${self:provider.stage}-ir-rollback-dlq
         MessageRetentionPeriod: 1209600  # 14 days
+        SqsManagedSseEnabled: true
+        RedriveAllowPolicy: !If
+          - HardenedProfile
+          - redrivePermission: byQueue
+            sourceQueueArns:
+              - !Sub "arn:${AWS::Partition}:sqs:${AWS::Region}:${AWS::AccountId}:${self:service}-${self:provider.stage}-ir-rollback-queue"
+          - !Ref AWS::NoValue
         Tags:
           - Key: Project
             Value: opencdr
@@ -2213,6 +2293,7 @@ resources:
       Type: AWS::SQS::Queue
       Properties:
         QueueName: ${self:service}-${self:provider.stage}-ir-rollback-queue
+        SqsManagedSseEnabled: true
         RedrivePolicy:
           deadLetterTargetArn:
             Fn::GetAtt: [IrRollbackQueueDLQ, Arn]
@@ -2235,6 +2316,13 @@ resources:
       Properties:
         QueueName: ${self:service}-${self:provider.stage}-signals-write-dlq
         MessageRetentionPeriod: 1209600  # 14 days
+        SqsManagedSseEnabled: true
+        RedriveAllowPolicy: !If
+          - HardenedProfile
+          - redrivePermission: byQueue
+            sourceQueueArns:
+              - !Sub "arn:${AWS::Partition}:sqs:${AWS::Region}:${AWS::AccountId}:${self:service}-${self:provider.stage}-signals-write-queue"
+          - !Ref AWS::NoValue
         Tags:
           - Key: Project
             Value: opencdr
@@ -2245,6 +2333,7 @@ resources:
       Type: AWS::SQS::Queue
       Properties:
         QueueName: ${self:service}-${self:provider.stage}-signals-write-queue
+        SqsManagedSseEnabled: true
         RedrivePolicy:
           deadLetterTargetArn:
             Fn::GetAtt: [SignalsWriteQueueDLQ, Arn]
@@ -2263,6 +2352,7 @@ resources:
       Properties:
         QueueName: ${self:service}-${self:provider.stage}-stream-failures
         MessageRetentionPeriod: 1209600  # 14 days
+        SqsManagedSseEnabled: true
         Tags:
           - Key: Project
             Value: opencdr
@@ -2496,6 +2586,41 @@ resources:
         AlarmActions:
           - !Ref AlarmsSnsTopic
 
+    AlarmRollbackHandlerErrors:
+      Type: AWS::CloudWatch::Alarm
+      Properties:
+        AlarmName: ${self:service}-${self:provider.stage}-rollback-handler-errors
+        AlarmDescription: "rollbackHandler Lambda error count > 0"
+        Namespace: AWS/Lambda
+        MetricName: Errors
+        Dimensions:
+          - Name: FunctionName
+            Value: !Ref RollbackHandlerLambdaFunction
+        Statistic: Sum
+        Period: 60
+        EvaluationPeriods: 1
+        Threshold: 0
+        ComparisonOperator: GreaterThanThreshold
+        TreatMissingData: notBreaching
+        AlarmActions:
+          - !Ref AlarmsSnsTopic
+
+    AlarmResponderRollbackFailures:
+      Type: AWS::CloudWatch::Alarm
+      Properties:
+        AlarmName: ${self:service}-${self:provider.stage}-rollback-failures
+        AlarmDescription: "IR rollback failures > 0"
+        Namespace: OpenCDR
+        MetricName: ResponderRollbackFailures
+        Statistic: Sum
+        Period: 60
+        EvaluationPeriods: 1
+        Threshold: 0
+        ComparisonOperator: GreaterThanThreshold
+        TreatMissingData: notBreaching
+        AlarmActions:
+          - !Ref AlarmsSnsTopic
+
     AlarmApiErrors:
       Type: AWS::CloudWatch::Alarm
       Properties:
@@ -2609,6 +2734,25 @@ resources:
         Dimensions:
           - Name: QueueName
             Value: !GetAtt ResponsesQueueDLQ.QueueName
+        Statistic: Sum
+        Period: 60
+        EvaluationPeriods: 1
+        Threshold: 0
+        ComparisonOperator: GreaterThanThreshold
+        TreatMissingData: notBreaching
+        AlarmActions:
+          - !Ref AlarmsSnsTopic
+
+    AlarmIrRollbackDLQDepth:
+      Type: AWS::CloudWatch::Alarm
+      Properties:
+        AlarmName: ${self:service}-${self:provider.stage}-ir-rollback-dlq-depth
+        AlarmDescription: "Messages visible in IR rollback DLQ > 0"
+        Namespace: AWS/SQS
+        MetricName: ApproximateNumberOfMessagesVisible
+        Dimensions:
+          - Name: QueueName
+            Value: !GetAtt IrRollbackQueueDLQ.QueueName
         Statistic: Sum
         Period: 60
         EvaluationPeriods: 1
@@ -2833,7 +2977,8 @@ resources:
                       [{"expression": "SEARCH('{OpenCDR,rule_id} MetricName=\"CorrelationMatches\"', 'Sum', 60)", "label": "CorrelationMatches", "id": "e2"}],
                       [{"expression": "SEARCH('{OpenCDR,destination} MetricName=\"PublishSuccess\"', 'Sum', 60)", "label": "PublishSuccess", "id": "e3"}],
                       [{"expression": "SEARCH('{OpenCDR,destination} MetricName=\"PublishFailure\"', 'Sum', 60)", "label": "PublishFailure", "id": "e4"}],
-                      [{"expression": "SEARCH('{OpenCDR,response_module,result} MetricName=\"ResponderActionsExecuted\"', 'Sum', 60)", "label": "ResponderActionsExecuted", "id": "e5"}]
+                      [{"expression": "SEARCH('{OpenCDR,response_module,result} MetricName=\"ResponderActionsExecuted\"', 'Sum', 60)", "label": "ResponderActionsExecuted", "id": "e5"}],
+                      [{"expression": "SEARCH('{OpenCDR} MetricName=\"ResponderRollbackFailures\"', 'Sum', 60)", "label": "ResponderRollbackFailures", "id": "e6"}]
                     ]
                   }
                 }
@@ -2957,6 +3102,15 @@ resources:
     ManagementContractVersion:
       Description: "Version of the fleet-facing management contract"
       Value: "${param:managementContractVersion}"
+    CoreSecurityProfile:
+      Description: "OpenCDR-owned resource protection profile (standard or hardened)"
+      Value: "${param:securityProfile}"
+    ArchiveEnabled:
+      Description: "Whether DynamoDB Streams feed the Firehose-to-S3 archive"
+      Value: "${param:archiveEnabled}"
+    XRayEnabled:
+      Description: "Whether Lambda and API Gateway active X-Ray tracing is enabled"
+      Value: "${param:xrayEnabled}"
     CoreAccountId:
       Description: "AWS account protected by this Core deployment"
       Value: !Ref AWS::AccountId
@@ -2987,10 +3141,11 @@ resources:
       Value: ${self:service}-${self:provider.stage}-account-forwarder-role
 
 
-plugins:
-  - serverless-python-requirements
-
 custom:
+  # Nested lookup intentionally fails configuration resolution for any value
+  # other than standard|hardened, before CloudFormation or AWS is contacted.
+  securityProfiles: ${file(./deployment/security-profiles.yml)}
+  securityProfile: ${self:custom.securityProfiles.${param:securityProfile}}
   pythonRequirements:
     # Native wheels must match Lambda's Linux/Python 3.12 runtime even when
     # packaging from an ARM macOS workstation.

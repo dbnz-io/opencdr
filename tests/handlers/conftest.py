@@ -1,4 +1,5 @@
 """Shared fixtures for tests/handlers/."""
+
 from __future__ import annotations
 
 import pytest

@@ -5,6 +5,7 @@ integration secrets (Slack/Discord webhook URLs, Jira API tokens, custom
 webhook headers), while POST/PUT continue to round-trip the caller's own
 write unredacted.
 """
+
 from __future__ import annotations
 
 import json
@@ -120,12 +121,15 @@ class TestGetSettingsEndpointRedaction:
     def test_get_settings_by_id_redacts_secrets(self):
         stored = {
             "setting_id": "team-a",
-            "channels": {"discord": {"enabled": True, "webhook_url": "https://discord.com/api/webhooks/y"}},
+            "channels": {
+                "discord": {"enabled": True, "webhook_url": "https://discord.com/api/webhooks/y"}
+            },
         }
         with patch.object(api, "settings_table") as mock_table:
             mock_table.get_item.return_value = {"Item": stored}
             resp = api.lambda_handler(
-                make_event("GET", "/settings/team-a", path_params={"setting_id": "team-a"}), make_context()
+                make_event("GET", "/settings/team-a", path_params={"setting_id": "team-a"}),
+                make_context(),
             )
         assert resp["statusCode"] == 200
         body = body_of(resp)
@@ -140,8 +144,13 @@ class TestWriteSettingsEndpointsExternalizeSecretsToSsm:
     design this replaces."""
 
     def test_post_settings_externalizes_secret_to_ssm(self):
-        payload = {"channels": {"slack": {"enabled": True, "webhook_url": "https://hooks.slack.com/new"}}}
-        with patch.object(api, "settings_table") as mock_table, patch.object(api, "ssm") as mock_ssm:
+        payload = {
+            "channels": {"slack": {"enabled": True, "webhook_url": "https://hooks.slack.com/new"}}
+        }
+        with (
+            patch.object(api, "settings_table") as mock_table,
+            patch.object(api, "ssm") as mock_ssm,
+        ):
             resp = api.lambda_handler(
                 make_event("POST", "/settings", body=json.dumps(payload)), make_context()
             )
@@ -162,10 +171,13 @@ class TestWriteSettingsEndpointsExternalizeSecretsToSsm:
 
     def test_put_settings_externalizes_secret_to_ssm(self):
         payload = {"channels": {"jira": {"enabled": True, "api_token": "brand-new-token"}}}
-        with patch.object(api, "settings_table") as mock_table, patch.object(api, "ssm") as mock_ssm:
+        with patch.object(api, "settings_table"), patch.object(api, "ssm") as mock_ssm:
             resp = api.lambda_handler(
                 make_event(
-                    "PUT", "/settings/team-a", path_params={"setting_id": "team-a"}, body=json.dumps(payload)
+                    "PUT",
+                    "/settings/team-a",
+                    path_params={"setting_id": "team-a"},
+                    body=json.dumps(payload),
                 ),
                 make_context(),
             )
@@ -187,7 +199,10 @@ class TestWriteSettingsEndpointsExternalizeSecretsToSsm:
         with patch.object(api, "settings_table"), patch.object(api, "ssm") as mock_ssm:
             resp = api.lambda_handler(
                 make_event(
-                    "PUT", "/settings/team-a", path_params={"setting_id": "team-a"}, body=json.dumps(payload)
+                    "PUT",
+                    "/settings/team-a",
+                    path_params={"setting_id": "team-a"},
+                    body=json.dumps(payload),
                 ),
                 make_context(),
             )
@@ -215,13 +230,22 @@ class TestRedactedRoundTripDoesNotCorruptSecrets:
 
     def test_redacted_sentinel_preserves_existing_ssm_ref(self):
         existing_ref = "ssm:/opencdr-dev/settings/team-a/slack/webhook_url"
-        stored = {"setting_id": "team-a", "channels": {"slack": {"enabled": True, "webhook_url": existing_ref}}}
+        stored = {
+            "setting_id": "team-a",
+            "channels": {"slack": {"enabled": True, "webhook_url": existing_ref}},
+        }
         payload = {"channels": {"slack": {"enabled": True, "webhook_url": api._REDACTED}}}
-        with patch.object(api, "settings_table") as mock_table, patch.object(api, "ssm") as mock_ssm:
+        with (
+            patch.object(api, "settings_table") as mock_table,
+            patch.object(api, "ssm") as mock_ssm,
+        ):
             mock_table.get_item.return_value = {"Item": stored}
             resp = api.lambda_handler(
                 make_event(
-                    "PUT", "/settings/team-a", path_params={"setting_id": "team-a"}, body=json.dumps(payload)
+                    "PUT",
+                    "/settings/team-a",
+                    path_params={"setting_id": "team-a"},
+                    body=json.dumps(payload),
                 ),
                 make_context(),
             )
@@ -237,7 +261,10 @@ class TestRedactedRoundTripDoesNotCorruptSecrets:
             "setting_id": "team-a",
             "channels": {
                 "slack": {"enabled": True, "webhook_url": slack_ref},
-                "jira": {"enabled": True, "api_token": "ssm:/opencdr-dev/settings/team-a/jira/api_token"},
+                "jira": {
+                    "enabled": True,
+                    "api_token": "ssm:/opencdr-dev/settings/team-a/jira/api_token",
+                },
             },
         }
         payload = {
@@ -246,11 +273,17 @@ class TestRedactedRoundTripDoesNotCorruptSecrets:
                 "jira": {"enabled": True, "api_token": "brand-new-token"},
             }
         }
-        with patch.object(api, "settings_table") as mock_table, patch.object(api, "ssm") as mock_ssm:
+        with (
+            patch.object(api, "settings_table") as mock_table,
+            patch.object(api, "ssm") as mock_ssm,
+        ):
             mock_table.get_item.return_value = {"Item": stored}
             resp = api.lambda_handler(
                 make_event(
-                    "PUT", "/settings/team-a", path_params={"setting_id": "team-a"}, body=json.dumps(payload)
+                    "PUT",
+                    "/settings/team-a",
+                    path_params={"setting_id": "team-a"},
+                    body=json.dumps(payload),
                 ),
                 make_context(),
             )
@@ -263,7 +296,10 @@ class TestRedactedRoundTripDoesNotCorruptSecrets:
 
     def test_redacted_sentinel_with_no_existing_document_clears_to_empty(self):
         payload = {"channels": {"slack": {"enabled": True, "webhook_url": api._REDACTED}}}
-        with patch.object(api, "settings_table") as mock_table, patch.object(api, "ssm") as mock_ssm:
+        with (
+            patch.object(api, "settings_table") as mock_table,
+            patch.object(api, "ssm") as mock_ssm,
+        ):
             mock_table.get_item.return_value = {}
             resp = api.lambda_handler(
                 make_event("POST", "/settings", body=json.dumps(payload)), make_context()
@@ -273,7 +309,9 @@ class TestRedactedRoundTripDoesNotCorruptSecrets:
         mock_ssm.put_parameter.assert_not_called()
 
     def test_no_redacted_sentinel_skips_the_extra_get_item(self):
-        payload = {"channels": {"slack": {"enabled": True, "webhook_url": "https://hooks.slack.com/new"}}}
+        payload = {
+            "channels": {"slack": {"enabled": True, "webhook_url": "https://hooks.slack.com/new"}}
+        }
         with patch.object(api, "settings_table") as mock_table, patch.object(api, "ssm"):
             resp = api.lambda_handler(
                 make_event("POST", "/settings", body=json.dumps(payload)), make_context()
@@ -291,10 +329,14 @@ class TestDeleteSettingsCleansUpSsmRefs:
                 "jira": {"api_token": "ssm:/opencdr-dev/settings/team-a/jira/api_token"},
             },
         }
-        with patch.object(api, "settings_table") as mock_table, patch.object(api, "ssm") as mock_ssm:
+        with (
+            patch.object(api, "settings_table") as mock_table,
+            patch.object(api, "ssm") as mock_ssm,
+        ):
             mock_table.get_item.return_value = {"Item": stored}
             resp = api.lambda_handler(
-                make_event("DELETE", "/settings/team-a", path_params={"setting_id": "team-a"}), make_context()
+                make_event("DELETE", "/settings/team-a", path_params={"setting_id": "team-a"}),
+                make_context(),
             )
         assert resp["statusCode"] == 200
         mock_ssm.delete_parameters.assert_called_once_with(
@@ -306,10 +348,14 @@ class TestDeleteSettingsCleansUpSsmRefs:
 
     def test_delete_with_no_secrets_skips_ssm_call(self):
         stored = {"setting_id": "team-a", "channels": {"email": {"enabled": True}}}
-        with patch.object(api, "settings_table") as mock_table, patch.object(api, "ssm") as mock_ssm:
+        with (
+            patch.object(api, "settings_table") as mock_table,
+            patch.object(api, "ssm") as mock_ssm,
+        ):
             mock_table.get_item.return_value = {"Item": stored}
             resp = api.lambda_handler(
-                make_event("DELETE", "/settings/team-a", path_params={"setting_id": "team-a"}), make_context()
+                make_event("DELETE", "/settings/team-a", path_params={"setting_id": "team-a"}),
+                make_context(),
             )
         assert resp["statusCode"] == 200
         mock_ssm.delete_parameters.assert_not_called()
@@ -317,13 +363,19 @@ class TestDeleteSettingsCleansUpSsmRefs:
     def test_delete_swallows_ssm_cleanup_failure(self, capsys):
         stored = {
             "setting_id": "team-a",
-            "channels": {"slack": {"webhook_url": "ssm:/opencdr-dev/settings/team-a/slack/webhook_url"}},
+            "channels": {
+                "slack": {"webhook_url": "ssm:/opencdr-dev/settings/team-a/slack/webhook_url"}
+            },
         }
-        with patch.object(api, "settings_table") as mock_table, patch.object(api, "ssm") as mock_ssm:
+        with (
+            patch.object(api, "settings_table") as mock_table,
+            patch.object(api, "ssm") as mock_ssm,
+        ):
             mock_table.get_item.return_value = {"Item": stored}
             mock_ssm.delete_parameters.side_effect = RuntimeError("SSM unavailable")
             resp = api.lambda_handler(
-                make_event("DELETE", "/settings/team-a", path_params={"setting_id": "team-a"}), make_context()
+                make_event("DELETE", "/settings/team-a", path_params={"setting_id": "team-a"}),
+                make_context(),
             )
         assert resp["statusCode"] == 200
         # Swallowed (the DELETE itself still succeeds -- the DynamoDB row is

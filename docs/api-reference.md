@@ -8,6 +8,29 @@
 
 Every endpoint requires an `x-api-key` header. Keys are created automatically by API Gateway on deploy and available in the deploy output, or in SSM — along with the base URL itself, handy for pointing Postman, `curl`, `scripts/opencdr.py`, or the MCP server at a deployed stage directly (see [Deployment](deployment.md)).
 
+The named deployment manager can call every route using the correct deployment's
+SSM URL and key without persisting another credential copy:
+
+```bash
+opencdr-deploy --deployment customer-prod \
+  api request GET /help
+
+opencdr-deploy --deployment customer-prod \
+  api request POST /rules/validate --file candidate.json
+```
+
+`request` accepts `GET`, `POST`, `PUT`, and `DELETE`, repeated
+`--query key=value` arguments, and JSON from `--file`, stdin (`--file -`), or
+`--data`. It rejects absolute URLs so the selected deployment's key cannot be
+redirected to another host.
+
+The Core checkout's own CLI exposes the same generic request shape when direct
+environment-based configuration is more appropriate:
+
+```bash
+python3 scripts/opencdr.py request GET /help
+```
+
 ### API key scopes
 
 Each key grants one or more of five scopes: **`read`** (every `GET` route), **`rules`** (mutating `/rules`), **`settings`** (mutating `/settings`), **`ir_roles`** (mutating `/ir-roles`), **`ir_actions`** (`POST /ir-actions/{id}/rollback`). `/status` and `/help` need no scope. `ir_roles`/`ir_actions` use an underscore, not a dash, deliberately — see the note below. A key's scopes come from its **name** in `serverless.yml`'s `apiGateway.apiKeys` block, dash-suffixed after the base `${self:service}-${self:provider.stage}-api-key`:

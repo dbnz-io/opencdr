@@ -601,8 +601,13 @@ class AwsHandler:
         return outbox_id
 
     def put_alert_with_outbox(
-        self, *, alerts_table: str, outbox_table: str, alert_item: dict,
-        payload: dict, destinations: list[str],
+        self,
+        *,
+        alerts_table: str,
+        outbox_table: str,
+        alert_item: dict,
+        payload: dict,
+        destinations: list[str],
     ) -> bool:
         """Commit the alert and its delivery intent together, or neither.
 
@@ -615,30 +620,42 @@ class AwsHandler:
         now = datetime.now(UTC).isoformat()
         outbox = {
             "outbox_id": "alert:" + str(alert["alert_key"]),
-            "timestamp": now, "updated_at": now, "status": "PENDING",
+            "timestamp": now,
+            "updated_at": now,
+            "status": "PENDING",
             "payload": json.dumps(payload, default=json_default),
-            "destinations": json.dumps(destinations), "attempts": 0,
+            "destinations": json.dumps(destinations),
+            "attempts": 0,
             "expires_at": ttl_expires_at(),
         }
         try:
-            self._ddb.transact_write_items(TransactItems=[
-                {"Put": {
-                    "TableName": alerts_table,
-                    "Item": {k: serializer.serialize(v) for k, v in alert.items()},
-                    "ConditionExpression": "attribute_not_exists(alert_key)",
-                }},
-                {"Put": {
-                    "TableName": outbox_table,
-                    "Item": {k: serializer.serialize(v) for k, v in outbox.items()},
-                    "ConditionExpression": "attribute_not_exists(outbox_id)",
-                }},
-            ])
+            self._ddb.transact_write_items(
+                TransactItems=[
+                    {
+                        "Put": {
+                            "TableName": alerts_table,
+                            "Item": {k: serializer.serialize(v) for k, v in alert.items()},
+                            "ConditionExpression": "attribute_not_exists(alert_key)",
+                        }
+                    },
+                    {
+                        "Put": {
+                            "TableName": outbox_table,
+                            "Item": {k: serializer.serialize(v) for k, v in outbox.items()},
+                            "ConditionExpression": "attribute_not_exists(outbox_id)",
+                        }
+                    },
+                ]
+            )
             return True
         except ClientError as exc:
             reasons = exc.response.get("CancellationReasons", [])
-            if (_err_code(exc) == "TransactionCanceledException" and reasons
-                    and any(r.get("Code") == "ConditionalCheckFailed" for r in reasons)
-                    and all(r.get("Code") in ("None", "ConditionalCheckFailed") for r in reasons)):
+            if (
+                _err_code(exc) == "TransactionCanceledException"
+                and reasons
+                and any(r.get("Code") == "ConditionalCheckFailed" for r in reasons)
+                and all(r.get("Code") in ("None", "ConditionalCheckFailed") for r in reasons)
+            ):
                 return False
             raise
 

@@ -1,4 +1,5 @@
 """Tests for `opencdr.py settings get` / `settings delete` (cmd_settings_get, cmd_settings_delete)."""
+
 from __future__ import annotations
 
 import sys
@@ -37,7 +38,9 @@ class TestSettingsGet:
         assert path == "/settings/custom"
 
     def test_prints_settings_json(self, capsys):
-        _run(opencdr.cmd_settings_get, api_response=(200, {"channels": {"slack": {"enabled": True}}}))
+        _run(
+            opencdr.cmd_settings_get, api_response=(200, {"channels": {"slack": {"enabled": True}}})
+        )
         out = capsys.readouterr().out
         assert "slack" in out
         assert "enabled" in out
@@ -61,7 +64,9 @@ class TestSettingsDelete:
         assert path == "/settings/global"
 
     def test_uses_custom_setting_id(self):
-        mock_request = _run(opencdr.cmd_settings_delete, setting_id="custom", api_response=(200, {"ok": True}))
+        mock_request = _run(
+            opencdr.cmd_settings_delete, setting_id="custom", api_response=(200, {"ok": True})
+        )
         path = mock_request.call_args.args[1]
         assert path == "/settings/custom"
 

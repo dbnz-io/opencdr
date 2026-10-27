@@ -385,9 +385,11 @@ Resources:
                   - s3:PutBucketTagging
                   - s3:PutEncryptionConfiguration
                   - s3:PutBucketPublicAccessBlock
+                  - s3:PutBucketOwnershipControls
                   - s3:GetBucketPolicy
                   - s3:GetEncryptionConfiguration
                   - s3:GetBucketPublicAccessBlock
+                  - s3:GetBucketOwnershipControls
                 Resource:
                   - !Sub "arn:aws:s3:::${ServiceName}-*-archive-*"
 

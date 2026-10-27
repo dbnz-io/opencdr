@@ -1,0 +1,14 @@
+# Resource-protection profiles for resources owned by the OpenCDR stack.
+#
+# These deliberately do not configure customer-owned account controls such as
+# API exposure/authentication, backups, GuardDuty, Object Lock, customer KMS
+# keys, WAF, VPC endpoints, SCPs, or permission boundaries.
+standard:
+  dynamodbDeletionProtection: false
+  deletionPolicy: Delete
+  updateReplacePolicy: Delete
+
+hardened:
+  dynamodbDeletionProtection: true
+  deletionPolicy: Retain
+  updateReplacePolicy: Retain
