@@ -3,7 +3,7 @@
 
 pytest>=8.0.0
 pytest-cov>=5.0.0
-moto[apigateway,dynamodb,sqs,sns,ssm]>=5.1,<6
+moto[apigateway,dynamodb,sqs,sns,ssm]>=5.2.5,<6
 PyYAML>=6.0,<7
 jsonschema>=4.23,<5
 pip-audit>=2.10,<3
